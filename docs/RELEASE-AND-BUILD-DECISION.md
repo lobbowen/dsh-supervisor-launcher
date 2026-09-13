@@ -1,5 +1,9 @@
 # 发布与构建决策（壳仓视角）
 
+> **流程以 `RELEASE-STANDARD.md` 为准。**
+> 本文件只讲**决策背景与理由**，不再重复流程细节。
+
+
 > 本文是**壳仓**侧的发布规范。**跨仓时序与契约**的权威定义在内核仓
 > `release/README.md` §0（两仓构建决策）与 §0.2（跨仓发布时序）—— 本文与之保持一致，冲突时以内核仓为准。
 > 最近更新：2026-09-13。
@@ -47,7 +51,7 @@ git add -A && git commit -m "release: v<ver>" && git tag v<ver>
 git push origin main && git push origin v<ver>
 ```
 
-→ tag 触发 `launcher-build.yml`：**四平台完整构建**
+→ tag 触发 `.github/workflows/build.yml`：**四平台完整构建**
 （`ubuntu-22.04` / `windows-latest` / `macos-latest` / `macos-15-intel`）
 → Tauri bundle + 壳 npm 包 + `shell-manifest.json` + 验签
 → `publish` job **仅 tag 触发**（挂 GitHub Release + `npm publish`）。

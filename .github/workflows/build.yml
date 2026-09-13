@@ -49,6 +49,11 @@ jobs:
         run: |
           ver=$(node -p "require('./src-tauri/tauri.conf.json').version")
           echo "ver=$ver" >> "$GITHUB_OUTPUT"
+      # 2026-09-13 补：此前 scripts/verify-shell-versions.js **从未被 CI 调用** ——
+      #   版本三处互锁（Cargo.toml / tauri.conf.json / Cargo.lock）实际无人校验。
+      #   由 docs/RELEASE-STANDARD.md 规定，并由 release_spec_consistency_test.rs 的 R-6 强制。
+      - name: 版本三处互锁校验（Cargo.toml = tauri.conf.json = Cargo.lock）
+        run: node scripts/verify-shell-versions.js
 
   build:
     needs: version
