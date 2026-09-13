@@ -94,3 +94,63 @@ git push origin main && git push origin v<ver>
 > Linux **必须**用 ubuntu-22.04 基座：在 24.04（glibc 2.39）构建的产物**无法**在
 > 22.04 / Debian 12 运行（Rust std 对 `pidfd_spawnp`/`pidfd_getpid` 的弱引用
 > 在 2.39 主机会被解析成硬性 `verneed`）。
+
+---
+
+## 附：把 CI 设为**合并门禁**（required status checks）
+
+### 现状（2026-09-13）
+
+| 项 | 状态 |
+|---|---|
+| `pull_request` 触发器 | **已加**（本次）：此前 PR **完全不跑 CI**，若直接设 required 会让 PR 永远等不到状态 |
+| 分支保护 | **未设**（需仓库 **admin** 权限；自动化令牌属另一账号，无该仓 admin -> `Resource not accessible by personal access token`）|
+
+### 该设什么（version + 4 平台，共 5 个语境）
+
+`build` 是**无条件矩阵**（4 平台每次必跑），故可作为 required；`publish` 只在 tag 时跑，**不可**设。
+
+```json
+{
+  "required_status_checks": {
+    "strict": true,
+    "contexts": [
+      "version",
+      "build (ubuntu-22.04, linux-x64, deb,rpm, 2.35)",
+      "build (windows-latest, win-x64, nsis,msi)",
+      "build (macos-latest, darwin-arm64, app,dmg)",
+      "build (macos-15-intel, darwin-x64, app,dmg)"
+    ]
+  },
+  "enforce_admins": true,
+  "required_pull_request_reviews": null,
+  "restrictions": null,
+  "allow_force_pushes": false,
+  "allow_deletions": false
+}
+```
+
+执行（需仓库 admin 的令牌）：
+
+```bash
+curl -X PUT \
+  -H "Authorization: Bearer ADMIN_TOKEN" \
+  -H "Accept: application/vnd.github+json" \
+  -d @protection.json \
+  https://api.github.com/repos/wasi7mglns/dsh-supervisor-launcher/branches/main/protection
+```
+
+> **context 字符串必须与 job 名逐字一致**（含括号内矩阵参数）。
+> 取法：跑一次 CI 后查 `GET /repos/{owner}/{repo}/actions/runs/{run_id}/jobs` 的 `jobs[].name`。
+
+### 一个必须知道的陷阱
+
+**required 的 context 一旦不再产生，PR 会被永久阻塞**。
+本仓 4 条 `build (...)` 的语境**内嵌矩阵参数** —— 若将来增删平台或改 arch 组合，
+旧语境会变成「预期但永不出现」-> **所有 PR 合不进去**。
+故：**改平台矩阵时必须同步更新分支保护的 contexts**。
+
+### 与内核仓的差异
+
+内核仓 `build` 是**条件 job**（`need_build==true` 才跑），故**不可**设 required，只设 `precheck`/`test`；
+壳仓 `build` 无条件，故**应该**把它设为 required —— 这正是「跨平台构建能力不被业务开发破坏」的服务器端保障。

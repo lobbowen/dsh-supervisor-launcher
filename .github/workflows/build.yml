@@ -19,6 +19,10 @@ on:
     tags: ['v*']
     # 日常 push main 跑**完整构建**（含 mac/win bundle 与全部门禁测试）。
     branches: [main]
+  # PR 也必须跑 CI —— 否则无法把 build 设为 required status check
+  # （GitHub 会等一个永不出现的状态 → PR 永久合不进去）。
+  pull_request:
+    branches: [main]
   workflow_dispatch: {}
 
 # ── 平台矩阵（2026-09 跨平台审计定案）──
