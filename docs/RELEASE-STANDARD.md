@@ -7,6 +7,20 @@
 > 与内核的关系：**两套独立流程**（内核 → npm 平台子包；壳 → 安装程序 + npm 壳包）。
 > 内核流程见内核仓 `RELEASE-STANDARD.md`；壳侧不重复它的内容。
 
+## 0. 硬标准（2026-09-13，不可协商）
+
+> **所有平台构建与发布必须经 GitHub CI 完成。本地不得产生任何发布产物。**
+
+| 要求 | 壳仓实现 | 门禁 |
+|---|---|---|
+| 四平台构建只在 CI 内发生 | `build` job 的 4 runner 矩阵，各 runner 只构建自己平台 | R-3 |
+| 本地无全平台构建脚本 | 壳仓**本就没有**本地构建/发布脚本（仅 `bump-shell.sh` + `verify-shell-versions.js`）| R-9（新增）|
+| 发布只在 CI 内 | `publish` job（tag 触发）| R-4 |
+| 无本地发布产物入口 | `package.json` 不存在本地 release/publish script | R-9 |
+
+**为什么**：本地构建让「产物从哪来」不可复现、不可审计；统一到 CI 后产物可追溯、四平台同构、发布单一入口。
+
+---
 ## 为什么需要这份文件（问题的实质）
 
 壳仓此前**没有单一权威流程文档**，且存在一个**幽灵产线文件**：
@@ -152,13 +166,37 @@ GitHub **永远不会执行**它；但 `docs/RELEASE-AND-BUILD-DECISION.md` 与 
     ".github/workflows/build.yml"
   ],
   "ciWorkflow": ".github/workflows/build.yml",
-  "ciJobs": ["version", "build", "publish"],
+  "ciJobs": [
+    "version",
+    "build",
+    "publish"
+  ],
   "tagPattern": "v*",
   "matrix": [
-    { "os": "ubuntu-22.04", "artifact": "linux-x64", "bundles": "deb,rpm", "glibcMax": "2.35" },
-    { "os": "windows-latest", "artifact": "win-x64", "bundles": "nsis,msi", "glibcMax": "" },
-    { "os": "macos-latest", "artifact": "darwin-arm64", "bundles": "app,dmg", "glibcMax": "" },
-    { "os": "macos-15-intel", "artifact": "darwin-x64", "bundles": "app,dmg", "glibcMax": "" }
+    {
+      "os": "ubuntu-22.04",
+      "artifact": "linux-x64",
+      "bundles": "deb,rpm",
+      "glibcMax": "2.35"
+    },
+    {
+      "os": "windows-latest",
+      "artifact": "win-x64",
+      "bundles": "nsis,msi",
+      "glibcMax": ""
+    },
+    {
+      "os": "macos-latest",
+      "artifact": "darwin-arm64",
+      "bundles": "app,dmg",
+      "glibcMax": ""
+    },
+    {
+      "os": "macos-15-intel",
+      "artifact": "darwin-x64",
+      "bundles": "app,dmg",
+      "glibcMax": ""
+    }
   ],
   "versionSources": [
     "src-tauri/Cargo.toml",
@@ -175,6 +213,7 @@ GitHub **永远不会执行**它；但 `docs/RELEASE-AND-BUILD-DECISION.md` 与 
     "## 7. 禁止事项（红线）",
     "## 8. 规范自校验（防漂移）"
   ],
-  "versionGuardScript": "scripts/verify-shell-versions.js"
+  "versionGuardScript": "scripts/verify-shell-versions.js",
+  "hardStandard": "所有平台构建与发布必须经 GitHub CI 完成；本地不得产生发布产物"
 }
 ```
