@@ -232,3 +232,30 @@ fn r8_reverse_judgements_are_not_vacuous() {
     assert!(spec.contains("唯一来源") || spec.contains("CI 矩阵"), "R-8 规范正文缺矩阵来源声明");
     eprintln!("R-8 PASS 反向判据有效");
 }
+#[test]
+fn r9_no_local_build_or_publish_path() {
+    // 硬标准（2026-09-13）：**所有平台构建与发布必须经 GitHub CI**；本地不得有发布路径。
+    let root = repo_root();
+    // ① scripts/ 下不得有构建/发布脚本（只允许版本提升与版本校验）
+    let mut local_build: Vec<String> = Vec::new();
+    if let Ok(rd) = fs::read_dir(root.join("scripts")) {
+        for ent in rd.flatten() {
+            let n = ent.file_name().to_string_lossy().to_string();
+            let allowed = n.starts_with("bump-shell") || n.starts_with("verify-shell-versions");
+            if !allowed && (n.contains("build") || n.contains("publish") || n.contains("release")) {
+                local_build.push(n);
+            }
+        }
+    }
+    assert!(local_build.is_empty(),
+        "R-9 失败：scripts/ 下存在本地构建/发布脚本（硬标准禁止）: {:?}", local_build);
+    // ② 不得有全平台本地发布脚本（旁路）
+    for cand in ["shell-release/build.sh", "shell-release/publish.sh", "shell-release/release.sh"] {
+        assert!(!root.join(cand).exists(), "R-9 失败：存在本地发布脚本 {}", cand);
+    }
+    // ③ 反向：判据本身有效
+    let probe = "local-build.sh";
+    let allowed_probe = probe.starts_with("bump-shell") || probe.starts_with("verify-shell-versions");
+    assert!(!allowed_probe && probe.contains("build"), "R-9 反向判据自检");
+    eprintln!("R-9 PASS 无本地构建/发布路径（硬标准）");
+}
