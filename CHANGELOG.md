@@ -26,9 +26,18 @@
 - `bump-shell.sh` 的 GNU `sed -i` 改为可移植写法；`make-manifest.js` 删除 no-op 与失效 `--base`；
 - 文档修正：RELEASE-STANDARD / README / 跨仓契约表等与现实现对齐。
 
+### 跨仓解耦与平台规范收口（2026-09-14 追加）
+
+- `src-tauri/src/platform/mod.rs`：`Platform` trait 新增 `core_platform_tag()`；`core.rs::package_name()`
+  只负责拼包名，平台分支彻底收拢到平台层；
+- `tests/bootstrap_flow.rs`：G1/B59 门禁扩展覆盖 `std::env::consts::OS/ARCH` 的**分支**形态；
+- 新增 `tests/no_suppression_machinery_test.rs`（回退/拉黑机构反回归，迁自内核跨仓门禁）；
+- 新增 R-10 门禁：CI 矩阵的每个 artifact 必须被 `shell-release/assemble-shell-pkg.js` 覆盖；
+- `shell-release/version-vectors.json` 契约说明更新（不再要求两仓逐字节相同）。
+
 ### 验证
 
-`cargo test --bins <全部 tests>` 137 passed / 0 failed / 0 warnings。
+`cargo test` 全绿（CI 四平台：linux-x64 / win-x64 / darwin-arm64 / darwin-x64）。
 
 ## [1.0.10]（2026-09-14）
 
