@@ -4,10 +4,10 @@
 //! ~/.local/bin 软链 / 资源目录内嵌）。故**枚举全部候选**再按版本取最高 ——
 //! 只认一个路径会在「装了却找不到」或「装了新版却用旧版」时出错。
 //!
-//! ⚠ 平台差异（Windows %APPDATA% / macOS Homebrew）已下沉到 platform 层；
+//! 平台差异（Windows %APPDATA% / macOS Homebrew）已下沉到 platform 层；
 //!   本模块是**平台无关**的（门禁 G1）。
 //!
-//! ⚠ 不变量 B1（有界）：is_file/canonicalize 在断开的映射盘或 UNC 上会触网 ——
+//! 不变量 B1（有界）：is_file/canonicalize 在断开的映射盘或 UNC 上会触网 ——
 //!   故先问 `platform::is_local_fixed_dir`（GetDriveTypeW 不触网）再访问文件系统。
 use tauri::Manager;
 
@@ -30,7 +30,7 @@ pub(crate) fn core_exe_names() -> &'static [&'static str] {
 pub(crate) fn locate_core_candidates(resource_dir: Option<PathBuf>) -> Vec<PathBuf> {
     let home = crate::env::home();
     let mut out: Vec<PathBuf> = Vec::new();
-    // ⚠ 与 env.rs 的 PATH 探测同一类防护（2026-09-11 架构修复）：
+    // 与 env.rs 的 PATH 探测同一类防护（2026-09-11 架构修复）：
     //   is_file() / canonicalize() 底层会触网 —— 在断开的映射盘或 UNC 路径上
     //   可能阻塞数十秒，而本函数在**内核定位的关键路径**上（引导页每一步都要用）。
     //   故先做「本地固定盘」判定（GetDriveTypeW 自身不触网），再访问文件系统。

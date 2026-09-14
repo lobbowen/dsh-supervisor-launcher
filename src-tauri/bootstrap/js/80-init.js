@@ -7,15 +7,6 @@
     NS.status('正在重试桌面版本更新…');
     NS.stepShellApply().catch(function (e) { NS.showUpdChoice('重试异常：' + NS.errText(e)); });
   });
-  NS.$('btnUpdSkip').addEventListener('click', function () {
-    NS.hideUpdChoice();
-    NS.status('已选择继续使用当前版本');
-    try { if (NS.core) NS.core.invoke('shell_set_phase', { phase: 'shell-update-skipped' }); } catch (e) {}
-    NS.stepCorePlan().catch(function (e) { NS.fail('引导异常：' + NS.errText(e)); });
-  });
-  NS.$('btnSkipShell').addEventListener('click', function () {
-    if (NS.skipAction) NS.skipAction();
-  });
   NS.$('btnMirror').addEventListener('click', function () {
     var shown = NS.$('mirrorBox').style.display !== 'none';
     if (shown) { NS.$('mirrorBox').style.display = 'none'; } else { NS.showMirror(); }
@@ -51,7 +42,7 @@
     NS.hideFail();
     NS.$('btnForceNode').style.display = 'none';
     NS.$('mirrorBox').style.display = 'none';
-    NS.setStep(1);
+    NS.setStep(0);
     NS.phase('node');
     NS.status('已跳过环境检测 · 正在准备安装 Node.js…');
     NS.probeMirrorThen(function () {
@@ -88,7 +79,7 @@
   if (NS.evt) {
     NS.evt.listen('env_progress', function (e) {
       var p = e.payload || {};
-      // ⚠ 2026-09-13 修复（失效模式 e：闸门恒不可达）：
+      // 2026-09-13 修复（失效模式 e：闸门恒不可达）：
       //   原条件 if (p.busy) **永远为假**：唯一带 busy 的 emit 是 commands/mod.rs:185
       //   的 crate::log(&s)，而那里在前一行（:165）刚把 busy 置回 false；
       //   安装过程的进度事件来自 main.rs:82 的 push_status，其 payload **根本不含 busy**。
@@ -96,7 +87,7 @@
       //     Rust 侧 0.1/0.2/0.3/0.8 进度与「选用镜像…/官方最新 LTS…」状态**全被丢弃**
       //     —— 恰是本仓反复强调的「静默等待与卡死无法区分」。
       //   修法：只要有 status 就展示；progress 为数字时驱动进度条。
-      if (p.status) { NS.setStep(1); NS.status(p.status); }
+      if (p.status) { NS.setStep(0); NS.status(p.status); }
       if (typeof p.progress === 'number' && NS.showProgress) {
         try { NS.showProgress(p.progress >= 1 ? null : Math.round(p.progress * 100)); } catch (err) {}
       }
@@ -105,7 +96,7 @@
       var p = (e && e.payload) || {};
       NS.fail('运行环境安装失败：' + (p.error || '未知'));
     });
-    // ⚠ 2026-09-13：补上 env_done 的监听（失效模式 c：声明了但零消费）。
+    // 2026-09-13：补上 env_done 的监听（失效模式 c：声明了但零消费）。
     //   该事件由 commands/mod.rs 在 Node 安装**成功后**发射（带 {version}），
     //   此前全仓无任何接收方，是纯粹的无效广播 —— 而 Rust 侧注释称其为
     //   「安装完成」的信号。现消费它：给出明确的完成文案（进度条收尾），

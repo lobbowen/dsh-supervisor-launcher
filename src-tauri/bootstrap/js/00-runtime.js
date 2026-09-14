@@ -3,7 +3,7 @@
 // 拆分原因：原 802 行单块脚本，一处语法错会导致**全页不执行**（已真实发生）。
 // 现按职责分为 9 个文件，每个文件独立语法检查（门禁 G5）。
 //
-// ⚠ 本文件必须**最先加载**：全局 onerror / unhandledrejection 若不先注册，
+// 本文件必须**最先加载**：全局 onerror / unhandledrejection 若不先注册，
 //   后续文件里的错误就无人捕获（不变量 F2 失效）。
 window.__BOOT_NS = window.__BOOT_NS || {};
 (function (NS) {
@@ -22,10 +22,9 @@ window.__BOOT_NS = window.__BOOT_NS || {};
   NS.shellId = null;
   NS.updPlan = null;
   NS.lastError = null;
-  NS.coreFrom = null;
-  NS.coreTo = null;
+  NS.coreVersion = null;
   NS.lastPlan = null;
-  NS.stepNames = ['st-env', 'st-node', 'st-shell', 'st-core', 'st-guard', 'st-panel'];
+  NS.stepNames = ['st-env', 'st-shell', 'st-core', 'st-guard', 'st-panel'];
   NS.SHELL_CHECK_BUDGET_MS = 45000;
   NS.SHELL_DOWNLOAD_BUDGET_MS = 300000;
   NS.ENV_PROBE_BUDGET_MS = 45000;

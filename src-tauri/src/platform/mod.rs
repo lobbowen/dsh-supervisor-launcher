@@ -1,16 +1,6 @@
 //! 平台适配层 —— **全仓唯一的平台分支所在地**（2026-09-11）
 //!
-//! == 为什么需要它（用户指正：「壳是乱的，没有架构」）==
-//!
-//! 改造前实测：平台分支 **43 处散落在 8 个文件**（`node.rs` 11 / `main.rs` 10 /
-//! 原 `service.rs` 9 / `env.rs` 6 / `bounded.rs` 2 / `nodeprobe.rs` 2 / `update.rs` 2 / `core.rs` 1）。
-//! 加一个平台要翻 8 个文件；查一个平台 bug 要猜它在哪一层。
-//!
-//! 对照：内核（JS）把平台判断集中在 `platform/os/`（2026-09 实测约九成）——
-//! 即**内核有这个层，而壳没有**。本模块就是补齐它。
-//!
-//! ⚠ 此处**刻意不写精确数字**：它是另一个仓的当前状态，会随内核演进而漂移。
-//!   要精确值请直接数内核的 `platform/os/`（本仓的任何数字都只是快照）。
+//! 平台分支全部收敛到本层：新增平台只改本层，平台 bug 的定位不再跨 8 个文件。
 //!
 //! == 关键的分层违规（本层存在的直接动因）==
 //!
@@ -40,7 +30,7 @@ pub const SVC_NORMAL: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// 家目录（Windows 用 USERPROFILE，Unix 用 HOME）。
 ///
-/// ⚠ 放在平台层而非业务层：它是**平台事实**（环境变量名不同），
+/// 放在平台层而非业务层：它是**平台事实**（环境变量名不同），
 ///   不是业务选择。原实现散在已删除的 `service.rs` 与 `env.rs` 各一份。
 pub fn home_dir() -> std::path::PathBuf {
     std::env::var("HOME")
@@ -88,6 +78,13 @@ pub trait Platform: Send + Sync {
     /// 能力声明。
     fn capabilities(&self) -> Capabilities;
 
+    /// 内核 npm 子包的**平台标签**（`linux-x64` / `darwin-arm64` / `win-x64` …）。
+    ///
+    /// 这是**平台事实**（OS × ARCH → 标签），必须在平台层解析；
+    /// `core.rs::package_name()` 只负责拼 `@dsh-sup/dsh-core-<tag>`。
+    /// 返回 `None` = 本平台/架构无对应组合（调用方如实报错，不得猜一个）。
+    fn core_platform_tag(&self) -> Option<&'static str>;
+
     /// **Node 官方制品**：`index.json` 的 files 标签 + 发布文件名。
     ///
     /// 这是纯**制品解析**（平台 → 文件名映射），不含下载/安装逻辑 ——
@@ -113,7 +110,7 @@ pub trait Platform: Send + Sync {
     ///
     /// · Windows —— `%APPDATA%\npm`（npm 全局 bin）下的 `.cmd` 垫片，
     ///   以及包内真实脚本 `node_modules/<pkg>/bin/`；
-    ///   ⚠ 后者不可省：`.cmd` 垫片无法被 `package_dir_of` 解析（父目录不是 `bin/`），
+    ///   后者不可省：`.cmd` 垫片无法被 `package_dir_of` 解析（父目录不是 `bin/`），
     ///   直接给出包内路径既能正确读 `package.json` 取版本，也能让前缀推导正常。
     /// · macOS   —— `/opt/homebrew/bin`（Apple Silicon）、`/usr/local/bin`（Intel）
     /// · Linux   —— 空（PATH 与 ~/.local/bin 已覆盖）
@@ -138,7 +135,7 @@ pub trait Platform: Send + Sync {
     /// · macOS   `osascript` + `installer -pkg … -target /`（带管理员授权）
     /// · Windows `powershell Start-Process msiexec … -Verb RunAs -Wait`
     ///
-    /// ⚠ 这是**壳独有**的能力：装内核之前必须先把运行环境装好（引导顺序），
+    /// 这是**壳独有**的能力：装内核之前必须先把运行环境装好（引导顺序），
     ///   而提权需要人在场 —— 内核（无头服务）永远做不到这件事。
     fn install_node(&self, file: &std::path::Path) -> Result<std::path::PathBuf, String>;
 
@@ -162,7 +159,7 @@ pub trait Platform: Send + Sync {
 
     /// npm 可执行**文件名**（Windows `npm.cmd` / 其余 `npm`）。
     ///
-    /// ⚠ 与内核侧 `platform/os/exec-path.js::npmBin()` 是**同一事实的两端**：
+    /// 与内核侧 `platform/os/exec-path.js::npmBin()` 是**同一事实的两端**：
     ///   Windows 上 npm 是 `.cmd`，Node 的 spawn 不做 PATHEXT 解析（P1-C 已修）。
     fn npm_exe_name(&self) -> &'static str;
 
@@ -224,7 +221,7 @@ pub fn capabilities() -> Capabilities {
 ///   · fnm (Unix)   `<root>/<ver>/installation/bin/node` → suffix = ["installation", "bin", "node"]
 ///   · nvm (Windows) `<root>/<ver>/node.exe`            → suffix = ["node.exe"]
 ///
-/// ⚠ 含 `read_dir`（可能落在漫游配置/慢速盘上）—— 调用方必须先 `stage()` 上报。
+/// 含 `read_dir`（可能落在漫游配置/慢速盘上）—— 调用方必须先 `stage()` 上报。
 pub fn latest_versioned_node(root: &std::path::Path, suffix: &[&str]) -> Option<std::path::PathBuf> {
     let rd = std::fs::read_dir(root).ok()?;
     let mut best: Option<(Vec<u64>, std::path::PathBuf)> = None;
@@ -273,4 +270,25 @@ pub fn matrix_text() -> String {
         format!("definition_exists={}", def.is_file()),
     ]
     .join(" | ")
+}
+
+#[cfg(test)]
+mod tests {
+    /// 平台标签契约（2026-09-14）：`core_platform_tag()` 必须与**当前构建 target** 一致。
+    /// 在 CI 的 4 个 runner（linux-x64 / win-x64 / darwin-arm64 / darwin-x64）上各跑一次，
+    /// 把「OS × ARCH → 内核包标签」这条跨平台事实钉死。
+    #[test]
+    fn core_platform_tag_matches_build_target() {
+        let got = super::current().core_platform_tag();
+        let want = match (std::env::consts::OS, std::env::consts::ARCH) {
+            ("linux", "x86_64") => Some("linux-x64"),
+            ("linux", "aarch64") => Some("linux-arm64"),
+            ("macos", "x86_64") => Some("darwin-x64"),
+            ("macos", "aarch64") => Some("darwin-arm64"),
+            ("windows", "x86_64") => Some("win-x64"),
+            ("windows", "aarch64") => Some("win-arm64"),
+            _ => None,
+        };
+        assert_eq!(got, want, "core_platform_tag 必须与构建 target 一致");
+    }
 }

@@ -2,27 +2,17 @@
 //!
 //! 本文件是 macOS 的**全部**平台知识（门禁 G1）。
 //!
-//! ⚠ `launchctl` 的子命令语义（易错，此处固定）：
+//! `launchctl` 的子命令语义（易错，此处固定）：
 //!   · `bootstrap gui/<uid> <plist>`  —— 载入（RunAtLoad → 立即启动；KeepAlive → 崩溃重启）
 //!   · `bootout  gui/<uid>/<label>`   —— 卸载
 //!   · `kickstart -k gui/<uid>/<label>` —— 重启（本文件的 start）
-//!   旧实现 `start` 用 `kickstart -k`，而 `stop` 用 `bootout` —— 不对称：
-//!   `bootout` 会把任务从 launchd **完全移除**，此后 `kickstart` 无法命中，
-//!   需再 `bootstrap`。本实现保留该语义（`stop` 后由内核的 enable/disable +
-//!   `ensure_defined` 的重载路径恢复），并在 `start` 前尝试 bootstrap 兜底。
+// `stop`（bootout）会完全移除任务，`start` 前需 bootstrap 兜底；语义固定于此。
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use super::service::ServiceControl;
-// ⚠ P1 修复（2026-09-13，失效模式 g + 平台对称性）：**必须导入 SVC_QUICK**。
-//   缺陷：本文件 :202 使用了 SVC_QUICK（launchctl bootout 的有界超时），
-//     而本 use 列表**漏了它** —— 子模块不继承父模块作用域，故 target_os=macos
-//     构建时是未绑定标识符 **E0425 → macOS（arm64/x64）构建直接失败，无法出包**。
-//   为什么长期未被发现：platform/mod.rs 以 #[cfg(target_os = "macos")] 条件编译，
-//     Linux 上的 cargo test/check **根本不编译本文件** → 100+ 项测试全绿也掩盖它。
-//   对照：linux.rs 与 windows.rs 的 use 列表都含 SVC_QUICK。
-//   （已用 rustc 最小复现确证该作用域规则：E0425 cannot find value SVC_QUICK in this scope。）
+// 必须导入 SVC_QUICK：子模块不继承父模块作用域（漏导入 → macOS 构建 E0425）。
 use super::{home_dir, Capabilities, Platform, SVC_NORMAL, SVC_QUICK};
 
 pub const NAME: &str = "macos";
@@ -59,8 +49,16 @@ impl Platform for Impl {
         }
     }
 
+    fn core_platform_tag(&self) -> Option<&'static str> {
+        match std::env::consts::ARCH {
+            "x86_64" => Some("darwin-x64"),
+            "aarch64" => Some("darwin-arm64"),
+            _ => None,
+        }
+    }
+
     fn node_artifact(&self, version: &str) -> Option<super::NodeArtifact> {
-        // ⚠ macOS 必须用官方 **.pkg**（2026-09-11 修复）：
+        // macOS 必须用官方 **.pkg**（2026-09-11 修复）：
         //   原实现下载 `node-v<ver>-darwin-<arch>.tar.gz`（tarball），却交给
         //   `installer -pkg` 执行 —— 格式不匹配，**必然安装失败**。
         //   官方提供的是通用 .pkg（`node-v<ver>.pkg`，arm64/x64 通用）。
@@ -104,7 +102,7 @@ impl Platform for Impl {
     fn install_node(&self, file: &Path) -> Result<PathBuf, String> {
         let abs = file.canonicalize().map_err(|e| e.to_string())?;
         let esc = abs.display().to_string().replace('"', "");
-        // ⚠ P1 修复（2026-09-13）：**嵌套双引号未转义 → 语法错误，macOS target 无法编译**。
+        // P1 修复（2026-09-13）：**嵌套双引号未转义 → 语法错误，macOS target 无法编译**。
         //
         //   缺陷：AppleScript 的 do shell script 需要用引号包住 shell 命令，
         //     但这里写成了未转义的嵌套双引号：
@@ -178,7 +176,7 @@ impl ServiceControl for Impl {
 
     /// 建立 LaunchAgent plist 并 bootstrap（幂等，且**内容过时时自愈**）。
     ///
-    /// ⚠ 2026-09-12（P2）：原实现「`is_file()` → 直接返回」= **只创建、永不更新**，
+    /// 2026-09-12（P2）：原实现「`is_file()` → 直接返回」= **只创建、永不更新**，
     ///   模板演进后老用户永远跑旧 plist。与 Linux unit / Windows 计划任务同病。
     ///   现：算期望内容 → 比对 → 一致不动、不同则重写（并重新 bootstrap）。
     fn ensure_defined(&self, guard: &Path) -> Result<String, String> {
@@ -188,7 +186,7 @@ impl ServiceControl for Impl {
             .join("supervisor")
             .join("log")
             .join("guard-stdio.log");
-        // ⚠ 2026-09-12（P3）：路径嵌入 plist 前**必须做 XML 转义**。
+        // 2026-09-12（P3）：路径嵌入 plist 前**必须做 XML 转义**。
         //   plist 是 XML —— 家目录/用户名含 `&`、`<`、`>` 时（如 `/Users/a&b/...`），
         //   未转义会写出**非法 XML** → `launchctl bootstrap` 失败，
         //   而报错只是含糊的 syntax error（且本函数会降级为「已建立但未加载」→ **自启静默失效**）。

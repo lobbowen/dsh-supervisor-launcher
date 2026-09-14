@@ -1,19 +1,9 @@
-name: launcher-build
+name: dsh-shell-build
 
-# 公开壳仓产线（2026-09 双仓拆分定案）：本仓=壳（src-tauri 引导器形态，MIT 可独立构建）。
+# 公开壳仓产线：本仓=壳（src-tauri 引导器形态，MIT 可独立构建）。
 # 矩阵 → 逐平台 Tauri bundle → 安装包挂 GitHub Release + 发布 npm 包（自更新产物）。
 #
-# ── 触发策略（2026-09-13 修订）──
-#   历史（F5）：仅 tag / 手动，理由是「原 push main 会每次全平台打包」。
-#   现修订为：**push main 也跑完整构建矩阵**（不设轻量替代、不设 tag 守卫）。
-#
-#   依据（本轮实证）：macos.rs / windows.rs 被 #[cfg(target_os)] 条件编译，
-#     Linux 上**连解析都不做** —— 该文件里两个独立缺陷（SVC_QUICK 未导入 E0425、
-#     AppleScript 字符串嵌套未转义引号的语法错误）在本地 130+ 项测试全绿的情况下
-#     完全隐形，而它们让 **macOS 根本无法出包**。
-#     **只有完整构建（在真实 mac/win runner 上）才能发现这类问题。**
-#   取舍说明：完整构建耗时更长（macOS 按平台计费口径最贵），但公开仓 Actions 免费；
-#     以「跑得久」换「问题暴露得早、暴露得全」是明确的选择。
+# 触发不变量：push main / v* tag / PR 均跑**完整构建矩阵**（不设轻量替代、不设 tag 守卫）。
 on:
   push:
     tags: ['v*']
@@ -25,15 +15,10 @@ on:
     branches: [main]
   workflow_dispatch: {}
 
-# ── 平台矩阵（2026-09 跨平台审计定案）──
-#  1) Linux **基座固定 ubuntu-22.04**（glibc 2.35）——F1 必修：
-#     实测在 Ubuntu 24.04(glibc 2.39) 构建的产物**无法**在 Ubuntu 22.04 / Debian 12 运行
-#     （根因：Rust std process 模块对 pidfd_spawnp/pidfd_getpid 的弱引用在 2.39 主机会被解析
-#      成硬性 verneed）。在 2.35 基座链接则不产生该需求 → 兼容 22.04+/Debian 12+。
-#  2) Linux 已**废弃 AppImage**（改用标准 deb/rpm）。
-#  3) macOS 双架构**原生**构建：arm64 用 macos-latest，x64 用 **macos-15-intel**
-#     （实测该 runner 存在；旧注释「GitHub 已无 Intel macOS runner」已过时）。注意 macos-14 已弃用。
-#  4) Windows 主推 NSIS per-user（免提权 + 可静默更新），MSI 作备选。
+# 平台矩阵不变量：
+#  · Linux 基座固定 ubuntu-22.04（glibc 2.35）；
+#  · Linux 用 deb/rpm；macOS 双架构原生（macos-latest / macos-15-intel）；
+#  · Windows 主推 NSIS per-user，MSI 备选。
 jobs:
   # 版本单源：从 tauri.conf.json 读取，供下游组装/发布使用（避免各 job 各写一遍）
   version:
@@ -57,7 +42,7 @@ jobs:
 
   build:
     needs: version
-    # ⚠ 2026-09-13（按用户明确要求修订）：**push 直接跑完整构建矩阵**。
+    # 2026-09-13（按用户明确要求修订）：**push 直接跑完整构建矩阵**。
     #
     #   为什么不做「轻量 cargo check」：仅编译校验发现不了打包/签名/产物装配阶段的问题，
     #   而本仓恰恰在那些阶段踩过坑（glibc 基座、bundle 装配、验签清单、UPDATE 资产）。
@@ -130,26 +115,14 @@ jobs:
             libsoup-3.0-dev libjavascriptcoregtk-4.1-dev pkg-config \
             rpm           # rpm 打包需要 rpmbuild
 
-      # ── 门禁测试（P1-B 接线，2026-09-12）──
-      #
-      # ⚠ 为什么必须单独一步：本仓 60+ 个门禁（G1/G1'/G2/G3/G5、B1–B56）与
-      #   平台矩阵自检**此前从未在 CI 执行** —— 只有 `updater_artifacts` 被跑过。
-      #   而 README 声称「壳的跨平台与引导行为由测试保障（cargo test…B1–B55）」，
-      #   DESIGN 更写着「没有门禁的规范等于没有规范」。
-      #   于是跨平台约束在产线上退化为注释：改坏 platform/ 也不会被拦住。
-      #
-      # 覆盖（均为**无外部依赖**目标，可安全在 CI 跑）：
-      #   · bootstrap_flow    —— G1/G1'/G2/G3/G5 + B1–B56（分层 + 引导流程 + 前端语法）
-      #   · update_guard_test —— G6（自更新护栏不得永久自锁，P1-A）
-      #   · 单元测试          —— error/bounded/core/node/nodeprobe 内嵌 #[cfg(test)]
-      # 注：`updater_artifacts` 需要 SHELL_REHEARSAL_DIR（打包产物），
-      #     故仍在下方「产物验收」步骤单独跑，不并入本步。
+      # 门禁测试：跑全部无外部依赖的 test target（G1–G6 + B1–B56 + 单元测试）。
+      # `updater_artifacts` 需要打包产物，故不并入本步、在下方单独跑。
       - name: 门禁测试（G1–G6 + B1–B56 + 单元）
         shell: bash
         run: |
           # 不截断：门禁失败时断言文案就是排障依据（与上一步同理）。
           set -o pipefail
-          # ⚠ 不用 `--lib`：本包是 **bin crate**（无 library target），
+          # 不用 `--lib`：本包是 **bin crate**（无 library target），
           #   `--lib` 会直接 `error: no library targets found` 并退出 101。
           #   `--bins` 覆盖 src 内嵌的 #[cfg(test)] 单元测试。
           # G6-i/j 与 U-a..d 分别锁定「跨仓 probe 超时单一事实源」「SHA 清单失败不中断回退」
@@ -157,7 +130,7 @@ jobs:
           # #[cfg(not(any(linux,macos,windows)))] 排除，三大平台构建根本不编译它，
           # 故**只有静态结构门禁**能拦住「方法放错 impl 块」这类缺陷。
           #
-          # ⚠ 2026-09-13：**改为自动枚举全部 test target**，不再硬编码名字。
+          # 2026-09-13：**改为自动枚举全部 test target**，不再硬编码名字。
           #   缺陷：上面这段注释自己写着「门禁此前从未在 CI 执行」，却又复发了 ——
           #     原先硬编码三个 --test 名，于是**新增的门禁文件被静默排除在 CI 之外**。
           #   实测漏了 4 个：platform_shared_items_test（正是为「平台文件用了父模块项
@@ -200,7 +173,7 @@ jobs:
         run: |
           BIN=src-tauri/target/release/dsh-supervisor-gui
           test -f "$BIN" || { echo "找不到产物 $BIN"; exit 1; }
-          # 门禁脚本随壳仓携带（由内核 ci/check-glibc.sh 单源导出）
+          # 门禁脚本随壳仓携带（内核仓有同源副本；当前无自动一致性校验）
           bash ci/check-glibc.sh "$BIN" "${{ matrix.glibc_max }}"
 
       # ── 组装可发布的 npm 包（产物 + .sig + 清单条目）──
@@ -322,7 +295,7 @@ jobs:
             const p = m.platforms[k];
             if (!p.url || !p.signature) { console.error('缺 url/signature: ' + k); process.exit(1); }
           }
-          console.log('✅ 清单校验通过');
+          console.log('清单校验通过');
           "
 
       - name: 发布平台子包 + 清单包到 npm

@@ -4,7 +4,7 @@
 //!   壳仓此前**没有单一权威流程文档**，且存在一个**幽灵产线文件**
 //!   `src-tauri/launcher-build.yml`（290 行）—— 它不在 `.github/workflows/` 下，
 //!   GitHub **永远不会执行**它；但 `docs/RELEASE-AND-BUILD-DECISION.md` 与
-//!   `scripts/bump-shell.sh` 都**声称它是产线**。真实产线是 `.github/workflows/build.yml`，
+//!   `scripts/bump-shell.sh` 都**曾声称它是产线**。真实产线是 `.github/workflows/build.yml`，
 //!   两份定义已漂移（触发策略与步骤数均不同）。
 //!
 //!   现确立 `docs/RELEASE-STANDARD.md` 为**唯一事实源**，并由本门禁把「规范 = 现实」钉死：
@@ -258,4 +258,35 @@ fn r9_no_local_build_or_publish_path() {
     let allowed_probe = probe.starts_with("bump-shell") || probe.starts_with("verify-shell-versions");
     assert!(!allowed_probe && probe.contains("build"), "R-9 反向判据自检");
     eprintln!("R-9 PASS 无本地构建/发布路径（硬标准）");
+}
+
+#[test]
+fn r10_assembler_covers_all_ci_matrix_artifacts() {
+    // R-3 只对齐「规范矩阵 ↔ workflow」；本门禁补上**组装器**：
+    //   CI 矩阵的每个 artifact 必须在 shell-release/assemble-shell-pkg.js 的 PLATFORMS 里，
+    //   否则「能构建但组装不了」。（assembler 允许是 CI 的超集，为将来平台预留。）
+    let spec = spec_text();
+    let raw = extract_block(&spec).unwrap();
+    let j: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    let mut artifacts: Vec<String> = Vec::new();
+    for leg in j["matrix"].as_array().unwrap() {
+        artifacts.push(leg["artifact"].as_str().unwrap().to_string());
+    }
+    let js = read(&repo_root().join("shell-release").join("assemble-shell-pkg.js"));
+    // PLATFORMS 的键：形如  'linux-x64': { ... }
+    let mut keys: Vec<String> = Vec::new();
+    for line in js.lines() {
+        let t = line.trim();
+        if let Some(rest) = t.strip_prefix('\'') {
+            if let Some(pos) = rest.find("':") {
+                keys.push(rest[..pos].to_string());
+            }
+        }
+    }
+    let missing: Vec<String> = artifacts.iter().filter(|a| !keys.contains(a)).cloned().collect();
+    assert!(missing.is_empty(),
+        "R-10 失败：CI 矩阵 artifact 未在 assembler PLATFORMS 中: {:?}（已登记 {:?}）", missing, keys);
+    // 反向：判据能识别缺失
+    assert!(!keys.contains(&"__nonexistent__".to_string()), "R-10 反向判据自检");
+    eprintln!("R-10 PASS assembler 覆盖全部 {} 个 CI artifact", artifacts.len());
 }

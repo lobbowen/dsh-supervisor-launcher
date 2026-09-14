@@ -3,11 +3,11 @@
 //! B60 是**静态**断言（看代码里有没有比对逻辑）；本测试是**行为级** ——
 //!   把一个真实的过时 unit 写到磁盘，然后调 `ensure_defined`，断言内容被纠正。
 //!
-//! ⚠ 为什么必须补行为级：静态断言无法证明「读了盘并且真的重写了」。
+//! 为什么必须补行为级：静态断言无法证明「读了盘并且真的重写了」。
 //!   我第一版只写静态断言，注入「不读磁盘」后它照样全绿（假门禁）——
 //!   补了 B60 的反向断言与这条行为测试后才闭合。
 //!
-//! ⚠ 只在 Linux 上跑：本测试直接调 Linux 平台实现的 `ensure_defined`，
+//! 只在 Linux 上跑：本测试直接调 Linux 平台实现的 `ensure_defined`，
 //!   且会真的执行 `systemctl --user daemon-reload`（幂等、无害，但仅 Linux 有意义）。
 
 #![cfg(target_os = "linux")]
@@ -28,7 +28,7 @@ fn b61_stale_definition_is_rewritten_on_disk() {
     assert!(lx.contains("needs_write"), "B61 FAIL 缺自愈判据（见 B60）");
 
     // 2) 行为验证：直接在临时目录上复现「读→比对→重写」这段逻辑
-    //    ⚠ 不调用真实 ensure_defined：它会写 ~/.config/systemd（污染真机）+ 调 systemctl。
+    //    不调用真实 ensure_defined：它会写 ~/.config/systemd（污染真机）+ 调 systemctl。
     //      故按源码里的**同一判据**做等价复现 ——
     //      若源码判据被改坏（如写成恒 false），B60 会失败；此处验证判据**行为正确**。
     let dir = std::env::temp_dir().join(format!("b61-{}", std::process::id()));

@@ -4,7 +4,7 @@
 // 职责：
 //   1. 探测系统 Node.js；缺失/过旧 → 内嵌引导页 → 一键安装官方最新 LTS（下载/校验/授权）。
 //   2. Node 就绪 → 定位已安装内核（dsh-supervisor SEA 二进制，npm 子包 / ~/.local/bin / PATH）
-//      → 拉起守卫 daemon → 面板 127.0.0.1:3100。内核闭源（npm 安装），壳不内嵌任何内核资产。
+//      → 拉起守卫 daemon → 面板（端口由内核 config.apiPort 决定）。内核闭源（npm 安装），壳不内嵌任何内核资产。
 // 托盘常驻：关窗 = 隐藏；菜单动作直发本地 API（裸 TCP，无额外依赖）。
 
 // 有界子进程执行（公共设施）：所有外部命令一律经它，避免「无界阻塞分散潜伏」。
@@ -19,7 +19,7 @@ mod mirror;
 // 根因：探测内含无界阻塞系统调用，且被命令 await —— 详见本文件根因说明。
 mod nodeprobe;
 mod node;
-// ★ 平台适配层（2026-09-11）：**全仓唯一的平台分支所在地**。
+// 平台适配层（2026-09-11）：**全仓唯一的平台分支所在地**。
 // 它接管了原先分居两处的「服务定义」（service.rs）与「服务启停」（原本文件），
 // 消除「同一概念分居两层」的分层违规 —— 加平台不再需要改两处不同层。
 /// 业务层（平台无关）：从 main.rs 拆出的可独立测试的模块。
@@ -79,7 +79,7 @@ pub(crate) fn push_status(app: &tauri::AppHandle, status: String, progress: f32)
         s.progress = progress;
         s.logs.push(status.clone());
     }
-    // ⚠ 2026-09-13：**必须带 busy:true** —— 本函数只在安装过程中被调用
+    // 2026-09-13：**必须带 busy:true** —— 本函数只在安装过程中被调用
     //   （push_status 的唯一调用方是 run_install）。原 payload 不含 busy，
     //   而前端监听器当时以 if (p.busy) 为闸 → 所有进度事件被丢弃（分支恒不可达）。
     //   现补上 busy 使「安装中」可辨识；前端已改为只要 status 就展示（不再依赖该字段）。
@@ -113,7 +113,7 @@ fn run_install(app: &tauri::AppHandle) -> Result<(String, String), String> {
     }
 }
 
-// ⚠ 此处原有孤立文档注释「内核可执行名候选（跨平台）…」+ 6 行空行（2026-09-12 清理）：
+// 此处原有孤立文档注释「内核可执行名候选（跨平台）…」+ 6 行空行（2026-09-12 清理）：
 //   它描述的函数在更早的重构中已删除（候选名现由 platform trait 的 core_exe_names 提供），
 //   留下一条**没有宿主**的文档注释与连续空行 —— clippy 报 empty_lines_after_doc_comments。
 
@@ -135,16 +135,12 @@ fn run_install(app: &tauri::AppHandle) -> Result<(String, String), String> {
 fn shell_update_plan_text() -> String {
     let v = env!("CARGO_PKG_VERSION").to_string();
     let id = update::init_identity(&v);
-    let (should, reason) = update::should_check(&v);
     let mut out = String::new();
     out.push_str(&format!("shell_version={}", id.get("version").and_then(|x| x.as_str()).unwrap_or("?")));
     out.push_str(&format!(" platform={}", id.get("platform").and_then(|x| x.as_str()).unwrap_or("?")));
     out.push_str(&format!(" arch={}", id.get("arch").and_then(|x| x.as_str()).unwrap_or("?")));
     out.push_str(&format!(" install_kind={}", update::install_kind()));
     out.push_str(&format!(" self_update_capable={}", update::self_update_capable()));
-    out.push_str(&format!(" attempt={}", id.get("attempt").and_then(|x| x.as_u64()).unwrap_or(0)));
-    out.push_str(&format!(" should_check={}", should));
-    if !reason.is_empty() { out.push_str(&format!(" reason={}", reason)); }
     out.push_str(&format!(" state_dir={}", update::state_dir().display()));
     out
 }
@@ -152,14 +148,11 @@ fn shell_update_plan_text() -> String {
 
 
 // ── 超时预算（防「无超时网络请求 → 引导页永久卡住」）──
-// 事故背景（2026-09-11 Windows 真机实测）：用户装完桌面壳后，引导第一步就是壳更新，
-// 而 `check()` 在无超时的情况下遇到网络不可达**永不返回** → 前端 Promise 既不 resolve
-// 也不 reject → `.catch` 不触发 → 永久卡在「正在检查桌面更新」，用户无法进入产品。
-// 故：check 必须短超时（快速失败），下载必须长超时（大安装包 + 慢网），且外层再加 tokio
-// 兜底（reqwest 的 request timeout 不保证覆盖 DNS 等阶段）。
+// 不变量：check 短超时（快速失败）、下载长超时（大包 + 慢网），外层再加 tokio 兜底
+// （reqwest 的 request timeout 不保证覆盖 DNS 等阶段）。
 
 /// 构造带超时的更新器。
-/// ⚠ 该超时是 reqwest 的**整个请求**超时：check 用短超时；下载必须用长超时，
+/// 该超时是 reqwest 的**整个请求**超时：check 用短超时；下载必须用长超时，
 ///   否则大安装包会在传输中途被切断。
 fn shell_updater(
     app: &tauri::AppHandle,
@@ -213,7 +206,7 @@ fn cli_service_plan() -> i32 {
         println!("== 守卫服务定义自检 ==");
     println!("平台          = {}", std::env::consts::OS);
     println!("服务定义路径  = {}", platform::service().definition_path().display());
-    // ⚠ 2026-09-13（P3 修复）：经 ServiceControl::is_defined()（平台**事实**判定）——
+    // 2026-09-13（P3 修复）：经 ServiceControl::is_defined()（平台**事实**判定）——
     //   原先用 definition_path().is_file()，而 Windows 的路径是标识串
     //   schtasks://DSH-Supervisor，is_file() **恒 false** → 自检无论计划任务是否
     //   存在/刚建立都报「否」，把排障方向带偏（本自检正是「服务定义」能力的官方入口）。
@@ -259,19 +252,8 @@ fn cli_service_plan() -> i32 {
     }
 }
 fn main() {
-    // 启动阶段诊断（**临时**，定位「卡在检测」用）：写入 stderr，任何平台可见。
-    // ══════════════════════════════════════════════════════════════════
-    // 启动里程碑日志（**常开**，落盘到 ~/.dsh/shell/shell.log）。
-    //
-    // 为什么必须是常开能力（真实教训）：引导页卡住时，`shell.log` 若只有
-    //   「壳启动」一行，就**无法区分**这两种截然不同的病因：
-    //     (a) Rust 侧 setup() 从未执行（插件/DBus 层失败）；
-    //     (b) setup() 正常、但前端 JS 从未执行（语法错误 / IPC 失败）。
-    //   两者的修复方向完全相反，而我为此**来回排查了三轮**。
-    //   现在这条轨迹是 always-on 的：打开 shell.log 一眼就能定位到哪一层。
-    //
-    // 成本：每次启动 6 行；shell.log 超过 1MB 自动滚动（见 update::log）。
-    // ══════════════════════════════════════════════════════════════════
+    // 启动里程碑日志（常开，落盘 ~/.dsh/shell/shell.log）：打开日志即可判定卡在
+    // 「Rust setup 未执行」还是「前端 JS 未执行」。shell.log 超 1MB 自动滚动。
     macro_rules! bt {
         ($($a:tt)*) => {
             crate::update::log(&format!("[boot] {}", format!($($a)*)));
@@ -328,7 +310,7 @@ fn main() {
         // app.restart()：更新安装后重启进入新版本（旧进程装、新进程跑）。
         .plugin(tauri_plugin_process::init())
         .manage(Mutex::new(RunState::default()))
-        .invoke_handler(tauri::generate_handler![commands::node_status, commands::core_status, commands::core_plan, commands::core_apply, commands::guard_start, commands::guard_ready, commands::start_node_install, commands::finish_boot, commands::win_ctl, commands::shell_identity, commands::shell_reset_update_guard, commands::shell_update_check, commands::shell_update_apply, commands::shell_restart, commands::shell_set_phase, commands::mirror_status, commands::mirror_set, commands::node_latest, commands::mirror_warmup, commands::mirror_cached, commands::shell_panel_url])
+        .invoke_handler(tauri::generate_handler![commands::node_status, commands::core_status, commands::core_plan, commands::core_apply, commands::guard_start, commands::guard_ready, commands::start_node_install, commands::finish_boot, commands::win_ctl, commands::shell_identity, commands::shell_update_check, commands::shell_update_apply, commands::shell_restart, commands::shell_set_phase, commands::mirror_status, commands::mirror_set, commands::node_latest, commands::mirror_warmup, commands::mirror_cached, commands::shell_panel_url])
         .setup(|app| {
             bt!("setup enter");
             // 托盘直发本地 API 的端口：显式 DSH_SUPERVISOR_TRAY_PORT 优先，否则从用户 config.apiPort 解析
@@ -337,29 +319,16 @@ fn main() {
             let handle = app.handle().clone();
 
             // 壳身份初始化（2026-09-11）：写 ~/.dsh/shell/identity.json + shell.log，
-            // 并推进「更新护栏」状态（pendingVersion 是否生效 / attempt 计数 / 拉黑）。
             // 必须尽量早执行：即使后续任一环节失败，也留下可诊断的落盘痕迹。
             bt!("init_identity...");
             let _ = update::init_identity(&app.package_info().version.to_string());
             bt!("init_identity done");
 
-            // 镜像契约**无条件导出**（2026-09-11 架构修复）：
-            //   旧实现只在 node::latest_lts() 内导出，而该函数在「离线」或
-            //   「全部 Node 镜像不可达」时返回 Err → **契约完全不写**，
-            //   内核便只能用它自己的硬编码副本（与壳的目录可能已分叉）。
-            //   故在壳启动时无条件导出一份，保证内核永远有契约可读。
-            //   ⚠ 不阻断引导：失败只记 shell.log。
+            // 无条件导出镜像契约（启动即导出；不依赖 latest_lts() 成功，失败只记日志）。
             crate::mirror::export_on_boot();
 
-            // 环境判定（2026-09 改）：Node 缺失或低于最低标准(>=22.12, DSH commander 硬门槛) → 引导页安装；
-            // 达标（即使不是最新 LTS）→ 直接拉起守卫进入面板，不卡升级。初始 url 即 bootstrap.html。
-            // ⚠ **不得在此阻塞**（架构修复 2026-09-11）：
-            //   旧实现在这里同步调用探测。setup 在**窗口创建之前**运行，
-            //   而探测内含无界阻塞系统调用（CreateProcessW / GetFileAttributesW
-            //   在网络路径上无上限）—— 一旦挂起，连窗口都会被推迟出现，
-            //   且失败现象是「启动慢/无窗口」，与真正的病因相距极远。
-            //   现改为：仅**触发**探测（分离线程），结果由引导页异步等待。
-            //   UI 立即可见是硬要求 —— 检测再慢也不能挡住界面。
+            // 环境判定：Node 缺失或低于最低标准（>=22.12）→ 由引导页安装；达标直接进面板。
+            // 探测只触发（分离线程），不得阻塞 setup —— 窗口必须先出现。
             nodeprobe::start();
             {
                 let h = handle.clone();
@@ -373,10 +342,8 @@ fn main() {
                     }
                 });
             }
-            // 单一引导流程（K3 修复）：壳启动只做「环境信息探测」，**不再并行拉起守卫**。
-            // 守卫的安装/升级/启动全部由引导页显式驱动
-            // （core_plan → core_apply → guard_start → guard_ready），杜绝两条互不知晓的流程竞争，
-            // 以及「Rust 侧已尝试拉起但页面不知情」的假成功。
+            // 单一引导流程：守卫的安装/升级/启动全部由引导页显式驱动
+            // （core_plan → core_apply → guard_start → guard_ready），壳启动不并行拉起。
             std::thread::spawn(move || {
                 if let Ok(c) = node::latest_lts() {
                     let v = c.version.clone();
@@ -384,7 +351,7 @@ fn main() {
                     let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
                     s.latest = Some(v.clone());
                     drop(s);
-                    // ⚠ 2026-09-13（失效模式 c/f）：**删除这个死广播**。
+                    // 2026-09-13（失效模式 c/f）：**删除这个死广播**。
                     //   env_status 全仓**零监听**（bootstrap 只监听 shell:goto-panel /
                     //   shell:goto-bootstrap / guard_progress / shell_update_progress /
                     //   env_progress / env_error / env_done）。
@@ -408,7 +375,7 @@ fn main() {
                 .tooltip("dsh-supervisor")
                 .menu(&menu)
                 // 左键=显示窗口 / 右键=弹出菜单（Windows·Linux 惯例）。
-                // ⚠ 原为 true（左键也弹菜单），叠加下方 on_tray_icon_event 不区分按键，
+                // 原为 true（左键也弹菜单），叠加下方 on_tray_icon_event 不区分按键，
                 //   导致右键时既弹菜单又调用 domain::windowing::show_main() 抢焦点 → 菜单被顶掉，
                 //   用户感知为「右键不好用」（2026-09-11 Windows 真机实测）。
                 // 注：上游文档明确 Linux 不支持该开关（菜单由桌面环境决定）——
@@ -417,7 +384,7 @@ fn main() {
                 .on_menu_event(move |app, event| {
                     match event.id.as_ref() {
                         "show" => domain::windowing::show_main(app),
-                        // ⚠ 网络 I/O **必须离开 UI 线程**（2026-09-11 架构修复）。
+                        // 网络 I/O **必须离开 UI 线程**（2026-09-11 架构修复）。
                         //   托盘菜单事件由 UI 线程派发，而 post_local 最多阻塞 60 秒
                         //   （TCP 连接 + 读写超时）。守卫挂起或端口无响应时，
                         //   点击「启动/停止/重启」会**把整个界面冻结 60 秒** ——
@@ -429,7 +396,7 @@ fn main() {
                         // 退出管家 = 完全退出：通知守卫停止全部服务链，随后壳退出
                         "quit" => {
                             // 契约 §4.1：请求内核停被管对象（等回执）→ 由所有者停止守卫 → 壳退出。
-                            // ⚠ 同样离开 UI 线程：退出握手最坏可耗时约 70 秒（/session/stop 60s
+                            // 同样离开 UI 线程：退出握手最坏可耗时约 70 秒（/session/stop 60s
                             //   + 轮询 10s）。若在 UI 线程做，用户会看到窗口卡住不动，
                             //   误以为「程序关不掉」而强杀 —— 那会跳过退出握手，留下未停的 DSH。
                             let h = app.clone();
@@ -442,7 +409,7 @@ fn main() {
                     }
                 })
                 .on_tray_icon_event(|tray, event| {
-                    // ⚠ 必须区分按键与状态（2026-09-11 修复）：
+                    // 必须区分按键与状态（2026-09-11 修复）：
                     //   原实现匹配 `Click { .. }`（任意键、任意状态）→ **右键**也会 show_main，
                     //   把刚要弹出的右键菜单顶掉/抢走焦点。现只响应「左键 + 抬起」，
                     //   右键交由系统弹出 .menu() 设置的菜单。
@@ -464,7 +431,7 @@ fn main() {
                 // 关闭窗口行为（读守卫 config.closeAction，系统级开关 2026-09）：
                 // 'exit' = 退出管家（通知守卫停止全部服务链 + 壳退出）；默认 'hide' = 隐藏至托盘常驻。
                 if env::close_action() == "exit" {
-                    // ⚠ 2026-09-12（P2 修复）：必须离开 UI 线程（与托盘 quit 同一纪律）。
+                    // 2026-09-12（P2 修复）：必须离开 UI 线程（与托盘 quit 同一纪律）。
                     let h = window.app_handle().clone();
                     let port = env::api_port();
                     api.prevent_close();

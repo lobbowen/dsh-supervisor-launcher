@@ -44,6 +44,14 @@ impl Platform for Impl {
         }
     }
 
+    fn core_platform_tag(&self) -> Option<&'static str> {
+        match std::env::consts::ARCH {
+            "x86_64" => Some("win-x64"),
+            "aarch64" => Some("win-arm64"),
+            _ => None,
+        }
+    }
+
     fn node_artifact(&self, version: &str) -> Option<super::NodeArtifact> {
         // 官方**没有** win-arm64-msi（files[] 只有 win-arm64-7z / win-arm64-zip）。
         // 故 arm64 Windows 也取 x64 msi —— 依赖系统的 x64 模拟执行。
@@ -56,7 +64,7 @@ impl Platform for Impl {
     }
 
     fn node_candidate_paths(&self) -> Vec<PathBuf> {
-        // ⚠ 不得硬编码 C:\Program Files（2026-09-11 审计）：
+        // 不得硬编码 C:\Program Files（2026-09-11 审计）：
         //   真实路径随**系统盘符**与**系统语言**变化（中文系统是本地化目录名），
         //   也可能装在 Program Files (x86)。故一律经环境变量推导。
         let exe = "node.exe";
@@ -175,14 +183,7 @@ impl Platform for Impl {
 
     fn is_local_fixed_dir(&self, dir: &Path) -> bool {
         use std::os::windows::ffi::OsStrExt;
-        // ⚠ 为什么需要这个判定（真实事故）：
-        //   Path::is_file() / canonicalize() 在**断开的映射盘**或 UNC 路径上
-        //   会触网并阻塞数十秒，而调用点在引导的**关键路径**上（每步都要探测候选）。
-        //   判定本身（GetDriveTypeW）不触网。
-        //
-        // ⚠ 按**盘符**缓存：PATH 里数十个条目往往集中在同一两个盘符，
-        //   原实现对每个条目都调一次 API —— 同一个盘被反复查询，
-        //   一旦该盘有问题就重复付出阻塞代价。现每个盘符只查一次。
+// 先做本地固定盘判定（不触网），再访问文件系统；按盘符缓存，每盘只查一次。
         let w: Vec<u16> = dir.as_os_str().encode_wide().collect();
         // UNC（以两个反斜杠开头，ASCII 92）→ 跳过（纯字面判定，不触网）
         if w.len() >= 2 && w[0] == 92 && w[1] == 92 {
@@ -218,15 +219,14 @@ impl ServiceControl for Impl {
 
     fn definition_path(&self) -> PathBuf {
         // 计划任务不是文件；返回标识串供日志/诊断。
-        // ⚠ 正因如此，**不能**用 `definition_path().is_file()` 判断「定义是否存在」
+        // 正因如此，**不能**用 `definition_path().is_file()` 判断「定义是否存在」
         //   （恒 false，会让 --service-plan 自检误报）—— 见下面的 is_defined 覆写。
         PathBuf::from(format!("schtasks://{}", GUARD_TASK))
     }
 
     /// Windows 的真实判定：`schtasks /Query` 成功即计划任务存在。
     ///
-    /// ⚠ 2026-09-13（P3 修复）：覆写默认的 `definition_path().is_file()` ——
-    ///   后者对标识串恒为 false，使 `--service-plan` 无论任务是否存在都报「现存 = 否」。
+/// 覆写默认判定：以 `schtasks /Query` 成功为准（标识串用 is_file() 恒 false）。
     fn is_defined(&self) -> bool {
         matches!(
             crate::bounded::run(
@@ -239,7 +239,7 @@ impl ServiceControl for Impl {
 
     /// 建立计划任务（幂等，且**包装脚本过时时自愈**）。
     ///
-    /// ⚠ 2026-09-12（P2）：原实现「`/Query` 成功 → 直接返回」= **只创建、永不更新**。
+    /// 2026-09-12（P2）：原实现「`/Query` 成功 → 直接返回」= **只创建、永不更新**。
     ///   与 Linux unit / macOS plist 同病：模板演进后老用户永远跑旧定义。
     ///
     ///   Windows 与另两平台的区别：计划任务**本身**无法直接比对内容，
@@ -272,12 +272,8 @@ impl ServiceControl for Impl {
         }
         let is_update = task_exists;
         std::fs::write(&wrapper, &shim).map_err(|e| format!("写入包装脚本失败: {}", e))?;
-        // ⚠ `/RL HIGHEST` 需要相应权限（2026-09-11 审计）：
-        //   在**非提权**会话中创建「以最高权限运行」的计划任务可能被拒（Access is denied）。
-        //   而壳默认以普通用户权限运行 —— 若首次尝试失败，退化为普通权限任务，
-        //   保证「服务定义一定能建立」（守卫本身不需要管理员权限，它只管理当前用户的 DSH）。
-        //   原则：**权限不足时应降级而非彻底失败**，否则用户会卡在「守卫就绪」。
-        // ⚠ `/TR` 的值**必须自带引号**（P1-D 修复，2026-09-12）：
+// 创建「最高权限」任务可能被拒：权限不足时降级为普通权限任务（不彻底失败）。
+        // `/TR` 的值**必须自带引号**（P1-D 修复，2026-09-12）：
         //   schtasks 对 `/TR` 接收的都是**纯字符串**（此处经 args 传参，不经过 cmd），
         //   它内部按命令行规则解析 —— 路径含空格时，若不自带引号，
         //   任务动作会被**截断到第一个空格**。
@@ -356,7 +352,7 @@ impl ServiceControl for Impl {
 
     fn spawn_daemon(&self, guard: &Path) -> Result<u32, String> {
         use std::os::windows::process::CommandExt;
-        // ⚠ 引号处理必须正确（2026-09-11 修复）：
+        // 引号处理必须正确（2026-09-11 修复）：
         //   npm 全局安装的守卫是 `dsh-supervisor.cmd` 垫片，须经 `cmd /C` 启动。
         //   而旧写法 `.args(["/C", path, "daemon"])` 在**路径含空格**时会被 cmd 拆错 ——
         //   而 `%APPDATA%` 形如 `C:\Users\<用户名>\AppData\Roaming`，

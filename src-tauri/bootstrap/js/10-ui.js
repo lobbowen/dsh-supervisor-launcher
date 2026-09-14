@@ -50,10 +50,7 @@
     });
   }
 
-  function showSkip(fn) { NS.skipAction = fn; NS.$('skipWrap').style.display = ''; }
-  function hideSkip() { NS.skipAction = null; NS.$('skipWrap').style.display = 'none'; }
 
-  function hideSkip() { NS.skipAction = null; NS.$('skipWrap').style.display = 'none'; }
   // 阶段上报：写入 ~/.dsh/shell/identity.json + shell.log，供内核观察与问题定位。
 
   function phase(p) {
@@ -86,12 +83,9 @@
   function diagText() {
     return [
       'node=' + (NS.nodeVer || 'unknown'),
-      'core_from=' + (NS.coreFrom || 'none'),
-      'core_to=' + (NS.coreTo || 'none'),
+      'core=' + (NS.coreVersion || 'none'),
       'plan=' + (NS.lastPlan ? JSON.stringify(NS.lastPlan) : 'none'),
       'shell=' + (NS.shellId ? (NS.shellId.version + '/' + NS.shellId.installKind + '/capable=' + NS.shellId.selfUpdateCapable) : 'unknown'),
-      'shell_attempt=' + (NS.shellId ? NS.shellId.attempt : '?'),
-      'shell_pinned=' + (NS.shellId && NS.shellId.pinned ? JSON.stringify(NS.shellId.pinned) : '[]'),
       'shell_update=' + (NS.updPlan ? JSON.stringify({ available: NS.updPlan.available, latest: NS.updPlan.latest, skipped: NS.updPlan.skipped, error: NS.updPlan.error }) : 'none'),
       // ── 环境探测追踪（架构修复 2026-09-11）：探测根因是**环境特有**的，
       //    靠读代码无法确定；这份追踪是定位该类问题唯一可靠的手段。 ──
@@ -104,7 +98,7 @@
       // 现从预热缓存读（与是否需要下载解耦），并在尚未就绪时明确说明「预热中」。
       'mirror=' + (
         (NS.warmMirror && NS.warmMirror.npmBest)
-          ? (NS.warmMirror.npmBest + '/' + NS.warmMirror.npmLatencyMs + 'ms')
+          ? (String(NS.warmMirror.npmBest).replace(/\/+$/, '') + '/' + NS.warmMirror.npmLatencyMs + 'ms')
           : (NS.lastMirror && NS.lastMirror.mirror
               ? (NS.lastMirror.mirror + '/' + NS.lastMirror.latencyMs + 'ms')
               : (NS.warmTimer ? 'warming（预热中）' : 'none（预热未启动或全部不可达）'))),
@@ -128,8 +122,6 @@
   NS.showProgress = showProgress;
   NS.hideProgress = hideProgress;
   NS.withTimeout = withTimeout;
-  NS.showSkip = showSkip;
-  NS.hideSkip = hideSkip;
   NS.phase = phase;
   NS.errText = errText;
   NS.fail = fail;

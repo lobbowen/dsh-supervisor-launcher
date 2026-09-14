@@ -41,7 +41,7 @@ fn manifest_dir() -> PathBuf {
 
 /// 读取待检查文件，并**归一化换行为 LF**。
 ///
-/// ⚠ 2026-09-13：这些门禁大量做**多行源码片段**的文本断言，而 Windows 检出
+/// 2026-09-13：这些门禁大量做**多行源码片段**的文本断言，而 Windows 检出
 ///   可能是 CRLF（core.autocrlf + 本仓原先无 .gitattributes）→ 内嵌换行的针脚永不匹配：
 ///     · 正向 find → 退化为 usize::MAX（失败）；
 ///     · 反向 !contains → 退化为恒真（假绿、门禁空转，比失败更糟）。
@@ -78,7 +78,7 @@ fn m_a_warmup_persists_selected_npm() {
         "M-a FAIL 未把选中 npm 源的延迟一起落盘（延迟与选择须同源）"
     );
     // 反向：确认落盘发生在 **warmup_async 内**（而非只命中 load() 里的读取赋值）。
-    //   ⚠ 不能用 find(整个文件) —— 那会命中 load() 中的 \`m.selected_npm = Some(s2...)\`
+    //   不能用 find(整个文件) —— 那会命中 load() 中的 \`m.selected_npm = Some(s2...)\`
     //     （位置在 warmup_async 之前）→ 假红。必须把搜索**限定在 warmup_async 的函数体**内。
     let i_warmup = code.find("pub fn warmup_async").expect("M-a FAIL 未找到 warmup_async");
     let body = &code[i_warmup..(i_warmup + 4000).min(code.len())];

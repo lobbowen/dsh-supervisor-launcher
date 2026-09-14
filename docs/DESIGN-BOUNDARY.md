@@ -2,7 +2,7 @@
 
 > 2026-09-11 · 目的：回答「哪些能力应归桌面壳、哪些必须留内核、二者如何配合」
 >
-> ## ⚠ 本文件描述的是**改造前状态**，结论已执行
+> ## 本文件描述的是**改造前状态**，结论已执行
 >
 > 文中的缺陷（§2.3）**绝大部分已修复**，`文件:行号` 是**审计时快照**（行号因重构已移位）。
 > **执行状态与未修项见 `DESIGN-COMPLETE.md` 的「执行状态」节。**
@@ -69,12 +69,12 @@
 
 | # | 能力 | 壳侧 | 内核侧 | 重叠性质 |
 |---|---|---|---|---|
-| **O1** | **npm 镜像目录** | `mirror.rs` NPM_PRESETS **6 条** | `dist/index.js` REGISTRY_PRESETS **6 条** + `config.js` registries **6 条** | 🔴 **逐字节相同的 3 份副本** |
-| **O2** | **镜像探测方法** | 真实包元数据（`@dsh-sup/dsh-core-<plat>`）| `/-/ping` | 🔴 **方法不同 → 选出的源不同**（实测 ustclug 2613ms vs 389ms）|
-| **O3** | **安装执行规格** | `core.rs` npm install（含三平台提权）| `dist/index.js` `runNpmInstall`（不提权）| 🟡 语义重叠，上下文不同 |
-| **O4** | **环境探测** | `nodeprobe.rs`(639) + `env.rs`(272)：候选枚举、版本、PATH 扫描、**最低门槛 v22.12** | `env-catalog.js`(83) + `exec-path.js`(92)：`which --version` | 🟡 **判定标准不一致**（壳有门槛，内核只看「which 成功」）|
-| **O5** | **平台原语** | `bounded.rs`(191) 进程/超时；`env.rs` PATH 目录 | `file-protect.js`(94) / `process.js`(45) / `exec-path.js`(92) | 🟡 语言不同，**规格应统一** |
-| **O6** | **自启与服务定义** | `service.rs`(258)：三平台服务定义（守卫）| `autostart.js`(354)：开关 + GUI 自启 | ✅ **已定案**（见 D5）|
+| **O1** | **npm 镜像目录** | `mirror.rs` NPM_PRESETS **6 条** | `dist/index.js` REGISTRY_PRESETS **6 条** + `config.js` registries **6 条** | **逐字节相同的 3 份副本** |
+| **O2** | **镜像探测方法** | 真实包元数据（`@dsh-sup/dsh-core-<plat>`）| `/-/ping` | **方法不同 → 选出的源不同**（实测 ustclug 2613ms vs 389ms）|
+| **O3** | **安装执行规格** | `core.rs` npm install（含三平台提权）| `dist/index.js` `runNpmInstall`（不提权）| 语义重叠，上下文不同 |
+| **O4** | **环境探测** | `nodeprobe.rs`(639) + `env.rs`(272)：候选枚举、版本、PATH 扫描、**最低门槛 v22.12** | `env-catalog.js`(83) + `exec-path.js`(92)：`which --version` | **判定标准不一致**（壳有门槛，内核只看「which 成功」）|
+| **O5** | **平台原语** | `bounded.rs`(191) 进程/超时；`env.rs` PATH 目录 | `file-protect.js`(94) / `process.js`(45) / `exec-path.js`(92) | 语言不同，**规格应统一** |
+| **O6** | **自启与服务定义** | `service.rs`(258)：三平台服务定义（守卫）| `autostart.js`(354)：开关 + GUI 自启 | **已定案**（见 D5）|
 
 ### 2.3 已被证实的缺陷（重叠的代价）
 
@@ -191,9 +191,9 @@
 
 | 契约 | 方向 | 内容 |
 |---|---|---|
-| `~/.dsh/shell/identity.json` | 壳 → 内核 | 版本、phase、pid、**exe**（看护定位用）、attempt |
-| `~/.dsh/shell/update-journal.json` | 内核 → 壳 | 更新账本（pending/confirmed/pinned）|
-| `shared/version-vectors.json` | 双向（测试）| 版本比较/合法性的共享测试向量 |
+| `~/.dsh/shell/identity.json` | 壳 → 内核 | 版本、phase、pid、**exe**（看护定位用）、lastSeenAt |
+| `~/.dsh/shell/update-journal.json` | 内核内部 | 壳更新账本（to/confirmed）；**不含回退/拉黑** |
+| `shell-release/version-vectors.json` | 双向（测试）| 版本比较/合法性的共享测试向量（内核侧副本为 `shared/version-vectors.json`）|
 
 ### 4.4 不变量
 

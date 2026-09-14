@@ -4,12 +4,12 @@
 //! 为什么不引 reqwest/ureq：这些请求极简（无 TLS / 无重定向 / 无连接复用），
 //! 而壳是**安装器** —— 少一个依赖就少一份供应链与体积负担。
 //!
-//! ⚠ 不变量 B1（有界）：
+//! 不变量 B1（有界）：
 //!   · 连接必须用 `connect_timeout` —— 防火墙 DROP 时 `connect` 会等到
 //!     OS 的 SYN 重试耗尽（Windows 默认可达 20+ 秒）；
 //!   · 读写必须设超时 —— 守卫挂起时不得让壳无限阻塞。
 //!
-//! ⚠ 不变量 B2（不阻塞 UI）：经 [`spawn_local_post`] 派发到独立线程 ——
+//! 不变量 B2（不阻塞 UI）：经 [`spawn_local_post`] 派发到独立线程 ——
 //!   托盘回调里的网络 I/O 一旦阻塞，整个界面（含重绘）都会冻结。
 use std::net::TcpStream;
 
@@ -31,7 +31,7 @@ pub(crate) fn spawn_local_post(port: u16, path: &'static str) {
 /// 同 post_local，但带读写超时（防止守卫挂起时壳无限阻塞）。返回响应体（解码 utf8 尽力）。
 /// 与本地守卫建立连接，**带连接超时**。
 ///
-/// ⚠ 必须用 `connect_timeout` 而非 `connect`（2026-09-11 审计）：`TcpStream::connect`
+/// 必须用 `connect_timeout` 而非 `connect`（2026-09-11 审计）：`TcpStream::connect`
 ///   **没有超时** —— 若端口被防火墙 DROP（而非 REJECT），连接会一直等到操作系统的
 ///   SYN 重试耗尽，Windows 上默认可达 20+ 秒。而本函数被 `guard_ready`（引导页每次
 ///   500ms 轮询一次、最多 40 次）与托盘动作调用，等同于反复长时间阻塞。

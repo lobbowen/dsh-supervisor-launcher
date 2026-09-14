@@ -17,8 +17,7 @@ const INSTALL_CMD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 ///   · has_privilege_channel() 用它判定「能否提权」；
 ///   · install_node() 用它选**实际执行**的命令。
 ///
-/// ⚠ 两者必须同源（2026-09-13 P3 修复）。此前前者探测「pkexec 或 sudo」、
-///   后者硬编码 pkexec → 有 sudo 无 pkexec 的机器被误判「可自更新」却在安装时失败。
+/// 两者必须同源（探测与执行用同一命令），否则会「宣称可更新却在安装时失败」。
 pub const PRIVILEGE_COMMANDS: [&str; 2] = ["pkexec", "sudo"];
 
 /// 在 PATH 中定位第一个可用的提权命令（**不执行**，只判存在性）。
@@ -56,24 +55,25 @@ impl Platform for Impl {
         Capabilities {
             platform: NAME,
             native_service: true, // systemd --user
-            // ⚠ P3 修复（2026-09-13，失效模式 b）：**声明与实测必须同源**。
-            //   原先硬编码 true，而 has_privilege_channel() 会真的探测 pkexec/sudo。
-            //   在两者都没有的机器上，--platform-matrix 报 privilege_channel=true，
-            //   而同一机器 --shell-update-plan 的 self_update_capable=false、
-            //   Node 安装会失败 —— 同一事实两个相反答案，排障时误导。
-            //   现改为调用同一个探测函数（单一事实源）。
+// 声明与实测必须同源：改为调用同一个探测函数。
             privilege_channel: self.has_privilege_channel(),
             node_artifact: "tar.xz",
+        }
+    }
+
+    fn core_platform_tag(&self) -> Option<&'static str> {
+        // 与 node_artifact 同一套 ARCH 归一；未知架构如实返回 None。
+        match std::env::consts::ARCH {
+            "x86_64" => Some("linux-x64"),
+            "aarch64" => Some("linux-arm64"),
+            _ => None,
         }
     }
 
     fn node_artifact(&self, version: &str) -> Option<super::NodeArtifact> {
         // 官方 files[] 两个标签都存在（实测）。
         //
-        // ⚠ 2026-09-12（P2）：原为「非 aarch64 即 x64」——静默把未知架构当 x64，
-        //   而 core.rs::package_name() 对同一事实是显式 match + Err（两处两种态度）。
-        //   本函数返回 Option，故未知架构用 None 表达「无可用制品」，
-        //   由调用方如实报告，而不是拿到一个架构不符的包（那比明确失败更糟）。
+// 未知架构返回 None（如实报「无可用制品」），绝不静默当 x64。
         let arch = match std::env::consts::ARCH {
             "x86_64" => "x64",
             "aarch64" => "arm64",
@@ -114,7 +114,7 @@ impl Platform for Impl {
     fn install_node(&self, file: &Path) -> Result<PathBuf, String> {
         let abs = file.canonicalize().map_err(|e| e.to_string())?;
         let cmd = format!("tar -xJf '{}' -C /usr/local --strip-components=1", abs.display());
-        // ⚠ P3 修复（2026-09-13）：**经与 has_privilege_channel 同一个 helper** 选提权命令。
+        // P3 修复（2026-09-13）：**经与 has_privilege_channel 同一个 helper** 选提权命令。
         //
         //   缺陷：has_privilege_channel 探测「pkexec **或** sudo」，而这里**硬编码 pkexec**。
         //     一台**有 sudo、无 pkexec** 的机器（常见于精简发行版/容器/自建环境）上：
@@ -164,7 +164,7 @@ impl Platform for Impl {
 
     fn has_privilege_channel(&self) -> bool {
         // **不主动执行提权**，只探测命令存在性（用于「不可自更新」的提前判定）。
-        // ⚠ 与 install_node **共用** find_privilege_command —— 同一事实一处实现。
+        // 与 install_node **共用** find_privilege_command —— 同一事实一处实现。
         find_privilege_command().is_some()
     }
 
@@ -189,7 +189,7 @@ impl ServiceControl for Impl {
 
     /// 建立 systemd 用户单元（幂等，且**内容过时时自愈**）。
     ///
-    /// ⚠ 2026-09-12（P2 修复）：原实现是「`path.is_file()` → 直接返回」，
+    /// 2026-09-12（P2 修复）：原实现是「`path.is_file()` → 直接返回」，
     ///   即**只创建、永不更新**。后果：模板演进后（例如 P3 给 ExecStart 加引号），
     ///   老用户磁盘上的旧 unit **永远不会被重写** → 修复到不了已装用户。
     ///   macOS plist 与 Windows 计划任务同病。
@@ -200,10 +200,9 @@ impl ServiceControl for Impl {
     ///     · 存在且一致 → 不触碰（真正的幂等，避免每次启动都写盘/reload）。
     fn ensure_defined(&self, guard: &Path) -> Result<String, String> {
         let path = self.definition_path();
-        // 模板内嵌（不再依赖外部 systemd/*.service 文件 —— npm 发行包不含该目录，
-        // 旧实现因此静默跳过服务部署，是本次死锁的直接成因）。
+// 模板内嵌（不依赖外部 systemd/*.service 文件）。
         //
-        // ⚠ `ExecStart` 的可执行路径**必须自带引号**（P3 修复，2026-09-12）。
+        // `ExecStart` 的可执行路径**必须自带引号**（P3 修复，2026-09-12）。
         //   systemd 对 ExecStart 的第一参数按 shell-like 规则解析：
         //   **未加引号的空格会被当作参数分隔符** → 路径被拆成两段 →
         //   systemd 报 `Command /home/user is not executable`（实测 systemd-analyze verify 确认）。
@@ -355,7 +354,7 @@ mod tests {
             "A-2 FAIL has_privilege_channel 未用共享 helper"
         );
         // 单一事实源：命令清单只定义一次。
-        //   ⚠ 针脚必须**在运行时拼出**（不能是源码里逐字出现的字面量）——
+        //   针脚必须**在运行时拼出**（不能是源码里逐字出现的字面量）——
         //     include_str! 把**本测试自己也读进来了**，逐字字面量必然自匹配，
         //     正是 AUDIT-HANDOFF 9.2 记录的「断言命中自己的文字」陷阱。
         let needle = format!("const {}: ", "PRIVILEGE_COMMANDS");

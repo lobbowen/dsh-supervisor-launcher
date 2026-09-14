@@ -27,7 +27,7 @@
 
 `src-tauri/launcher-build.yml`（290 行）—— 它**不在 `.github/workflows/` 下**，
 GitHub **永远不会执行**它；但 `docs/RELEASE-AND-BUILD-DECISION.md` 与 `scripts/bump-shell.sh` 都
-**声称它是产线**（「tag 触发 launcher-build.yml：四平台完整构建」）。
+**曾声称它是产线**（「tag 触发 launcher-build.yml：四平台完整构建」）。
 真实产线是 `.github/workflows/build.yml` —— 两份定义已漂移（触发策略、步骤数均不同）。
 
 已处置：**删除幽灵文件**，引用改指真实产线，并由本标准的门禁**禁止再出现**
@@ -40,8 +40,7 @@ GitHub **永远不会执行**它；但 `docs/RELEASE-AND-BUILD-DECISION.md` 与 
 | **本文件** | **流程**（阶段/入口/矩阵/门禁/放行/验证/回滚）|
 | `docs/RELEASE-AND-BUILD-DECISION.md` | 决策**背景与理由** |
 | `docs/DESIGN-SHELL-ARCHITECTURE.md` / `DESIGN-BOUNDARY.md` / `DESIGN-COMPLETE.md` | 设计（架构/边界/完成态）|
-| `docs/SHELL-NATIVE-STABILITY-DECISION.md` / `SHELL-UPDATE-CHANNEL-VERIFICATION.md` | 专项决策 |
-| `docs/AUDIT-SHELL-BOOTSTRAP.md` / `SHELL-STABILITY-AUDIT.md` / `SHELL-EXECUTION-PLAN.md` / `SHELL-BOOTSTRAP-REMEDIATION.md` / `SHELL-UPDATE-TRIGGER-CORRECTION.md` | **时间点记录**（角色见 `docs/README.md`）|
+| `docs/SHELL-UPDATE-CHANNEL-VERIFICATION.md` | 专项验证记录 |
 
 ---
 
@@ -60,7 +59,7 @@ GitHub **永远不会执行**它；但 `docs/RELEASE-AND-BUILD-DECISION.md` 与 
 | H8 | 发布（tag `v*`）| `publish` job：归拢产物 → `node shell-release/make-manifest.js` → `npm publish` | 是 |
 | H9 | 发布后验证 | 见第 5 节 | 是 |
 
-> 本地可做 H1–H4 / H7；H0 / H8 走 CI（四平台产物必须来自各自 runner）。
+> 本地可做 H0–H5 / H7；H6 / H8 走 CI（四平台产物必须来自各自 runner）。
 
 ## 2. 平台矩阵（4 平台，唯一来源 = CI 矩阵）
 
@@ -119,7 +118,7 @@ GitHub **永远不会执行**它；但 `docs/RELEASE-AND-BUILD-DECISION.md` 与 
 | CI 结论 | tag run | version + 四平台 build + publish 全绿 |
 | 安装冒烟 | 各平台安装包 | 能装、能起、能更新 |
 
-> **⚠ 查询 npm 必须容忍传播延迟**（2026-09-14 实测）：刚发布后立即查询可能返回 E404 或旧版本列表 ——
+> **注意：查询 npm 必须容忍传播延迟**（2026-09-14 实测）：刚发布后立即查询可能返回 E404 或旧版本列表 ——
 > 这是 **registry / CDN 传播延迟**，不代表发布失败。判据顺序：**先看 CI 的 publish 日志**
 > （`+ @dsh-sup/<pkg>@<ver>` 是 npm 的确认），再重试查询（建议 45s 间隔、最多 4 次）。
 > 本次发布即因此出现过一次假警报（两个包被误判为漏发，实为传播延迟）。
@@ -156,6 +155,7 @@ GitHub **永远不会执行**它；但 `docs/RELEASE-AND-BUILD-DECISION.md` 与 
 | R-6 | `verify-shell-versions.js` 确实被 CI 调用 |
 | R-7 | 必需章节标题齐备 |
 | R-8 | 反向：判据能识别幽灵文件 / 缺失入口（门禁非空转）|
+| R-9 | `scripts/` 下无本地构建/发布脚本（硬标准：仅 CI 构建与发布）|
 
 ```json shell-release-pipeline
 {

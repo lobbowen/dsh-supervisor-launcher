@@ -119,7 +119,7 @@ fn c_c_full_build_runs_on_push_for_all_platforms() {
     assert!(!build.is_empty(), "C-c FAIL 未找到 build job");
 
     // ① 不得有 **job 级** if: 守卫（否则日常 push 会跳过完整构建）。
-    //    ⚠ 只认**恰好 4 空格缩进**的 if: —— job 级键缩进 4，步骤级在 steps 下缩进 8。
+    //    只认**恰好 4 空格缩进**的 if: —— job 级键缩进 4，步骤级在 steps 下缩进 8。
     //      第一版用 trim_start() 判会命中步骤级 if（如「tag 才上传 Release 资产」），假红。
     let job_level_if: Vec<&str> = build
         .lines()

@@ -62,7 +62,7 @@ pub(crate) fn cli_env_plan() -> i32 {
         _ => println!("node          = （未找到）"),
     }
     if let Some((on, ms)) = crate::nodeprobe::current_stuck() {
-        println!("⚠ 仍在探测    = {} （已 {} ms）", on, ms);
+        println!("仍在探测    = {} （已 {} ms）", on, ms);
     }
     println!("逐候选追踪:");
     print!("{}", crate::nodeprobe::render_trace(&out.trace));

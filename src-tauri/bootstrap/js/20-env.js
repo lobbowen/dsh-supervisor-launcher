@@ -10,7 +10,7 @@
       var settled = false;
       function poll() {
         if (settled) return;
-        // ⚠ 必须给**每次**查询包一层超时（2026-09-11 二次修复）。
+        // 必须给**每次**查询包一层超时（2026-09-11 二次修复）。
         //   原实现是裸 `core.invoke(...).then(...)`：一旦该 invoke 永不 settle，
         //   `poll()` 就**再也不会被调度** —— 既不报错、也不推进，
         //   界面永久停在「正在检测系统环境…」。
@@ -78,18 +78,18 @@
   }
 
   function afterEnv(st) {
-    if (st.busy) { NS.setStep(1); NS.status(st.status || '正在准备 Node.js 运行环境…'); return NS.stepNodeWait(); }
+    if (st.busy) { NS.setStep(0); NS.status(st.status || '正在准备 Node.js 运行环境…'); return NS.stepNodeWait(); }
     if (!st.installed) {
-      NS.setStep(1);
+      NS.setStep(0);
       return NS.probeMirrorThen(function () {
         NS.status('未检测到 Node.js · 正在补全运行环境…');
         return NS.core.invoke('start_node_install').then(function () { return NS.stepNodeWait(); });
       });
     }
-    // ⚠ 必须校验**最低门槛**：后端一直回传 minOk（DSH 要求 Node >= v22.12），
+    // 必须校验**最低门槛**：后端一直回传 minOk（DSH 要求 Node >= v22.12），
     //   而前端曾长期忽略它 —— 装了旧版 Node 也照常放行，直到内核启动才失败。
     if (st.minOk === false) {
-      NS.setStep(1);
+      NS.setStep(0);
       return NS.probeMirrorThen(function () {
         NS.status('Node.js ' + st.installed + ' 低于最低要求（' + (st.minRequired || 'v22.12') + '）· 正在升级…');
         return NS.core.invoke('start_node_install').then(function () { return NS.stepNodeWait(); });
@@ -117,7 +117,7 @@
   }
 
   function stepNodeDone() {
-    NS.setStep(1);
+    NS.setStep(0);
     NS.status('Node.js ' + (NS.nodeVer || '') + ' 已就绪');
     // 环境就绪后**才**进入桌面版本（网络步骤，带超时与跳过出口）
     return NS.wait(350).then(NS.stepShellUpdate);

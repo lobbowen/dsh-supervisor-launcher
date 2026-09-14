@@ -4,11 +4,7 @@ use std::time::{Duration, Instant};
 
 /// Node 版本探测的时间上限。
 ///
-/// ⚠ 为什么必须有（2026-09-11 用户 Windows 真机事故：引导卡在「检测系统环境」）：
-///   Windows 的 PATH 默认包含 `%LOCALAPPDATA%\Microsoft\WindowsApps`，其中的 `node.exe`
-///   是**应用执行别名存根**（AppExecLink 重解析点，指向 Microsoft Store），并非真实 Node。
-///   原实现 `find_in_path` 用 `is_file()` 判定即选中它，而 `Command::output()` 无超时 ——
-///   执行该存根会尝试唤起 Store 并**永不返回**，引导页从此永久停住。
+/// Windows 的 `WindowsApps\node.exe` 是 Store 应用执行别名存根，执行会挂起 —— 必须有界。
 const NODE_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// 兼容包装 probe_system_node 的有界预算（真正执行在 nodeprobe 的分离线程里）。
@@ -34,11 +30,7 @@ const PATH_SCAN_BUDGET: Duration = Duration::from_secs(10);
 
 /// PATH 扫描（**有界 + 安全过滤**）。
 ///
-/// ⚠ 两处工程性修正（2026-09-11 架构修复）：
-///   1. 原实现**没有任何时间上限** —— PATH 中若含断开的网络盘或 UNC，一次 is_file()
-///      就可能阻塞数十秒；而本函数在**核心定位路径**上被调用（无 GUI 的 CLI 自检同样受影响）。
-///   2. 增加磁盘类型过滤：Windows 上跳过非固定盘与 UNC。GetDriveTypeW 是**本地**判定，
-///      不会像 exists()/metadata() 那样触网，故对断开的映射盘也安全。
+/// 预算 PATH_SCAN_BUDGET；Windows 跳过非固定盘与 UNC（本地判定，不触网）。
 pub fn find_in_path(name: &str) -> Option<PathBuf> {
     let started = Instant::now();
     for dir in path_dirs_local_only() {
@@ -61,21 +53,7 @@ pub fn path_dirs_local_only() -> Vec<PathBuf> {
     out
 }
 
-/// 该目录是否位于「本地固定磁盘」。
-///
-/// 为什么需要：Windows 的 PATH 常含映射盘或 UNC；当网络盘断开时，
-/// GetFileAttributesW / CreateProcessW 会阻塞到 SMB 超时（数十秒，且可能重试）。
-/// 本判定在**执行任何可能触网的操作之前**完成，且自身不触网。
-///
-/// ⚠ **按盘符记忆（2026-09-11 二次修复）**：
-///   `GetDriveTypeW` 对**断开的网络驱动器**可能阻塞（微软文档明确提示该 API 可能慢）。
-///   原实现**对每个 PATH 条目都调一次** —— PATH 里数十个条目往往集中在同一两个盘符，
-///   于是同一个盘被反复查询，一旦该盘有问题就重复付出阻塞代价。
-///   现按「盘符」缓存：最多 26 次查询（且每个盘符只查一次）。
-/// 该目录是否位于**本地固定盘**（平台判定）。
-///
-/// 实现已下沉到 platform 层（2026-09-11）。调用方在引导的**关键路径**上，
-/// 而 `Path::is_file()` 在断开的映射盘/UNC 上会触网阻塞数十秒。
+/// 该目录是否位于本地固定盘（平台判定；在触网操作之前完成，按盘符缓存 GetDriveTypeW）。
 pub fn is_local_fixed_dir(dir: &Path) -> bool {
     crate::platform::current().is_local_fixed_dir(dir)
 }
@@ -133,7 +111,7 @@ pub fn node_version(node: &Path) -> Option<String> {
 
 /// 系统 PATH 中的 Node：缺失返回 None。
 ///
-/// ⚠ 必须**遍历全部候选**而非取第一个：PATH 靠前的候选可能是不可用的存根，
+/// 必须**遍历全部候选**而非取第一个：PATH 靠前的候选可能是不可用的存根，
 ///   若直接返回它就会掩盖后面真正可用的 Node 安装。
 /// 兼容入口：委托给**有界探测运行时**（nodeprobe）。
 ///
@@ -148,14 +126,14 @@ pub fn probe_system_node() -> Option<(PathBuf, String)> {
 
 /// 安装后已知候选路径（官方安装的标准落点）。
 ///
-/// ⚠ Windows 不得硬编码 `C:\Program Files`（2026-09-11 审计）：
+/// Windows 不得硬编码 `C:\Program Files`（2026-09-11 审计）：
 ///   真实路径随**系统盘符**与**系统语言**变化（中文系统是 `Program Files` 的本地化目录名），
 ///   也可能装在 `Program Files (x86)`。故一律经 `ProgramFiles` / `ProgramFiles(x86)`
 ///   环境变量推导 —— 这也是 `nodeprobe::known_locations()` 采用的口径，两处必须一致。
 /// **安装后** Node 可执行文件应出现的位置（平台判定；用于校验安装成功）。
 ///
 /// 实现已下沉到 platform 层（2026-09-11）。
-/// ⚠ Windows 不得硬编码 `C:\Program Files`：真实路径随**系统盘符**与
+/// Windows 不得硬编码 `C:\Program Files`：真实路径随**系统盘符**与
 ///   **系统语言**变化（中文系统是本地化目录名），也可能装在 `Program Files (x86)`，
 ///   故一律经 `ProgramFiles` / `ProgramFiles(x86)` 环境变量推导。
 pub fn known_install_node_path() -> Option<PathBuf> {
@@ -197,9 +175,7 @@ pub fn api_base_url() -> String {
 
 /// 关闭窗口时的行为（读守卫 config.closeAction；'exit'=退出管家全关，其余=隐藏至托盘）。
 pub fn close_action() -> String {
-    // 契约 ARCHITECTURE-CONTRACT-phase0 §3.5：**真正的 JSON 解析**（旧实现用字符串扫描，
-    // config.json 只要出现空白/换行/转义差异即解析失效——例如格式化写入后键值间无空格）。
-    // 语义不变：'exit' = 退出管家（停全部服务）；其余（含缺失/解析失败/非法值）= 隐藏至托盘。
+// 真 JSON 解析（契约 §3.5）。语义：exit=退出管家；其余（含缺失/解析失败）= 隐藏至托盘。
     // serde_json 已是壳依赖（见 Cargo.toml），零新增依赖。
     config_json()
         .and_then(|v| v.get("closeAction").and_then(|x| x.as_str()).map(|s| s.to_string()))
@@ -209,16 +185,7 @@ pub fn close_action() -> String {
 
 /// 守卫 API 的**默认端口**（单一事实源）。
 ///
-/// ⚠ 2026-09-13（P3 修复）：原实现里这个「默认端口」有两个值 ——
-///   `api_base_url()` 用 36360（高位段起始），而 `api_port()` 的回退是 **3100**
-///   （旧端口，注释里还写着「3100 常用端口易冲突」）。同一事实两处默认且已分叉。
-///
-/// 虽然正常路径下 `api_port()` 由 `api_base_url()` 解析而来（不会走到回退），
-/// 但一旦走到（解析失败/逻辑被改动），就会**回退到一个早就退役的端口** ——
-/// 守卫存活探测与面板导航将指向一个没人监听的端口，且现象是「守卫未运行」
-/// 而非「端口取错」，排障方向被带偏。
-///
-/// 现两者共用本常量：改一处即两处一致，不可能再漂移。
+/// 原有两个默认端口（36360 vs 3100）且已分叉；现两者共用本常量（单一事实源）。
 pub const DEFAULT_API_PORT: u16 = 36360;
 
 /// 壳可用性探测用守卫端口（与 api_base_url 同源解析）。

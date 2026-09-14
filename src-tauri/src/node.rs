@@ -5,11 +5,8 @@ use std::path::{Path, PathBuf};
 
 // 镜像候选已收敛到 mirror.rs 的 NODE_PRESETS（壳自持配置，支持用户自定义）。
 
-/// 整个请求的时间上限。
-///
-/// ⚠ 必须足够大（2026-09-11 修复）：ureq 的 timeout 覆盖**整次调用**（含响应体读取），
-///   而 Node 安装包体积为 30-90 MB（macOS .pkg 实测 89.4 MB）。原值 60 秒在网络稍慢时
-///   必然超时 —— 表现为「运行环境」步骤失败且看似网络问题，实为超时配置过小。
+/// 整个请求的时间上限（ureq 的 timeout 覆盖整次调用，含响应体读取）。
+/// Node 安装包 30-90MB，必须给足；否则慢网下会误报为网络故障。
 const HTTP_TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
 fn http_get_bytes(url: &str) -> Result<Vec<u8>, String> {
@@ -22,37 +19,11 @@ fn http_get_bytes(url: &str) -> Result<Vec<u8>, String> {
     Ok(buf)
 }
 
-/// index.json `files[]` 里的平台标签 —— **必须与 `platform_artifact()` 选定的产物语义一致**。
+/// 本平台在官方 index.json 中的平台标签（必须与 `platform_artifact()` 的产物语义一致）。
 ///
-/// ⚠ macOS 标签语义修正（2026-09-11，实测驱动）：
-///   原实现 arm64 返回 `osx-arm64-tar`、x64 返回 `osx-x64-tar`，而 `platform_artifact()`
-///   返回的是官方 **`.pkg`** —— 判定依据（tar 标签）与下载对象（pkg）**不是一回事**。
-///   它能工作只是因为两者恰好都存在，属**侥幸而非正确**。
-///
-///   实测（逐版本核对官方 index.json 的 files[]）：
-///     · `osx-x64-pkg`   —— 所有 LTS 版本**都存在**（这就是通用 pkg 的标签）
-///     · `osx-arm64-pkg` —— **从不存在**
-///     · `osx-arm64-tar` / `osx-x64-tar` —— 存在，但那是 tarball 的标签
-///   故 pkg 路径的正确标签是 `osx-x64-pkg`（适用于两种架构 —— 官方只发一个通用 pkg）。
-///
-///   补充实测证据：解包 `node-v24.21.0.pkg` 可见其 payload 同时含 x86_64 与 arm64
-///   两个 Mach-O 切片（fat 二进制），即 .pkg 确为**通用包**，两种 Arch 都能原生安装。
-/// 判定标签必须**按架构**给出，且与 `platform_artifact()` 的产物语义一致。
-///
-/// ⚠ Linux 也曾硬编码 `linux-x64`（2026-09-11 审计发现，与 macOS 同类）：
-///   在 arm64 上 `platform_artifact()` 返回 `node-v{V}-linux-arm64.tar.xz`，
-///   而标签却是 `linux-x64` —— 判定依据与产物不是一回事。
-///   它能通过 `has` 检查只是因为「恰好 x64 标签也在 files[] 里」，
-///   属**侥幸而非正确**：若某版本只有 x64 而无 arm64，代码仍会判定可用，
-///   随后去下载一个不存在的 arm64 文件（404）。
-///
-/// 各平台实测口径：
-///   Linux   : `linux-x64` / `linux-arm64`（files[] 两者均存在）
-///   macOS   : `osx-x64-pkg`（官方**只发一个通用 pkg**，无 osx-arm64-pkg；实测确认）
-///   Windows : `win-x64-msi`（官方**无 win-arm64-msi**，只有 win-arm64-7z/zip）
-///
-/// ⚠ 已知限制（诚实记录）：Windows arm64 上只能装 x64 msi（依赖系统模拟执行），
-///   因为官方未提供 arm64 msi。若要原生 arm64，需改用 zip 解包路径 —— 当前未实现。
+/// 不变量：判定依据与下载对象必须是同一种制品。macOS 用通用 `.pkg`
+/// （标签 `osx-x64-pkg`，官方无 `osx-arm64-pkg`）；Linux 按架构 `linux-x64`/`linux-arm64`；
+/// Windows 只有 `win-x64-msi`（无 arm64 msi，arm64 上装 x64 msi 依赖系统模拟）。
 /// 当前平台的 Node 官方制品（**标签 + 文件名同源**）。
 ///
 /// 实现已下沉到 platform 层（2026-09-11）：这是纯「平台 → 官方制品」映射
@@ -75,8 +46,7 @@ fn best_from_index(raw: &str) -> Option<(String, String)> {
         let ver = item.get("version").and_then(|v| v.as_str()).unwrap_or("");
         if ver.is_empty() || !ver.starts_with('v') { continue; }
         // 标签与文件名**同源**（平台层一次给出）——
-        //   旧实现分别调 platform_file() 与 platform_tag()，两者语义可能不一致
-        //   （macOS 曾出现「判定用 tar 标签、下载用 pkg」的侥幸正确）。
+// 标签与文件名同源（平台层一次给出），避免判定与下载对象不一致。
         let art = match platform_artifact(&ver[1..]) { Some(a) => a, None => continue };
         let file = art.file;
         let tag = art.tag;
@@ -100,15 +70,8 @@ pub struct LtsChoice {
 }
 
 /// **并行**探测全部 Node 镜像，取「最高 LTS」并选最快且提供该版本的源。
-///
-/// 设计要点（2026-09-11 重写）：
-///   · 旧实现是「官方优先、报错才回退」的**串行**逻辑（注释还错误地写着"并发"）：
-///     nodejs.org 在受限网络下常常**可达但极慢**，于是永远不会回退到镜像，
-///     而安装包有 30-90MB —— 用户要等很久甚至超时。
-///   · 现改为并行探测所有候选（一次 index.json 同时得到延迟与版本，不额外增加请求），
-///     再取**全部可达源中的最高版本** —— 这很重要：实测腾讯云镜像会滞后一个版本，
-///     「首个成功即采用」会静默装到旧版。
-///   · 最后在「提供该版本」的源中选**延迟最低**者下载，避免用慢源拉大包。
+/// 取全部可达源的最高版本（镜像同步滞后，「首个成功即采用」会装到旧版）；
+/// 在提供该版本的源中选延迟最低者，避免用慢源拉大包。
 pub fn latest_lts() -> Result<LtsChoice, String> {
     let mirrors = crate::mirror::load();
     let probes = crate::mirror::probe_all(&mirrors.node, "index.json");
@@ -143,7 +106,7 @@ pub fn latest_lts() -> Result<LtsChoice, String> {
             // 同步导出契约给内核（若内核已存在则继承同一偏好；不存在时也无害，
             // 内核首次安装后会读到这份文件）。
             //
-            // ⚠ P2 修复（2026-09-13）：**不再把 Node 侧延迟当 npm 侧的延迟传**。
+            // P2 修复（2026-09-13）：**不再把 Node 侧延迟当 npm 侧的延迟传**。
             //   此处选中的是 **Node 发行源**（source/latency_ms 都属 node_p 探测）；
             //   而契约里的 selected 描述的是 **npm registry** 选择
             //   （origin 取自 m.selected_npm，由 warmup_async 落盘）。
@@ -211,7 +174,7 @@ pub fn download_verified(
             Err(e) => { last_err = Some(e); continue; }
         };
         let digest = hex::encode(Sha256::digest(&data));
-        // ⚠ P1 修复（2026-09-12）：**镜像回退必须在 SHASUMS 失败时也能继续**。
+        // P1 修复（2026-09-12）：**镜像回退必须在 SHASUMS 失败时也能继续**。
         //
         //   缺陷：原为 `String::from_utf8(http_get_bytes(...)?)` —— 外层 `?` 让
         //     **网络失败直接 return**，下面的 `continue` 只覆盖 `from_utf8` 的非 UTF-8 情形。
@@ -254,7 +217,7 @@ pub fn download_verified(
 /// 实现已下沉到 platform 层（2026-09-11）：三平台的提权通道与安装器各不相同
 /// （pkexec+tar / osascript+installer / powershell+msiexec），这是平台知识。
 ///
-/// ⚠ 这是**壳独有**的能力：装内核之前必须先把运行环境装好（引导顺序 R1），
+/// 这是**壳独有**的能力：装内核之前必须先把运行环境装好（引导顺序 R1），
 ///   而提权需要人在场 —— 内核（无头系统服务）永远做不到这件事。
 pub fn install(file: &Path) -> Result<PathBuf, String> {
     crate::platform::current().install_node(file)
@@ -316,7 +279,7 @@ pub fn probe_after() -> Option<(PathBuf, String)> {
 
 /// 写运行时纪要（版本/路径/时间/**最低门槛**）供面板透明展示，并**供内核做环境判定**。
 ///
-/// ⚠ 原子写（tmp + rename，2026-09-11 架构修复）：
+/// 原子写（tmp + rename，2026-09-11 架构修复）：
 ///   内核会读这个文件做「环境是否就绪」判定，非原子写可能让它读到**半截 JSON**，
 ///   从而误判为「Node 未安装」。同一目录下其它契约文件（identity.json / registry.json）
 ///   都已是原子写，此处补齐保持一致。
@@ -345,15 +308,8 @@ pub fn record_runtime_meta(node_path: &str, version: &str) {
 }
 
 /// 当前 UTC 时间，ISO 8601（`YYYY-MM-DDTHH:MM:SSZ`）。
-///
-/// == 架构修复（2026-09-11）==
-///
-/// 旧实现在 Unix 上**执行外部 `date` 进程**取时间，且 Windows 分支**直接返回空串**。
-/// 两个问题：
-///   ① 为一个纯计算的值去 spawn 进程 —— 无界（原用 `.output()`）、且可能不存在；
-///   ② Windows 上写空值，使 `installedAt` 在 Windows 丢失，跨平台行为不一致。
-/// 现改为纯 std 计算（Howard Hinnant 的 civil-from-days 算法），三平台一致、无副作用。
-/// 格式与内核侧 `new Date().toISOString()` 同族，下游（仅展示）可直接解析。
+/// 纯 std 计算（Howard Hinnant civil-from-days），三平台一致、无副作用；
+/// 格式与内核侧 `new Date().toISOString()` 同族，可被下游直接解析。
 pub fn now_iso() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
