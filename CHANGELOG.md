@@ -6,6 +6,57 @@
 
 （下一版本待记）
 
+## [1.0.9]（2026-09-14）
+
+> 本轮为**底座审计与硬标准落地**：壳仓同样必须有唯一规范、同样必须走 GitHub 完整四平台构建。
+
+### 硬标准（不可协商）
+
+**所有平台构建与发布必须经 GitHub CI 完成；本地不得产生任何发布产物。**
+
+写入 `docs/RELEASE-STANDARD.md` §0，并加入机器可读块 `hardStandard` 字段。
+壳仓本就无本地构建/发布脚本（仅 `bump-shell.sh` / `verify-shell-versions.js`），与硬标准一致。
+
+### 修复：**幽灵产线文件**（最严重）
+
+`src-tauri/launcher-build.yml`（**290 行**）**不在 `.github/workflows/` 下**，
+GitHub **永远不会执行**它；但 `docs/RELEASE-AND-BUILD-DECISION.md:50` 与 `scripts/bump-shell.sh:30` 都**声称它是产线**：
+
+    → tag 触发 launcher-build.yml：四平台完整构建        （文档）
+
+它还有自己的 git 历史（3 个提交都是 CI 修复）—— **过去的 CI 修复曾提交到这个永不执行的文件上**；
+两份定义已漂移（触发策略与步骤数均不同）。
+
+**处置**：删除幽灵 + 两处引用改指真实产线 `.github/workflows/build.yml`。
+已核实**真产线是幽灵的超集**（多一道门禁测试步骤，关键修复全在且实例更多）→ 无功能损失。
+
+### 修复：版本三处互锁**从未被 CI 校验**
+
+`scripts/verify-shell-versions.js` 存在且正确（校验 `Cargo.toml` / `tauri.conf.json` / `Cargo.lock`），
+但 `version` job **从未调用它** → 三处可静默失配（锁文件失配会被 cargo 当作依赖变更）。
+**处置**：在 `version` job 增加校验步骤，并由 R-6 门禁强制。
+
+### 新增门禁 R-9（防旁路复活）
+
+`src-tauri/tests/release_spec_consistency_test.rs` 由 8 条增至 9 条：
+
+- `scripts/` 下不得出现含 build/publish/release 的脚本（只允许版本提升与校验）；
+- 不得存在 `shell-release/{build,publish,release}.sh` 之类本地发布脚本；
+- 含反向判据。
+
+将来若有人为「方便」加回本地构建/发布脚本，门禁会立刻红。
+
+### 文档：唯一事实源与角色表
+
+- 新增 `docs/RELEASE-STANDARD.md`（**壳仓发布唯一事实源**：H0–H9 全流程、四平台矩阵、版本互锁、CI 放行、验证、回滚、红线）；
+- 新增 `docs/README.md`：12 份文档**角色表**（规范 / 设计 / 决策 / **时间点记录**），并声明冲突时以现行文档为准；
+- `docs/RELEASE-AND-BUILD-DECISION.md` 加横幅：流程以 `RELEASE-STANDARD.md` 为准，本文件只讲决策背景。
+
+### CI
+
+- `pull_request` 触发器补入（此前 PR **完全不跑 CI**；若直接设 required status check 会让 PR 永久等待）；
+- 分支保护 required = `version` + 4 条 `build (...)`（strict + enforce_admins）。
+
 ## [1.0.8]（2026-09-11）
 
 ### 修复：**架构级根因** —— 需要 IPC 的页面被放进了 iframe（所有 invoke 永久挂起）
