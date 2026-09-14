@@ -41,7 +41,7 @@ fn manifest_dir() -> PathBuf {
 
 /// 读取待检查文件，并**归一化换行为 LF**。
 ///
-/// ⚠ 2026-09-13：这些门禁大量做**多行源码片段**的文本断言，而 Windows 检出
+/// 2026-09-13：这些门禁大量做**多行源码片段**的文本断言，而 Windows 检出
 ///   可能是 CRLF（core.autocrlf + 本仓原先无 .gitattributes）→ 内嵌换行的针脚永不匹配：
 ///     · 正向 find → 退化为 usize::MAX（失败）；
 ///     · 反向 !contains → 退化为恒真（假绿、门禁空转，比失败更糟）。
@@ -65,7 +65,7 @@ fn trait_methods(src: &str, trait_decl: &str) -> BTreeSet<String> {
 
 /// 从 `impl ... for Impl {` 开始的块中抽取全部 `fn name`（按行首 `}` 收束）。
 fn impl_methods(src: &str, impl_decl: &str) -> BTreeSet<String> {
-    // ⚠ 先剥离注释再查找 —— 否则**说明文字里提到的** `impl X for Impl` 也会命中。
+    // 先剥离注释再查找 —— 否则**说明文字里提到的** `impl X for Impl` 也会命中。
     //   （我第一版就踩了这个：本文件在 impl 内有一段长注释，
     //     逐字写着 "impl ServiceControl for Impl"，于是扫描越界到了下一个 impl。）
     //   调用方传的 decl 一律带 `{`（与真实声明同形），进一步避免误命中。
@@ -84,7 +84,7 @@ fn impl_methods(src: &str, impl_decl: &str) -> BTreeSet<String> {
 
 /// 抽取 `fn <name>`（**剥离行注释与块注释**，避免文档里提到的名字被算进来）。
 ///
-/// ⚠ 必须真正剥离注释，而不只是「跳过以 // 开头的行」：
+/// 必须真正剥离注释，而不只是「跳过以 // 开头的行」：
 ///   本文件在 impl 块**内部**有一段长注释，逐行列举了方法名（说明归属问题），
 ///   那些名字会被 `strip_prefix("fn ")` 之外的形式带入吗？——不会；
 ///   但 _被注释掉的_ `fn xxx(...)` 变体会。故此处按块注释/行注释双剥离。

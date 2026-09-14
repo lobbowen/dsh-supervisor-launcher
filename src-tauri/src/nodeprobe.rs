@@ -1,16 +1,6 @@
 //! 有界 Node 探测（架构层修复，2026-09-11 二次修订）。
 //!
-//! == 根因（两轮修复的完整认识） ==
-//!
-//! 1.0.3/1.0.4/1.0.5 都卡在「检测环境」，三轮修复逐层揭开真相：
-//!
-//! **第一层**：探测里有无界阻塞系统调用（GetFileAttributesW / CreateProcessW /
-//!   GetDriveTypeW），而原「预算」只在候选之间、spawn 返回之后才检查 —— 不是上限，只是提示。
-//! **第二层**：探测被命令 await，于是「探测挂起」等价于「命令永不返回」；
-//!   前端超时只是停止等待，Rust 线程仍永久悬挂。
-//! **第三层（本文件本次修复）**：把探测搬进分离线程后，**候选枚举本身仍在进度上报之外** ——
-//!   一旦卡在枚举阶段（GetDriveTypeW / read_dir），诊断串里 summary / stuck / trace
-//!   **三项同时为空**，表现为「卡住且不报错、也没有任何线索」。
+//! 探测内含无界阻塞系统调用；故必须：分离线程执行 + 边枚举边上报 stage + 硬上限。
 //!
 //! == 因此本文件遵守两条硬规则 ==
 //!
@@ -223,7 +213,7 @@ pub fn status(budget: Duration) -> Outcome {
                 started_at = *started;
             }
             State::Idle => {
-                // ⚠ P2：若上一次的 worker 仍未退出（卡在无界系统调用），**不再新建** ——
+                // P2：若上一次的 worker 仍未退出（卡在无界系统调用），**不再新建** ——
                 //   否则用户每点一次「重试」就多一条永不退出的线程。此时给出明确结论，
                 //   等旧 worker 退出（或 invalidate() 显式复位）后即可重新探测。
                 if ORPHANS.load(std::sync::atomic::Ordering::SeqCst) > 0 {
@@ -330,7 +320,7 @@ static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::
 
 /// 已被**作废但尚未退出**的 worker 数量（不可回收的线程）。
 ///
-/// ⚠ 2026-09-13（P2 修复）：本文件的设计目标是「即使某个系统调用永久挂起也一定给出结论」，
+/// 2026-09-13（P2 修复）：本文件的设计目标是「即使某个系统调用永久挂起也一定给出结论」，
 ///   而 worker 一旦卡在无界阻塞系统调用，**线程本身无法回收**。
 ///   原实现在硬上限时把状态置回 Idle —— 于是用户**每点一次「重试」就多一条永不退出的线程**
 ///   （每条约 2MB 栈），与 `commands/mod.rs` 声称的「不会堆积线程」相反；
@@ -538,10 +528,10 @@ fn path_dirs_staged() -> Vec<PathBuf> {
 ///   · Unix —— /usr/local、/opt/homebrew、/usr/bin + volta/nvm/fnm 布局
 ///   · Windows —— ProgramFiles(x86)、Chocolatey、scoop、volta、nvm 三种布局
 ///
-/// ⚠ Windows 不得硬编码 `C:\Program Files`：真实路径随**系统盘符**与
+/// Windows 不得硬编码 `C:\Program Files`：真实路径随**系统盘符**与
 ///   **系统语言**变化（中文系统是本地化目录名），故一律经环境变量推导。
 ///
-/// ⚠ 本函数会做 `read_dir`（版本管理器布局需要枚举版本目录），可能落在
+/// 本函数会做 `read_dir`（版本管理器布局需要枚举版本目录），可能落在
 ///   漫游配置/慢速盘上 —— 调用方必须先 `stage()` 上报。
 fn known_locations() -> Vec<(String, PathBuf)> {
     crate::platform::current()
@@ -599,7 +589,7 @@ mod tests {
         invalidate();
     }
 
-    /// ⚠ P2 门禁（2026-09-13）：孤儿 worker 未退出前**不得再新建**（防线程堆积）。
+    /// P2 门禁（2026-09-13）：孤儿 worker 未退出前**不得再新建**（防线程堆积）。
     ///
     /// 缺陷：硬上限到达时原实现把状态置回 Idle —— 用户每点一次「重试」
     ///   就 spawn 一条**永不退出**的新 worker（卡在无界系统调用），与

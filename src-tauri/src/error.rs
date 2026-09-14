@@ -1,51 +1,16 @@
 //! 结构化错误模型（2026-09-11）。
 //!
-//! == 为什么需要（用户指正：「壳是乱的，没有架构」）==
+//! 结构化错误模型。
 //!
-//! 立项时审计实测：`Result<_, String>` **42 处**，自定义 Error 枚举 **0 个**。
-//! 后果：
-//!   · 前端只能拿到一句可能判错的自然语言，无法按 `kind` 给不同建议；
-//!   · 「探测超时」与「配置错误」在类型上无法区分 —— 用户看到的提示往往是错的；
-//!   · 无法程序化处理（重试 / 降级 / 上报 都只能靠字符串匹配）。
-//!
-//! == 设计 ==
-//!
-//! · 用 `#[serde(tag = "kind")]` 序列化 → 前端 `switch (e.kind)` 即可分支；
-//! · `Probe` **必须带 stage 与 elapsed_ms** —— 「卡住时看得见」是硬要求
-//!   （「环境探测卡死」事故的直接教训：没有阶段信息就只能猜）；
-//! · `Unsupported` 让「未实现的能力」成为**类型上可见**的事实，
-//!   而不是一句 `Err("不支持".into())`（与平台层的 P1 不变量同规）。
-//!
-//! == 接入位置（现状）==
-//!
-//! **IPC 边界**：`commands/` 的 `Result` 命令都返回 [`ShellResult`] ——
-//! 前端因此拿到结构化对象，并按 `kind` 分支、显示后端给的 `hint`
-//! （见 `bootstrap/js/10-ui.js` 的 `errText()`）。
-//!
-//! ⚠ 上述「显示后端给的 `hint`」在 2026-09-12 之前**并不成立**：
-//!   `hint()` 只是 Rust 方法，**从未进入 JSON**，前端 `e.hint` 恒为 `undefined` ——
-//!   即注释声称的能力当时并不存在（典型「注释声称、代码没有」）。
-//!   现由手工 `Serialize` 把 `hint` 并入输出（见本文件下方 impl），并有测试锁定：
-//!   `every_kind_serializes_a_hint` / `serialization_keeps_original_field_names`。
-//!
-//! ⚠ 有一处**例外**：`guard_start` 的 JSON 响应体里 `error` 仍是字符串（`e.to_string()`）。
-//!   因为该字段被前端当字符串拼接；塞入对象会显示 `[object Object]`。
-//!
-//! **内部函数**仍多用 `Result<_, String>`：它们经 `From<String>` 在 IPC 边界自动升级。
-//! 这是**有意的渐进迁移** —— 内部签名是否结构化不影响前端收益，不为改造而改造。
+//! IPC 边界命令统一返回 `ShellResult`（`#[serde(tag = "kind")]`），前端按 `kind` 分支并显示 `hint`。
+//! 不变量：`Probe` 带 stage/elapsed_ms；`Unsupported` 类型可见；内部仍用 `Result<_, String>` 并经
+//! `From<String>` 在边界升级；`guard_start` 的 JSON `error` 例外地保持字符串。
 
 use serde::Serialize;
 
 /// 壳的结构化错误。
 ///
-/// ⚠ `hint` 是**序列化字段**（P2 修复，2026-09-12）。
-///
-///   此前 `hint()` 只是一个 Rust 方法，**从未进入 JSON** ——
-///   而前端 `10-ui.js::errText()` 写着 `e.hint ? (detail + '；' + e.hint) : detail`，
-///   于是 `e.hint` 恒为 `undefined`：
-///     · 「可尝试切换镜像源」「请按系统提示完成授权」这类**可操作建议永远到不了用户**；
-///     · 而 `error.rs` 头部注释却声称「前端按 kind 分支、显示后端给的 hint」——
-///       又一处「注释声称、代码没有」。
+/// `hint` 是序列化字段（手工 `Serialize`），前端 `errText()` 依赖它显示可操作建议。
 ///
 ///   修法：把 `hint` 作为字段并入序列化输出（`#[serde(serialize_with)]`），
 ///   使 `#[serde(tag = "kind")]` 的结构体里多出一个 `hint: String` 键。
@@ -72,13 +37,9 @@ pub enum ShellError {
     Unsupported { capability: String, platform: String },
 }
 
-/// 手工 `Serialize`：派生表示 + 一个 `hint` 字段（P2 修复）。
-///
-/// ⚠ 为什么不直接 `#[derive(Serialize)]`：`hint()` 是**方法**，派生不会带上它。
-///   而前端 `errText()` 消费的正是 `e.hint` —— 不序列化等于那句建议永远发不出去。
-///
-/// ⚠ 字段格式必须与原先**逐字一致**（`kind` 用 kebab-case 变体名，字段名保持 snake_case），
-///   否则前端已有的 `e.stage` / `e.cause` / `e.elapsed_ms` 读取会失效。
+/// 手工 `Serialize`：派生字段 + `hint`（`hint()` 是方法，派生不会带上它）。
+/// 字段格式必须与原先逐字一致（`kind` kebab-case，字段名 snake_case），
+/// 否则前端读取 `e.stage`/`e.cause`/`e.elapsed_ms` 会失效。
 impl Serialize for ShellError {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where

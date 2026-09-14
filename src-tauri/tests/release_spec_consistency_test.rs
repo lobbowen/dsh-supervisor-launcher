@@ -4,7 +4,7 @@
 //!   壳仓此前**没有单一权威流程文档**，且存在一个**幽灵产线文件**
 //!   `src-tauri/launcher-build.yml`（290 行）—— 它不在 `.github/workflows/` 下，
 //!   GitHub **永远不会执行**它；但 `docs/RELEASE-AND-BUILD-DECISION.md` 与
-//!   `scripts/bump-shell.sh` 都**声称它是产线**。真实产线是 `.github/workflows/build.yml`，
+//!   `scripts/bump-shell.sh` 都**曾声称它是产线**。真实产线是 `.github/workflows/build.yml`，
 //!   两份定义已漂移（触发策略与步骤数均不同）。
 //!
 //!   现确立 `docs/RELEASE-STANDARD.md` 为**唯一事实源**，并由本门禁把「规范 = 现实」钉死：

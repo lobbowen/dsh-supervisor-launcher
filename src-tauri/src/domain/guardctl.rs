@@ -6,7 +6,7 @@
 //! 退出时序（契约 §4.1）：① 带超时请求内核停全部被管对象并等回执；
 //! ② 由所有者停止守卫；③ 守卫**不自停**。
 //!
-//! ⚠ 不变量 B1：所有等待都有上限 —— 退出流程也要能在服务管理器无响应时走完，
+//! 不变量 B1：所有等待都有上限 —— 退出流程也要能在服务管理器无响应时走完，
 //!   否则用户会觉得「程序关不掉」。
 
 use std::net::{TcpStream, ToSocketAddrs};
@@ -34,9 +34,7 @@ pub(crate) fn shutdown_all(port: u16) {
 /// 端口从用户 config.apiPort 解析（非硬编码 3100）。
 pub(crate) fn ensure_guard(app: &tauri::AppHandle) -> Result<(), String> {
     let port = crate::env::api_port();
-    // 进度上报（2026-09-11 架构修复）：本函数最长可耗时约 2 分钟（服务管理器启动最多 30s，
-    // 兜底 spawn 后再等 60s），而这段时间前端只有一句静态的「正在启动守卫…」——
-    // **静默等待与卡死无法区分**，用户会误判为卡住并强杀。故每个阶段都上报。
+// 本函数最长约 2 分钟：每个阶段都上报（静默等待与卡死无法区分）。
     let step = |s: &str| {
         let _ = app.emit("guard_progress", serde_json::json!({ "status": s }));
         crate::update::log(s);
@@ -49,8 +47,7 @@ pub(crate) fn ensure_guard(app: &tauri::AppHandle) -> Result<(), String> {
     })?;
 
     // ① 建立服务定义（**首次安装的关键一步**）。
-    //    旧实现直接跳到 start，而首启时服务定义根本不存在 -> 必然失败 -> 卡在「守卫就绪」。
-    //    这一步是幂等的：已存在则直接返回。
+// 必须先建立服务定义（幂等）；否则首启 start 必失败。
     step("正在建立守卫服务定义…");
     match crate::platform::service().ensure_defined(&guard) {
         Ok(desc) => crate::update::log(&format!("守卫服务定义: {}", desc)),

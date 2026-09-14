@@ -9,12 +9,12 @@
 
 ## 功能
 
-- 🚀 **环境引导**：探测系统 Node.js → 缺失/过旧时内嵌引导页一键安装官方最新 LTS（下载 + SHA256 校验 + 一次授权）
-- 🛡️ **守卫拉起**：自动定位已安装内核并启动守护进程，控制面板就绪后直达（端口由内核配置 `apiPort` 决定，动态分配）
-- 🔄 **生命周期守卫**（内核提供）：进程保活、故障自动重启、崩溃退避、期望状态语义（启动/停止可控）
-- 🌐 **局域网安全访问**：`0.0.0.0:3088 → 127.0.0.1:3080` 反向代理，DSH 官方生态同款回环呈现，`lanToken` 可选
-- 📊 **运维面板**：实时状态 / 事件时间线 / 配置中心 / 更新日志 / 一键安装 DSH
-- 🧊 **托盘常驻**：关窗=隐藏；菜单直发 启动/停止/重启
+- **环境引导**：探测系统 Node.js → 缺失/过旧时内嵌引导页一键安装官方最新 LTS（下载 + SHA256 校验 + 一次授权）
+- **守卫拉起**：自动定位已安装内核并启动守护进程，控制面板就绪后直达（端口由内核配置 `apiPort` 决定，动态分配）
+- **生命周期守卫**（内核提供）：进程保活、故障自动重启、崩溃退避、期望状态语义（启动/停止可控）
+- **局域网安全访问**：`0.0.0.0:3088 → 127.0.0.1:3080` 反向代理，DSH 官方生态同款回环呈现，`lanToken` 可选
+- **运维面板**：实时状态 / 事件时间线 / 配置中心 / 更新日志 / 一键安装 DSH
+- **托盘常驻**：关窗=隐藏；菜单直发 启动/停止/重启
 
 ## 架构
 
@@ -50,19 +50,16 @@ systemd user unit → dsh-supervisor（守卫内核，闭源）→ dsh web (127.
 
 | 文档 | 性质 | 说明 |
 |---|---|---|
-| [DESIGN-COMPLETE.md](docs/DESIGN-COMPLETE.md) | **总纲（权威）** | 全量代码审计后的完整架构理解 + 抽取决策 + 目标架构 + **一次性执行方案**（含双侧缺陷清单 K1–K10 / S1–S5）|
-| [DESIGN-SHELL-ARCHITECTURE.md](docs/DESIGN-SHELL-ARCHITECTURE.md) | **规范（权威）** | 壳工程架构：分层 / 平台适配层 / 错误模型 / 契约层 / 前端隔离 / 门禁 G1–G10 / 不变量总表 |
-| [DESIGN-BOUNDARY.md](docs/DESIGN-BOUNDARY.md) | **规范（权威）** | 内核↔壳职责边界与抽取审计：判据 R1–R4、重叠面 O1–O6、抽取决策 D1–D6、合作契约 C1–C4 |
-| [SHELL-EXECUTION-PLAN.md](docs/SHELL-EXECUTION-PLAN.md) | 计划 | 稳定与热更新完整执行方案 |
-| [SHELL-BOOTSTRAP-REMEDIATION.md](docs/SHELL-BOOTSTRAP-REMEDIATION.md) | **规范** | 引导逻辑修复方案（强制更新 + 失败回退）· 跨平台；含 K10/K11 的**设计决策与边界** |
-| [SHELL-NATIVE-STABILITY-DECISION.md](docs/SHELL-NATIVE-STABILITY-DECISION.md) | **规范** | 原生形态定案后的稳定架构（决策记录） |
+| [docs/README.md](docs/README.md) | **索引** | 文档角色表 + 产品硬规则 |
+| [RELEASE-STANDARD.md](docs/RELEASE-STANDARD.md) | **规范（SSOT）** | 发布/构建流程的唯一事实源 |
+| [RELEASE-AND-BUILD-DECISION.md](docs/RELEASE-AND-BUILD-DECISION.md) | 决策依据 | 为什么这样发布/构建 |
+| [DESIGN-COMPLETE.md](docs/DESIGN-COMPLETE.md) | **总纲（权威）** | 完整架构理解与抽取决策 |
+| [DESIGN-SHELL-ARCHITECTURE.md](docs/DESIGN-SHELL-ARCHITECTURE.md) | **规范（权威）** | 壳工程架构：分层 / 平台适配层 / 错误模型 / 契约层 / 门禁 |
+| [DESIGN-BOUNDARY.md](docs/DESIGN-BOUNDARY.md) | **规范（权威）** | 内核↔壳职责边界与抽取审计 |
 | [SHELL-UPDATE-CHANNEL-VERIFICATION.md](docs/SHELL-UPDATE-CHANNEL-VERIFICATION.md) | 实测记录 | 壳更新通道验证（含 CDN `@latest` 缓存延迟实测） |
-| [SHELL-UPDATE-TRIGGER-CORRECTION.md](docs/SHELL-UPDATE-TRIGGER-CORRECTION.md) | 修正 | 壳如何触发更新（对执行方案 §1 的更正） |
-| [AUDIT-SHELL-BOOTSTRAP.md](docs/AUDIT-SHELL-BOOTSTRAP.md) | 审计 | 引导逻辑深度检测报告 |
-| [SHELL-STABILITY-AUDIT.md](docs/SHELL-STABILITY-AUDIT.md) | 审计 | 稳定性深度审计 |
-| [docs/archive/](docs/archive/) | 归档 | 已决策/已落地的历史文档（见 [README](docs/archive/README.md)） |
 
-> **不变量**：壳的跨平台与引导行为由测试保障（`cargo test`，含引导流程回归 B1–B55）；文字文档不构成证据。
+> **产品硬规则**：壳与内核同一套升级逻辑 —— 有新版本即强制更新；**不得回退、不得跳过、不得按版本拉黑、不得冷却抑制**。
+> **不变量**：壳的跨平台与引导行为由测试保障（`cargo test`，含引导流程回归 B1–B56）；文字文档不构成证据。
 ## 安装
 
 ### 内核（闭源，npm 分发）
@@ -86,6 +83,7 @@ cd src-tauri && cargo build --release
 ## 开发 / 贡献
 
 ```bash
+cd src-tauri
 cargo build            # 调试构建
 ./target/debug/dsh-supervisor-gui --node-plan   # 无头冒烟：环境探针 + 官方最新 LTS
 ```

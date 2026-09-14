@@ -64,8 +64,7 @@ function main() {
   for (const key of Object.keys(platforms)) {
     const p = platforms[key];
     if (!p.url) {
-      const plat = Object.keys(platforms).length ? key : key;
-      p.url = baseTpl.replace('__PLATFORM__', platToPkg(p.name, key)).replace('__VERSION__', ver) + encodeURIComponent(p.name);
+      p.url = baseTpl.replace('__PLATFORM__', platToPkg(key)).replace('__VERSION__', ver) + encodeURIComponent(p.name);
     }
     delete p.name;
   }
@@ -85,7 +84,7 @@ function main() {
 }
 
 // 由清单键反推 npm 包平台后缀（OS-ARCH → npm 命名）
-function platToPkg(_name, key) {
+function platToPkg(key) {
   const MAP = {
     'linux-x86_64': 'linux-x64', 'linux-aarch64': 'linux-arm64',
     'darwin-x86_64': 'darwin-x64', 'darwin-aarch64': 'darwin-arm64',

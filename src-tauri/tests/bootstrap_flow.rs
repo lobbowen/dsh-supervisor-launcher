@@ -11,7 +11,7 @@
 //!   B3 引导从「检测环境」启动，不再从桌面更新启动
 //!   B4 网络步骤（检查/下载）必须有超时兜底与可跳过出口 —— 否则底层挂起即永久卡死
 //!   B5 下载必须有进度反馈（此前回调体为空，用户无法区分「在下载」与「卡死」）
-//!   B6 Rust 侧：check 有超时、mark_pending 在 install 之前（Windows 上 install 不返回）
+//!   B6 Rust 侧：check / download 有超时（网络调用必须有界）
 //!   B7 面向用户的文案不得再出现「门 0」这一内部概念
 
 use std::fs;
@@ -23,7 +23,7 @@ fn manifest_dir() -> PathBuf {
 
 /// 前端全部源码 = HTML 内联脚本 + 它 src 引用的每个 js/*.js。
 ///
-/// ⚠ 为什么不是只读 bootstrap.html：2026-09-11 起引导脚本已按职责拆成 9 个外部模块
+/// 为什么不是只读 bootstrap.html：2026-09-11 起引导脚本已按职责拆成 9 个外部模块
 ///   （原 802 行单块，一处语法错即全页不执行）。断言若只读 HTML，会**静默看不到**
 ///   任何前端逻辑 —— 门禁变成空转。此函数保证「测的是真正会执行的代码」。
 fn bootstrap_html() -> String {
@@ -55,7 +55,7 @@ fn bootstrap_html() -> String {
 
 /// 取某个函数的**函数体**（从 sig 到下一个顶层 function 或文件末尾）。
 ///
-/// ⚠ 为什么不按固定字节长度截取：本仓含大量中文注释，1 汉字 = **3 字节**，
+/// 为什么不按固定字节长度截取：本仓含大量中文注释，1 汉字 = **3 字节**，
 ///   故 `&h[i..i+900]` 实际只覆盖约 300 字符 —— 断言会因此误判（曾真实发生）。
 /// 把源码里的 `NS.` 前缀去掉，便于断言与「是否命名空间化」解耦。
 ///
@@ -92,7 +92,7 @@ fn html_step_order(html: &str) -> Vec<String> {
     found.into_iter().map(|(_, s)| s).collect()
 }
 
-const EXPECTED: [&str; 6] = ["st-env", "st-node", "st-shell", "st-core", "st-guard", "st-panel"];
+const EXPECTED: [&str; 5] = ["st-env", "st-shell", "st-core", "st-guard", "st-panel"];
 
 #[test]
 fn b1_step_order_env_first_shell_after_env() {
@@ -121,7 +121,7 @@ fn b2_js_stepnames_matches_html_order() {
         single,
         double
     );
-    assert_eq!(order.len(), 6, "B2 FAIL HTML 未声明全部 6 个步骤");
+    assert_eq!(order.len(), 5, "B2 FAIL HTML 未声明全部 5 个步骤");
     eprintln!("B2 PASS stepNames matches HTML order");
 }
 
@@ -147,9 +147,11 @@ fn b4_network_steps_have_timeout_and_skip() {
     assert!(html.contains("function withTimeout"), "B4 FAIL 缺少前端超时兜底（withTimeout）");
     assert!(html.contains("SHELL_CHECK_BUDGET_MS"), "B4 FAIL 缺少检查超时预算");
     assert!(html.contains("SHELL_DOWNLOAD_BUDGET_MS"), "B4 FAIL 缺少下载超时预算");
-    assert!(html.contains("btnSkipShell"), "B4 FAIL 缺少「跳过桌面更新」出口按钮");
-    assert!(html.contains("showSkip"), "B4 FAIL 跳过出口未接线");
-    eprintln!("B4 PASS timeout + skip exit present");
+    // 硬规则：更新为强制，**不得**有任何跳过出口（按钮 / 接线 / 文案）。
+    assert!(!html.contains("btnSkipShell"), "B4 FAIL 仍存在「跳过桌面更新」按钮（违反硬规则）");
+    assert!(!html.contains("skipWrap"), "B4 FAIL 仍存在 skipWrap 容器（违反硬规则）");
+    assert!(!html.contains("showSkip"), "B4 FAIL showSkip 仍被引用（违反硬规则）");
+    eprintln!("B4 PASS timeout present, skip exit removed");
 }
 
 #[test]
@@ -169,16 +171,12 @@ fn b5_download_progress_is_wired() {
 }
 
 #[test]
-fn b6_rust_check_timeout_and_pending_before_install() {
+fn b6_rust_check_and_download_are_bounded() {
     let m = crate_sources();
     assert!(m.contains("SHELL_CHECK_TIMEOUT"), "B6 FAIL 缺少检查超时常量");
     assert!(m.contains("SHELL_DOWNLOAD_TIMEOUT"), "B6 FAIL 缺少下载超时常量");
     assert!(m.contains("tokio::time::timeout"), "B6 FAIL 未使用 tokio 超时包裹网络调用");
-    // Windows 上 install 会结束本进程，故 mark_pending 必须在其之前
-    let mp = m.find("update::mark_pending").expect("B6 FAIL 未找到 mark_pending");
-    let inst = m.find("u.install(").expect("B6 FAIL 未找到 u.install");
-    assert!(mp < inst, "B6 FAIL mark_pending 必须在 install 之前（Windows 上 install 不返回）");
-    eprintln!("B6 PASS timeout present, mark_pending before install");
+    eprintln!("B6 PASS check/download timeouts present");
 }
 
 /// B8：内核步骤同样受网络支配，必须也有界。
@@ -242,11 +240,10 @@ fn b9_step_labels_match_required_semantics() {
     let html = bootstrap_html();
     let expected = [
         ("st-env", "检测环境"),
-        ("st-node", "运行环境"),
         ("st-shell", "桌面版本"),
         ("st-core", "内核版本"),
-        ("st-guard", "守卫就绪"),
-        ("st-panel", "进入控制面板"),
+        ("st-guard", "服务就绪"),
+        ("st-panel", "进入面板"),
     ];
     for (id, label) in expected {
         let needle = format!("id=\"{}\"", id);
@@ -318,7 +315,7 @@ fn b11_windows_config_disables_shadow_and_stays_in_sync() {
 #[test]
 fn b12_no_stale_desktop_update_wording() {
     let html = bootstrap_html();
-    // ⚠ 2026-09-12 修正（clippy never_loop）：原写成
+    // 2026-09-12 修正（clippy never_loop）：原写成
     //     `let idx = 0; while let Some(p) = html[idx..].find(bad) { …panic… }`
     //   —— `idx` 从不更新，循环体又必定 panic，故**循环只可能执行 0 或 1 次**。
     //   它能通过是因为「找到即 panic」，但形态本身是误导（看起来像在扫描全部出现处）。
@@ -337,7 +334,7 @@ fn b12_no_stale_desktop_update_wording() {
 /// 首启时壳是唯一在场组件；若壳只 start 不 create，全新机器上守卫永远起不来。
 #[test]
 fn b13_shell_owns_service_definition() {
-    // ⚠ 2026-09-11：服务定义已从 `src/service.rs` 迁入 **platform 适配层**
+    // 2026-09-11：服务定义已从 `src/service.rs` 迁入 **platform 适配层**
     //   （每个平台一个文件；`platform/service.rs` 是 trait 契约）。
     //   断言随产权迁移 —— 否则测试会盯着一个已不存在的文件而**误报通过/失败**。
     let dir = manifest_dir().join("src").join("platform");
@@ -348,7 +345,7 @@ fn b13_shell_owns_service_definition() {
             all.push_str(&fs::read_to_string(e.path()).unwrap_or_default());
         }
     }
-    // ⚠ 断言须是**语义等价**而非字面量：macOS 的 plist 路径由常量拼接
+    // 断言须是**语义等价**而非字面量：macOS 的 plist 路径由常量拼接
     //   （`format!("{}.plist", GUARD_LABEL)`），字面量 "com.dsh.supervisor.plist"
     //   在源码里**并不存在**。照旧断言字面量会把正确的实现判为缺失。
     for needle in [
@@ -371,7 +368,7 @@ fn b13_shell_owns_service_definition() {
         m.contains("platform::service().ensure_defined"),
         "B13 FAIL ensure_guard 未建立服务定义"
     );
-    // ⚠ 2026-09-11：`ensure_guard` 已迁入 domain/guardctl.rs（分层），
+    // 2026-09-11：`ensure_guard` 已迁入 domain/guardctl.rs（分层），
     //   故「是否调用 spawn 兜底」须连同 domain 层一起查 ——
     //   而「main.rs 是否引入 platform」仍只查 main.rs（那是**分层断言**）。
     assert!(
@@ -709,7 +706,7 @@ fn platform_sources() -> String {
 /// 2026-09-11 分层后，原先针对 `main.rs` 的断言必须覆盖 domain 层 ——
 /// 否则测试会盯着一个已不含该逻辑的文件，产生**假红**（如 B25/B37/B44）。
 ///
-/// ⚠ 但**分层断言本身**仍必须针对 `main.rs`（如 B13 要求 main.rs 引入 platform），
+/// 但**分层断言本身**仍必须针对 `main.rs`（如 B13 要求 main.rs 引入 platform），
 ///   故本助手只用于「逻辑存在性」，不用于「位于哪一层」。
 fn crate_sources() -> String {
     let mut out = main_rs();
@@ -728,7 +725,7 @@ fn crate_sources() -> String {
 }
 
 fn all_rust_sources() -> Vec<(String, String)> {
-    // ⚠ **必须递归**（2026-09-11 修复门禁盲区）：
+    // **必须递归**（2026-09-11 修复门禁盲区）：
     //   原实现只读顶层 `src/`，而 `platform/` 是**子目录** ——
     //   于是 B32「禁止无界外部命令」等按本函数遍历的门禁
     //   对新建的平台适配层**完全不可见**（门禁看起来在跑，实际有盲区）。
@@ -1067,7 +1064,7 @@ fn b56_windows_schtasks_tr_value_is_quoted() {
 fn b57_async_commands_do_not_block_on_tokio_worker() {
     let c = fs::read_to_string(manifest_dir().join("src").join("commands").join("mod.rs"))
         .expect("commands/mod.rs");
-    // ⚠ 2026-09-13：**归一化换行**。下方用 find("\n}\n") 取函数体，而 Windows 检出
+    // 2026-09-13：**归一化换行**。下方用 find("\n}\n") 取函数体，而 Windows 检出
     //   可能是 CRLF（core.autocrlf + 本仓原先无 .gitattributes）→ 该针脚永不匹配 →
     //   走 unwrap_or(rest.len())，body 变成「从 core_plan 到**文件结尾**」：
     //     · contains("spawn_blocking") 会被**别的函数**满足 → 假绿；
@@ -1141,7 +1138,7 @@ fn b44_local_connect_bounded_and_async() {
 /// 就是「靠恰好在同一个 files[] 里」而侥幸通过。
 #[test]
 fn b45_platform_tag_is_arch_aware() {
-    // ⚠ 2026-09-12 修复：本测试原先读 `src/node.rs` 找 `linux-arm64` ——
+    // 2026-09-12 修复：本测试原先读 `src/node.rs` 找 `linux-arm64` ——
     //   但制品映射早已**下沉到 platform 层**（见 B42 的说明），node.rs 里只剩**注释**含该串。
     //   于是断言**永久为真**（读的是注释，不是实现）→ 门禁空转。
     //   这与 B42 是同一根因，B42 当时已改用 platform_sources()，B45/B46 漏改。
@@ -1161,7 +1158,7 @@ fn b45_platform_tag_is_arch_aware() {
         n.contains("win-arm64-msi"),
         "B45 FAIL 未记录 Windows arm64 的 msi 缺失限制"
     );
-    // ⚠ 反向自检：确保找的是**实现文件**而非又一处注释 ——
+    // 反向自检：确保找的是**实现文件**而非又一处注释 ——
     //   若 platform_sources() 未来不再含这些串，上面会失败（不会静默通过）。
     assert!(
         !platform_sources().is_empty(),
@@ -1172,7 +1169,7 @@ fn b45_platform_tag_is_arch_aware() {
 
 /// B46：Windows 路径不得硬编码（系统盘符/语言/Program Files(x86) 都会变化）。
 ///
-/// ⚠ 2026-09-12 修复：本测试原先读 `src/env.rs` 找 `ProgramFiles(x86)` ——
+/// 2026-09-12 修复：本测试原先读 `src/env.rs` 找 `ProgramFiles(x86)` ——
 ///   但该实现早已**下沉到 platform 层**（`platform/windows.rs`），
 ///   env.rs 里只剩**注释**含该串 → 断言永久为真，门禁空转。
 ///   与 B45 同根因（B42 已改对，这两条漏改）。
@@ -1218,7 +1215,7 @@ fn b49_mirror_visible_regardless_of_node_state() {
     assert!(h.contains("mirror_warmup"), "B49 FAIL 未调用 mirror_warmup");
     assert!(h.contains("mirror_cached"), "B49 FAIL 未读取镜像缓存");
     // 预热必须在 boot 中启动（与步骤无关）。
-    // ⚠ 用函数边界取体，不要用固定字节长度（中文注释 3 字节/字，会误判）。
+    // 用函数边界取体，不要用固定字节长度（中文注释 3 字节/字，会误判）。
     let boot_body = function_body(&h, "function boot()");
     assert!(boot_body.contains("startMirrorWarmup()"), "B49 FAIL boot 未启动镜像预热");
     // 诊断串必须始终带镜像（含「预热中」这种明确状态，而非 none）
@@ -1243,7 +1240,10 @@ fn b51_kernel_steps_show_mirror() {
     let h = bootstrap_html();
     assert!(h.contains("function mirrorText"), "B51 FAIL 缺统一的镜像文案函数");
     let plan = h.find("function stepCorePlan()").expect("B51 FAIL 缺 stepCorePlan");
-    let plan_body = &h[plan..(plan + 2600).min(h.len())];
+    // 按**字符**而非字节截断：字节切点可能落在多字节字符内部并 panic。
+    let rest = &h[plan..];
+    let end = rest.char_indices().take(2600).last().map(|(i, c)| i + c.len_utf8()).unwrap_or(rest.len());
+    let plan_body = &rest[..end];
     assert!(plan_body.contains("mirrorText()") || plan_body.contains("p.registry"), "B51 FAIL 内核步骤未展示镜像");
     eprintln!("B51 PASS kernel steps show mirror");
 }
@@ -1431,10 +1431,10 @@ fn b54_bootstrap_must_be_main_frame() {
 #[test]
 fn b55_missing_ipc_must_fail_loudly() {
     let boot = bootstrap_html();
-    // ⚠ 只看 boot() 函数体：别处（如 wctl 的按钮守卫）出现 `if (!core) return;` 是合法的，
+    // 只看 boot() 函数体：别处（如 wctl 的按钮守卫）出现 `if (!core) return;` 是合法的，
     //   不应误判（首版断言即因此误报）。
     let body = function_body(&boot, "function boot()");
-    // ⚠ 必须先剔除注释行：boot() 的注释里**引用了**旧写法（`if (!core) return;`）作说明，
+    // 必须先剔除注释行：boot() 的注释里**引用了**旧写法（`if (!core) return;`）作说明，
     //   不过滤会把说明文字误判为实际代码（首版断言即因此误报）。
     let code: String = body
         .split('\n')
@@ -1640,7 +1640,7 @@ fn g2_commands_layer_only_delegates() {
 // 上限设为 **550** 行：给出合理余量（新增一个命令约 10 行），
 // 但一旦有人把业务写回 main.rs 就会触发。
 //
-// ⚠ 为什么不设 150（目标值）：目标值需要把 `setup()` 内的窗口/托盘装配也拆出，
+// 为什么不设 150（目标值）：目标值需要把 `setup()` 内的窗口/托盘装配也拆出，
 //   那属于后续工作；**门禁应当锁定当前已达成的水平并能防止退化**，
 //   而不是设一个当下即红的数字（红了就会被 `#[ignore]` 掉，门禁形同虚设）。
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1831,7 +1831,7 @@ fn b58_systemd_exec_start_quotes_the_binary_path() {
 //
 // 现三处已下沉为 Platform trait 方法（node_exe_name / npm_exe_name / core_exe_names）。
 //
-// ⚠ 本测试含**反向自检**：门禁的识别逻辑必须能命中已知样本 ——
+// 本测试含**反向自检**：门禁的识别逻辑必须能命中已知样本 ——
 //   否则「改了门禁但逻辑写错」会让它永远通过（假门禁）。
 #[test]
 fn b59_g1_covers_cfg_macro_form() {
@@ -1957,7 +1957,7 @@ fn b62_subprocess_diagnostics_survive_non_utf8() {
     let b = fs::read_to_string(manifest_dir().join("src").join("bounded.rs")).expect("bounded.rs");
     let c = fs::read_to_string(manifest_dir().join("src").join("core.rs")).expect("core.rs");
 
-    // ⚠ 2026-09-12 更新（B63 去重后）：`core.rs` 的执行器已统一到 `bounded.rs`，
+    // 2026-09-12 更新（B63 去重后）：`core.rs` 的执行器已统一到 `bounded.rs`，
     //   其自带的 `read_log` 随之删除 —— 故这里只断言**唯一那份**（bounded.rs），
     //   并反向断言 core.rs **不再**有第二份读取实现（否则又是两处实现）。
     let i = match b.find("fn read_log") {
@@ -2025,7 +2025,7 @@ fn b63_single_bounded_executor_implementation() {
     );
 
     // ③ 不得再定义与 bounded::Output 重复的结构。
-    //    ⚠ 必须排除注释行：文档里会**提到**该结构名（说明它已删除），
+    //    必须排除注释行：文档里会**提到**该结构名（说明它已删除），
     //      直接 `contains` 会把说明文字当成代码（我第一版就踩了这个假阳性）。
     let code_only: String = c
         .lines()

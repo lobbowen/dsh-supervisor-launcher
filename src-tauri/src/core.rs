@@ -1,4 +1,4 @@
-// 内核（dsh-supervisor）版本治理 —— 引导期的「强制更新 + 失败回退」（方案 B）。
+// 内核（dsh-supervisor）版本治理 —— 引导期的强制更新（只升不降，无回退）。
 //
 // 跨平台规范性（本模块的全部设计依据）：
 //   1) 包名按 os/arch 映射：@dsh-sup/dsh-core-<linux|darwin|win>-<x64|arm64>。
@@ -13,7 +13,7 @@
 //      只信 latest 会导致「强制更新」变「强制降级」。
 
 use serde_json::Value;
-// ⚠ 原 `use std::io::Read;` 已移除（2026-09-12）：read_log 改用 fs::read + from_utf8_lossy，
+// 原 `use std::io::Read;` 已移除（2026-09-12）：read_log 改用 fs::read + from_utf8_lossy，
 //   不再需要 Read trait（会触发 unused_imports 警告）。
 use std::path::{Path, PathBuf};
 
@@ -58,14 +58,7 @@ fn num_ok(s: &str) -> bool {
 
 /// 版本字面量合法性：`X.Y.Z[-pre][+build]`。
 ///
-/// ## 2026-09-11 对齐 semver（修复与内核的 3 处分歧）
-///
-/// 旧实现 `v.split('+').next()` 在验证前**丢弃 build 段**，于是：
-///   `1.0.0+`、`1.0.0+!!!`、`1.0.0+あ` 被判**合法**，而内核 `VERSION_RE` 判**非法**。
-/// 两侧对同一输入给出不同答案 —— 正是「同一逻辑两处实现」的典型风险。
-///
-/// 按 semver 规范，build 段必须匹配 `[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*`，
-/// 故上述三例**应当非法**（内核正确、本实现偏宽）。现对齐。
+/// 按 semver：build 段须匹配 `[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*`。
 ///
 /// 行为规格由 `shell-release/version-vectors.json` 锁定（内核侧有同一份，
 /// 两侧测试套件都按它断言）—— 跨语言无法共享代码，但可共享行为规格。
@@ -270,7 +263,7 @@ pub fn installed_version(bin: &Path) -> Option<String> {
         }
     }
     // 兜底：执行 --version。
-    // ⚠ 必须有界（2026-09-11 修复，与「检测环境卡死」同一类缺陷）：
+    // 必须有界（2026-09-11 修复，与「检测环境卡死」同一类缺陷）：
     //   原实现用 Command::output() **无限阻塞**，且 locate_core 会对**每个候选**都调用一次；
     //   一旦某个候选不可执行（损坏的 shim、被安全软件拦截、架构不符），
     //   引导页就会永久停在「正在检查内核版本」。
@@ -328,26 +321,14 @@ fn tail(s: &str, n: usize) -> String {
     t.chars().skip(t.chars().count() - n).collect()
 }
 
-/// 安装/升级/回退到指定版本（npm install -g [--prefix] pkg@version）。
+/// 安装/升级到指定版本（npm install -g [--prefix] pkg@version）。
 /// 显式 --prefix 保证装回「内核当前所在前缀」，避免 npm 默认前缀不一致导致旧内核遮蔽新内核。
 /// 返回 npm 输出（成功）或含退出码与 stderr 的错误（失败——供引导页如实呈现，不再吞错）。
 ///
-/// ## 2026-09-14 加固：缓存隔离重试 + 失败回传完整证据
-///
-/// 现场：Windows 用户升级内核报 `npm error Maximum call stack size exceeded`（npm 退出码 1）。
-/// 已排除（本地实测）：包本身零依赖/无 node_modules/无符号链接；
-///   npmjs / npmmirror / 华为云三源均可**全新安装与升级**；自引用 file: 依赖与 400 层
-///   .package-lock.json 也不触发。故**不是发布产物的问题**，而是该机器的 npm 环境。
-///
-/// 该类错误的**首要成因是 npm 缓存损坏**（其次才是 npm 自身缺陷）。
-/// 但现场无法远程清缓存，故此处做**缓存隔离重试**：首次失败且**失败得很快**时，
-///   用**全新临时缓存目录**再试一次 —— 这既是绕行，也把「是否缓存问题」变成可判定的证据。
-///
-/// ⚠ 只在**快失败**时重试：爆栈/缓存类错误秒级返回；若首次已耗时很久（网络慢/超时），
-///   再试一次会突破引导页 17 分钟预算。故用 FAST_FAIL_RETRY 窗口约束总时长。
-///
-/// ⚠ 失败时**必须回传证据**（命令 / prefix / 源 / 两次尝试的输出）——
-///   原实现只回一句「npm 退出码 1」，导致现场无法定位（本次事故即因此多花一轮）。
+/// 不变量：
+///   · 首次失败且**快失败**时，用全新临时缓存目录重试一次（隔离损坏的 npm 缓存）；
+///     仅在 FAST_FAIL_RETRY 窗口内重试，避免突破引导页预算。
+///   · 失败时**必须回传证据**（命令 / prefix / 源 / 两次尝试输出）。
 pub fn install_version(pkg: &str, version: &str, prefix: Option<&Path>, registry: Option<&str>) -> Result<String, String> {
     if !is_valid_version(version) { return Err(format!("非法目标版本: {}", version)); }
     let spec = format!("{}@{}", pkg, version);
@@ -405,16 +386,7 @@ pub fn is_node_install_prefix(p: &Path) -> bool {
 }
 /// 剥掉 Windows verbatim / device 命名空间前缀 —— **交给外部工具（npm / node）前必须做**。
 ///
-/// ## 为什么必须有（2026-09-14 真实事故，附 npm debug log 证据）
-///   现场：Windows 用户升级内核报 `npm error Maximum call stack size exceeded`。
-///   npm debug log 的 argv 显示我们传的是：
-///       --prefix "\\?\C:\Users\Administrator\AppData\Roaming\npm"
-///   而 `npm prefix -g` 对同一目录给的是干净形式（无前缀）。
-///   栈指向 `@npmcli/arborist` 的 `realpathCached` **无限递归** ——
-///   该函数在 verbatim 前缀路径上不收敛（node:path resolve 不收敛）。
-///
-///   来源：Rust 的 `std::fs::canonicalize()` 在 Windows 上**总是**返回 verbatim 形式；
-///   而 `global_prefix_for` 按组件重建前缀时把它原样带上。
+/// 剥除 Windows verbatim/device 命名空间前缀（交给外部工具 npm/node 前必须做）。
 ///
 /// ## 规则
 ///   \\?\UNC\server\share -> \\server\share（UNC 段大小写不敏感）
@@ -474,7 +446,7 @@ fn run_npm_install(
     // 经 bounded::prepare（**infra 原语**，与 bounded::run 同一处实现）——
     // 本文件因此不再需要平台分支（门禁 G1）。
     crate::bounded::prepare(&mut cmd);
-    // ⚠ 必须有界（2026-09-11 修复，与引导页「网络步骤无超时 → 永久卡住」属同一类缺陷）：
+    // 必须有界（2026-09-11 修复，与引导页「网络步骤无超时 → 永久卡住」属同一类缺陷）：
     //   原实现用 `cmd.output()` **无限阻塞** —— npm 因网络停滞/registry 无响应而挂起时，
     //   引导页会永久停在「正在安装内核…」，用户除了杀进程别无选择。
     //   实现要点：输出重定向到**临时文件**而非管道 —— 若用 Stdio::piped() 且不读取，
@@ -488,7 +460,7 @@ const NPM_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 
 /// 有界执行子进程 —— **委托给 `bounded.rs` 的统一实现**（P2 去重，2026-09-12）。
 ///
-/// ⚠ 此处原有 `struct BoundedOutput` + 一份 `run_command_bounded` 的**完整复制**：
+/// 此处原有 `struct BoundedOutput` + 一份 `run_command_bounded` 的**完整复制**：
 ///   字段与 `bounded::Output` 逐一相同，逻辑也几乎逐行相同，但**行为已经分叉**：
 ///     · 漏 `cmd.stdin(Stdio::null())` —— 子进程会继承 GUI 进程的 stdin；
 ///     · 曾用 `as_millis()` 做临时名（并发撞名）而 bounded 一直用 nanos；
@@ -660,9 +632,7 @@ mod tests {
         eprintln!("版本向量通过：合法性 {} 条 / 比较 {} 条", nv, nc);
     }
 
-    // ── 2026-09-14：verbatim 前缀剥除（真实事故的针对性回归）──
-    //   用 Windows 形状的字符串在**任意平台**断言，不必等 Windows runner ——
-    //   这正是该缺陷此前只在用户机器上暴露的补救。
+// verbatim 前缀剥除的针对性回归。
     #[test]
     fn strips_verbatim_drive_prefix() {
         assert_eq!(strip_verbatim("\\\\?\\C:\\Users\\x"), "C:\\Users\\x");

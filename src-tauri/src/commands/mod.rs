@@ -27,15 +27,9 @@ const SHELL_DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_se
 ///
 /// == 架构修复（2026-09-11 二次，根因见 nodeprobe.rs） ==
 ///
-/// 1) **必须快速返回**，无论探测内部是否卡在阻塞型系统调用。旧实现直接
-///    await 阻塞任务 —— 探测一挂，本命令就永不返回，前端 45 秒超时后只能报
-///    node=unknown，且 Rust 侧那条线程永久悬挂（每次重试再添一条）。
-///    现改为：探测在分离线程中进行，本命令只在极短预算内等待；未完成即返回
-///    probing=true，由引导页轮询。**命令的返回时间与任何系统调用无关。**
+/// 不变量：本命令必须快速返回（探测在分离线程，未完成即返回 probing=true）。
 ///
-/// 2) **不含任何网络 I/O**。旧实现会顺带触网查最新 LTS，使「本地环境判定」
-///    被网络质量左右 —— 而这两件事在因果上毫无关系。网络侧信息改由 node_latest
-///    单独提供（也便于把镜像选择显式呈现给用户）。
+/// 不变量：不含网络 I/O（网络侧信息由 node_latest 单独提供）。
 #[tauri::command]
 pub async fn node_status(app: tauri::AppHandle) -> serde_json::Value {
     // 首次调用会启动探测线程；此后每次调用都复用在飞结果（不会堆积线程）。
@@ -194,15 +188,9 @@ pub fn start_node_install(state: tauri::State<Mutex<RunState>>, app: tauri::AppH
 ///
 /// == 架构修复（2026-09-11）==
 ///
-/// 1) **必须 async**：旧实现是同步命令 → Tauri 在**主线程**执行 →
-///    `locate_core` 会**逐个候选执行内核二进制**（每个 10 秒上限）取版本做仲裁，
-///    且随后又对选中项再执行一次取版本。候选一多（PATH + npm 目录 + 资源目录）
-///    即可把主线程占住数十秒 —— 界面完全无响应。
-///    现把全部工作放进阻塞线程池，主线程立即返回。
+/// 必须 async：工作放阻塞线程池，主线程立即返回。
 ///
-/// 2) **不重复执行**：`locate_core` 内部已按版本仲裁并取过版本，
-///    旧实现在外面又调一次 `installed_version`，属纯浪费（每次都可能是一次进程启动）。
-///    现让 `locate_core` 一并返回版本。
+/// 不重复执行：locate_core 已取过版本，直接复用其返回。
 #[tauri::command]
 pub async fn core_status(app: tauri::AppHandle) -> serde_json::Value {
     let pkg = crate::core::package_name().unwrap_or_else(|_| "@dsh-sup/dsh-core-<platform>".into());
@@ -228,14 +216,7 @@ pub async fn core_status(app: tauri::AppHandle) -> serde_json::Value {
 
 /// 内核版本规划（引导页决策输入）：本地已装版本 + 远端最高版本 + 动作(install/upgrade/none)。
 ///
-/// ⚠ **两段都必须 spawn_blocking**（P1-H 修复，2026-09-12）：
-///   `locate_core` 会**逐个候选执行内核二进制**拿版本（每个候选上限 10s，见 core.rs），
-///   是**同步阻塞**调用。旧实现直接在 async fn 里调它 → 占用 tokio worker：
-///   候选多、或某候选损坏/被安全软件拦截时，可累积数十秒，
-///   期间同进程其它 async IPC（如 node_status 轮询）排队 → 表现为「检查内核版本」阶段整体卡顿。
-///
-///   这正是「同一根因改了一处、漏了一处」：同文件的 `core_status` 早已改为 spawn_blocking，
-///   而它自己的文档也写着「网络调用放线程池，不阻塞 UI 线程」—— core_plan 没跟进。
+/// 两段都必须 spawn_blocking：locate_core 是同步阻塞调用，放主线程会拖慢整个 IPC。
 #[tauri::command]
 pub async fn core_plan(app: tauri::AppHandle) -> ShellResult<serde_json::Value> {
     // ① 本地定位 + 版本探测（阻塞，逐候选执行二进制）
@@ -253,25 +234,23 @@ pub async fn core_plan(app: tauri::AppHandle) -> ShellResult<serde_json::Value> 
     Ok(crate::core::build_plan(installed, latest))
 }
 
-/// 安装/升级/回退内核到指定版本（version=None → 最新）。方案 B 的执行口：
+/// 安装/升级内核到**最新版**（强制更新，只升不降，无回退）。
 ///   - 显式 `--prefix`（从现有内核路径反推）确保装回同一前缀（跨平台布局差异见 core.rs）；
-///   - 逐个镜像回退；
-///   - 如实回传成败（含退出码/stderr）——供引导页做「升级失败→回退旧版」判断，绝不吞错。
+///   - 逐个镜像回退（源回退，与版本回退无关）；
+///   - 如实回传成败（含退出码/stderr），绝不吞错。
 #[tauri::command]
-pub async fn core_apply(app: tauri::AppHandle, version: Option<String>) -> ShellResult<serde_json::Value> {
+pub async fn core_apply(app: tauri::AppHandle) -> ShellResult<serde_json::Value> {
     let pkg = crate::core::package_name()?;
     let prefix = crate::domain::coreloc::locate_core(&app).and_then(|b| crate::core::global_prefix_for(&b));
     let origins = crate::core::registry_origins();
-    let target = match version {
-        Some(v) if crate::core::is_valid_version(&v) => v,
-        _ => {
-            let p = pkg.clone();
-            let r = tauri::async_runtime::spawn_blocking(move || crate::core::latest_version(&p))
-                .await.map_err(|e| ShellError::ipc(e.to_string()))?;
-            match r {
-                Ok((v, _)) => v,
-                Err(e) => return Ok(serde_json::json!({"ok": false, "stage": "resolve", "error": e})),
-            }
+    // 强制更新：唯一目标是「当前最新」——不接受调用方指定版本，内核不存在回退路径。
+    let target = {
+        let p = pkg.clone();
+        let r = tauri::async_runtime::spawn_blocking(move || crate::core::latest_version(&p))
+            .await.map_err(|e| ShellError::ipc(e.to_string()))?;
+        match r {
+            Ok((v, _)) => v,
+            Err(e) => return Ok(serde_json::json!({"ok": false, "stage": "resolve", "error": e})),
         }
     };
     // 失败回传用（闭包会 move origins）
@@ -294,9 +273,7 @@ pub async fn core_apply(app: tauri::AppHandle, version: Option<String>) -> Shell
             "ok": true, "version": target, "origin": origin, "output": out,
             "prefix": prefix.map(|p| p.display().to_string()),
         }),
-        // 2026-09-14 修复：失败分支**必须**回传 prefix 与尝试过的源。
-        //   原实现只在成功分支带 prefix —— 现场报「npm 退出码 1」时，
-        //   连「装到哪个前缀」都不知道，导致定位多花一轮（真实事故）。
+        // 失败分支必须回传 prefix 与尝试过的源（否则现场无法定位）。
         Err(e) => serde_json::json!({
             "ok": false, "version": target, "error": e,
             "prefix": prefix.as_ref().map(|p| p.display().to_string()),
@@ -310,18 +287,8 @@ pub async fn core_apply(app: tauri::AppHandle, version: Option<String>) -> Shell
 /// 引导页驱动：申请所有者启动守卫（唯一启停权威，见 crate::platform::service::start）。阻塞放线程池。
 #[tauri::command]
 pub async fn guard_start(app: tauri::AppHandle) -> ShellResult<serde_json::Value> {
-    // ⚠ 必须有界（2026-09-11 架构修复）。
-    //
-    // 旧实现：`spawn_blocking(ensure_guard).await` —— **无超时**。
-    // 而 ensure_guard 内部会：① 调服务管理器（原为无界 .output()）
-    // ② wait_alive 最多 30 秒 ③ 兜底 spawn 后再等 60 秒。
-    // 任一处挂起 → 本命令永不返回 → 前端 invoke('guard_start') 永不 settle
-    // → 引导页**永久停在「正在启动守卫…」**，无重试、无出口。
-    // 这与「卡在检测环境」是**同一根因模式**，只是发生在另一个步骤上。
-    //
-    // 两层保证：① 内部各命令已全部有界；② 此处再加外层兜底。
-    // 注：超时不会取消 spawn_blocking 中已启动的任务（它会自然结束），
-    // 但**命令会返回**，前端因此能拿到结论并给出重试/诊断入口。
+    // 必须有界：ensure_guard 内部可能长时间阻塞（服务管理器 + wait_alive + spawn 兜底）。
+    // 外层超时保证命令仍会返回，前端据此给出重试/诊断入口。
     const GUARD_TOTAL_BUDGET: std::time::Duration = std::time::Duration::from_secs(180);
     let a = app.clone();
     let task = tauri::async_runtime::spawn_blocking(move || crate::domain::guardctl::ensure_guard(&a));
@@ -335,7 +302,7 @@ pub async fn guard_start(app: tauri::AppHandle) -> ShellResult<serde_json::Value
     };
     Ok(match r {
         Ok(()) => serde_json::json!({"ok": true}),
-        // ⚠ 响应体里的 `error` 保持**字符串**：前端多处做 `'...' + e` 拼接，
+        // 响应体里的 `error` 保持**字符串**：前端多处做 `'...' + e` 拼接，
         //   若此处塞入结构化对象会显示成 [object Object]。
         Err(e) => serde_json::json!({"ok": false, "error": e.to_string()}),
     })
@@ -343,10 +310,7 @@ pub async fn guard_start(app: tauri::AppHandle) -> ShellResult<serde_json::Value
 
 /// 守卫就绪探针（TCP + HTTP /healthz 双确认）：引导页据此决定进面板，替代固定延时（K6）。
 ///
-/// ⚠ 必须 async（2026-09-11 审计）：旧实现是**同步命令** → 在**主线程**执行一次
-///   最多 400ms 的 TCP 探测 + 最多 3 秒的 HTTP 往返；而引导页每 500ms 轮询一次、
-///   最多 40 次 —— 合计可占住主线程十几秒，界面在此期间**无法重绘**。
-///   现放进阻塞线程池：主线程立即返回。
+/// 必须 async：探测最长数秒且被高频轮询，必须放阻塞线程池，主线程立即返回。
 #[tauri::command]
 pub async fn guard_ready() -> serde_json::Value {
     tauri::async_runtime::spawn_blocking(|| {
@@ -396,15 +360,11 @@ pub fn win_ctl(app: tauri::AppHandle, action: String) -> ShellResult<()> {
 /// 内核在回执前**不会**停止自己（阶段 1 已移除内核自停）。
 /// 无头自检：**环境探测**（架构修复后的可诊断入口）。
 ///
-/// 为什么需要：探测根因是「环境特有」的（某个候选上有阻塞型系统调用），
-/// 靠读代码无法确定。本入口在有界预算内跑完探测并打印**逐候选追踪**，
-/// 卡住时也能看到「卡在谁、多久」—— 这是定位该类问题唯一可靠的手段。
+/// 在有界预算内跑完探测并打印逐候选追踪（卡住时可见「卡在谁、多久」）。
 /// 用法：dsh-supervisor-gui --env-plan
 /// 无头自检：**镜像测速与选择**。
 ///
-/// 为什么需要：用户曾反馈「连镜像源都看不到，根本不会去选择镜像源」。
-/// 功能本身是好的，但可见性缺失会被合理地理解为能力不存在。
-/// 本入口把「测了哪些源、各自延迟、最终选了谁」变成**可核对的事实**。
+/// 打印「测了哪些源、各自延迟、最终选了谁」，使镜像选择可核对。
 /// 用法：dsh-supervisor-gui --mirror-plan
 /// 打开面板（分体架构 2026-09-07 定稿）：
 /// 壳 = 自绘窗口容器(shell.html 唯一窗口栏 + 内容 iframe)；面板由守卫内核 HTTP 托管（同源）。
@@ -412,9 +372,7 @@ pub fn win_ctl(app: tauri::AppHandle, action: String) -> ShellResult<()> {
 /// 页面与守卫 API 同源直连（无跨源/CORS 透传）。
 /// 返回控制面板 URL（供壳框架在导航后自行取得面板地址）。
 ///
-/// 为什么需要：引导页与壳框架是**两个主帧页面**（引导完成后导航切换），
-/// 而 Rust 的 shell:goto-panel 事件在首帧可能早于 listener 注册而被丢弃。
-/// 由壳框架主动索取，可彻底避免事件竞态。
+/// 由壳框架主动索取面板 URL，避免 shell:goto-panel 事件早于 listener 注册而丢失。
 #[tauri::command]
 pub fn shell_panel_url() -> serde_json::Value {
     let url = crate::env::api_base_url();
@@ -424,7 +382,7 @@ pub fn shell_panel_url() -> serde_json::Value {
     serde_json::json!({ "url": url })
 }
 
-/// 壳身份快照（版本/安装形态/自更新能力/attempt/pinned），供引导页与诊断。
+/// 壳身份快照（版本/安装形态/自更新能力），供引导页与诊断。
 #[tauri::command]
 pub fn shell_identity(app: tauri::AppHandle) -> serde_json::Value {
     let v = app.package_info().version.to_string();
@@ -435,24 +393,6 @@ pub fn shell_identity(app: tauri::AppHandle) -> serde_json::Value {
     id
 }
 
-/// **显式恢复自更新**（P1-A）：清零失败计数、解除冷却与拉黑，并立即重查。
-///
-/// 为什么需要它：自动冷却（6 小时）解决「永久自锁」，但用户/支持仍需一个
-/// 「现在就再试一次」的动作。旧实现完全没有恢复路径 ——
-/// 唯一手段是手工删 `~/.dsh/shell/update-guard.json`，而 UI 从不提示。
-///
-/// 返回 `{ recovered: <复位前状态>, plan: <重查结果> }`，供 UI 如实说明恢复了什么。
-#[tauri::command]
-pub async fn shell_reset_update_guard(app: tauri::AppHandle) -> ShellResult<serde_json::Value> {
-    let recovered = crate::update::reset_guard();
-    // 复位后**立即重查**（幂等）：让 UI 一次调用就能拿到「现在能不能更新」。
-    let plan = shell_update_check(app).await.unwrap_or_else(|e| {
-        serde_json::json!({ "error": e.to_string() })
-    });
-    Ok(serde_json::json!({ "recovered": recovered, "plan": plan }))
-}
-
-/// 引导阶段上报（写入 identity.json + shell.log，便于问题定位）。
 #[tauri::command]
 pub fn shell_set_phase(phase: String) {
     crate::update::set_phase(&phase);
@@ -534,13 +474,6 @@ pub fn mirror_set(kind: String, urls: Vec<String>) -> ShellResult<serde_json::Va
 #[tauri::command]
 pub async fn shell_update_check(app: tauri::AppHandle) -> ShellResult<serde_json::Value> {
     let cur = app.package_info().version.to_string();
-    let (should, reason) = crate::update::should_check(&cur);
-    if !should {
-        crate::update::log(&format!("桌面更新跳过：{}", reason));
-        return Ok(serde_json::json!({
-            "ok": true, "available": false, "skipped": true, "reason": reason, "current": cur
-        }));
-    }
     crate::update::set_phase("shell-update-check");
     let updater = match crate::shell_updater(&app, SHELL_CHECK_TIMEOUT) {
         Ok(u) => u,
@@ -607,18 +540,9 @@ pub async fn shell_update_apply(app: tauri::AppHandle) -> ShellResult<serde_json
     };
     let target = u.version.clone();
 
-    // ⚠ mark_pending 必须在 install **之前**（2026-09-11 修复）。
-    //   Windows 上 install 会 ShellExecuteW 启动安装程序后立即 std::process::exit(0)，
-    //   其后的任何代码都不会执行 —— 原先把它放在 download_and_install 之后，
-    //   导致 Windows 的护栏账本**永远拿不到 pendingVersion**，
-    //   「更新成功确认 / 连续失败拉黑」机制在 Windows 上完全失效。
-    crate::update::mark_pending(&target);
     crate::update::log(&format!("桌面更新开始下载 {}", target));
 
-    // 下载：用**进度事件**驱动前端进度条。
-    // （此前进度回调体是空的 `let _ = (chunk, total);` → 用户无法区分「正在下载」与
-    //   「卡死」；4MB+ 安装包在慢网下长时间零反馈，Windows 真机实测体验极差。）
-    // 注意：插件的 on_chunk 回调给的是**本块大小**（增量），故此处自行累加。
+    // 用进度事件驱动前端进度条；on_chunk 给的是本块大小（增量），此处自行累加。
     let mut got: u64 = 0;
     let dl = tokio::time::timeout(
         SHELL_DOWNLOAD_TIMEOUT,
@@ -655,7 +579,7 @@ pub async fn shell_update_apply(app: tauri::AppHandle) -> ShellResult<serde_json
     );
     crate::update::log(&format!("桌面更新下载完成（{} 字节），开始安装 {}", total, target));
 
-    // ⚠ Windows：install 启动安装程序后 std::process::exit(0)，**不会返回**；
+    // Windows：install 启动安装程序后 std::process::exit(0)，**不会返回**；
     //   Linux/macOS：返回后由引导页调用 shell_restart 重启进入新版本。
     if let Err(e) = u.install(bytes) {
         let msg = format!("安装失败: {}", e);

@@ -73,8 +73,7 @@ pub fn run(cmd: &mut Command, timeout: Duration) -> Result<Output, String> {
     let err_path = dir.join(format!("dsh-cmd-err-{}.log", stamp));
 
     let out_file = std::fs::File::create(&out_path).map_err(|e| format!("创建临时日志失败: {}", e))?;
-    // ⚠ P3 修复（2026-09-13）：第二个文件创建失败时，**已建的第一个必须清掉**。
-    //   旧实现直接 `?` 返回 —— out_path 已落盘但永不清理，每次这种失败都留一个
+    // 不变量：任一临时文件创建失败时必须清掉已建的文件（不留残渣）。
     //   空的 dsh-cmd-out-*.log 在 temp 目录（本仓另有清理脚本会竞争，见 AUDIT-HANDOFF 9.4）。
     //   同理，spawn 失败时两个文件都已建好，也必须一并清理。
     let err_file = match std::fs::File::create(&err_path) {
@@ -89,7 +88,7 @@ pub fn run(cmd: &mut Command, timeout: Duration) -> Result<Output, String> {
     cmd.stdin(Stdio::null());
     prepare(cmd);
 
-    // ⚠ spawn 失败（命令不存在/不可执行）此前直接返回 Err，两个临时文件永久残留。
+    // spawn 失败（命令不存在/不可执行）此前直接返回 Err，两个临时文件永久残留。
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
@@ -150,7 +149,7 @@ pub fn run_lossy(cmd: &mut Command, timeout: Duration) {
 
 /// 读取子进程输出（**容忍非 UTF-8**）。
 ///
-/// ⚠ 2026-09-12（P2 修复）：原实现是 `read_to_string(p).unwrap_or_default()` ——
+/// 2026-09-12（P2 修复）：原实现是 `read_to_string(p).unwrap_or_default()` ——
 ///   非 UTF-8 时**静默返回空串**。而中文版 Windows 上 `schtasks`/`systemctl`/`npm`
 ///   的 stderr 是 **GBK**，于是所有「失败（退出码 N）：<详情>」里的详情**全丢**，
 ///   排障信息消失 —— 与「如实报错」的设计目标正好相反。
@@ -227,10 +226,7 @@ mod tests {
 
     /// A-4 门禁：失败路径不得在 temp 目录留下 dsh-cmd-*.log 残渣（2026-09-13）。
     ///
-    /// 旧实现：第二个临时文件创建失败、或 spawn 失败时**直接返回 Err**，
-    /// 已建的文件永不清理 → 每次失败留一对/一个空日志。
-    ///
-    /// 用 spawn 失败这一**可复现**的失败路径做行为验证（文件必然已创建）。
+/// 用 spawn 失败这一可复现路径验证「失败不留临时日志」。
     /// 注入：把 spawn 的 match 改回 `cmd.spawn().map_err(...)?` → 本测试 FAIL。
     #[test]
     fn a4_spawn_failure_leaves_no_temp_logs() {
@@ -242,7 +238,7 @@ mod tests {
         assert!(r.is_err(), "前置：不存在的命令应失败");
         let after = count_dsh_cmd_logs(&dir);
 
-        // ⚠ 并发测试可能同时创建/清理，故断言「不增长」而非「精确相等」。
+        // 并发测试可能同时创建/清理，故断言「不增长」而非「精确相等」。
         //   本测试的 pid 唯一，自己的那对必然被清掉，不会制造 +N。
         assert!(
             after <= before,

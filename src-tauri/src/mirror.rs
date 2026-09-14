@@ -1,28 +1,15 @@
-//! 镜像源适配（**壳自持**，2026-09-11）。
+//! 镜像源适配（壳自持）。
 //!
-//! == 为什么必须在壳内做（用户指正） ==
+//! 装机时机器上没有内核，壳必须先于内核完成镜像选择；故镜像目录与探测方法的所有权在壳，
+//! 内核消费壳投放的 registry.json（见 `export_to_kernel`）。三条下载链路：
+//!   ① Node 运行时 —— node.rs（index.json + 安装包 + SHASUMS256）
+//!   ② 内核 npm 包 —— core.rs（包元数据 + npm install -g）
+//!   ③ 壳自更新 —— main.rs（Tauri updater 清单与安装包）
 //!
-//! 用户装机的那一刻，机器上**没有内核** —— 内核是随后由壳自己安装的。
-//! 因此壳的每一处下载（Node 运行时、内核 npm 包、壳自身更新）都**不能**依赖
-//! 内核的 registry.json（那时它还不存在）。镜像适配必须由壳自带。
-//!
-//! == 三条下载链路 ==
-//!   ① Node 运行时   —— node.rs  （index.json + 安装包 + SHASUMS256）
-//!   ② 内核 npm 包   —— core.rs  （包元数据 + npm install -g）
-//!   ③ 壳自更新      —— main.rs  （Tauri updater 清单与安装包）
-//!
-//! == 策略：并行测速 + 缓存 + 取最高版本 ==
-//!
-//! 1. **并行**探测全部候选（串行会让最慢的源拖死整体；旧实现名为"并发"实为串行）；
-//! 2. Node 版本发现**取全部可达源中的最高版本** —— 实测腾讯云镜像会**滞后一个版本**，
-//!    若"首个成功即采用"会静默装到旧版；
-//! 3. 选择**最快**且确实提供该版本的源做下载；
-//! 4. 结果写入 ~/.dsh/shell/mirrors.json 缓存（TTL），并**导出给内核**
-//!    （registry.json）以便后续继承同一份镜像偏好。
-//!
-//! == 为什么探测 Node 用 index.json ==
-//! 我们无论如何都要拉它来发现版本，故一次并行拉取同时得到「延迟」与「版本」，
-//! 不额外增加请求。
+//! 不变量：
+//!   · **并行**探测全部候选（串行会被最慢源拖死）；
+//!   · Node 版本取全部可达源中的**最高版本**（镜像同步滞后，「首个成功即采用」会装到旧版）；
+//!   · 选**最快**且确实提供该版本的源下载；结果缓存到 ~/.dsh/shell/mirrors.json 并导出内核。
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -51,7 +38,7 @@ pub const NPM_PRESETS: [&str; 6] = [
 /// 并用该源 SHASUMS256.txt 的期望值做 SHA256 校验 —— 只有校验通过才算可用。
 /// 这比「URL 可达」严格得多：能过滤代理不完整、文件损坏、清单与文件不匹配的镜像。
 ///
-/// ⚠ 各源同步进度不同（官方/npmmirror/华为/阿里/上海交大有最新 LTS；
+/// 各源同步进度不同（官方/npmmirror/华为/阿里/上海交大有最新 LTS；
 ///   腾讯云/南京大学滞后一版；清华/北外/北大滞后数版）。这不影响使用 ——
 ///   latest_lts() 会**跨全部可达源取最高版本**，再在提供该版本的源中选最快者；
 ///   滞后源仍可作为回退。
@@ -72,7 +59,7 @@ pub const NODE_PRESETS: [&str; 10] = [
 
 /// 壳自更新清单预设（Tauri updater 的 endpoints；此处存完整清单 URL）。
 ///
-/// ⚠ 仅 2 个可用（2026-09-11 实测）：Tauri updater 需要一个**静态 JSON 文件**直链，
+/// 仅 2 个可用（2026-09-11 实测）：Tauri updater 需要一个**静态 JSON 文件**直链，
 ///   而多数 npm 镜像只提供 registry 元数据 API，不提供包内静态文件直链。
 ///   实测排除：npmmirror /files/ 路径返回 403；npm 官方不提供静态文件服务。
 pub const SHELL_PRESETS: [&str; 2] = [
@@ -192,7 +179,7 @@ pub fn save(m: &Mirrors) -> Result<(), String> {
 ///   1 —— 仅 `mode` / `origins` / `manualOrigin`（旧格式）
 ///   2 —— 增加 `catalog`（全集）/ `selected`（选择结果）/ `probe`（**探测规格**）
 ///
-/// ⚠ 为什么要 `probe`：修复「两侧选源不一致」——
+/// 为什么要 `probe`：修复「两侧选源不一致」——
 ///   内核用 `/-/ping`、壳用真实包元数据，同一镜像测出的延迟可差 **6.7 倍**
 ///   （实测 ustclug 2613ms vs 389ms），导致内核选 huaweicloud、壳选 npmmirror ——
 ///   用户看到「面板显示一个源、实际用另一个」。把探测规格随契约投放，
@@ -206,15 +193,8 @@ pub const CONTRACT_SCHEMA: u64 = 2;
 /// 用户在装壳那一刻机器上**没有内核** —— 壳必须先于内核完成镜像选择
 /// （否则连内核都装不上）。故目录与探测方法的所有权在壳，内核**消费产物**。
 ///
-/// ## 与旧行为的两处关键差异
-///
-/// 1. **不再只写被选中的 `origins`** —— 改为写全集 `catalog` + `selected` + `probe`。
-///    只写 origins 会导致：内核无法感知「壳测过哪些源」，且没有探测规格 → 方法分叉。
-/// 2. **不再依赖 `latest_lts()` 成功** —— 旧实现只在 `node::latest_lts()` 内调用，
-///    而该函数在「离线」或「全部 Node 镜像不可达」时返回 Err，**契约便完全不写**。
-///    现由 `main.rs` 的 setup 在**壳启动时无条件调用**一次（见 `export_on_boot`）。
-///
-/// 保留：内核已写为 `manual`（用户在面板手动固定）时**不覆盖**用户选择。
+/// 写全集 catalog + selected + probe（而非仅 origins），使内核与壳选源同源；
+/// 由 main.rs setup 在启动时无条件导出；内核已写 manual 时不覆盖。
 pub fn export_to_kernel(m: &Mirrors) -> Result<(), String> {
     export_to_kernel_with(m, None)
 }
@@ -236,14 +216,8 @@ pub fn export_to_kernel_with(m: &Mirrors, latency_ms: Option<u128>) -> Result<()
             }
         }
     }
-    // ⚠ P2 修复（2026-09-13）：延迟必须与**所选的 npm 源同源**。
-    //
-    //   缺陷：原用调用方传入的 latency_ms。而唯一带延迟的调用点是 node.rs:146，
-    //     它传的是 **Node 源**的延迟，却与 npm 语义的 selected 配对 ——
-    //     「拿 Node 的延迟去描述 npm 的选择」。只因 selected_npm 恒为 None（见 warmup 修复）
-    //     才未显形，属潜伏的第二处缺陷。
-    //   现优先用随 selected_npm 一起落盘的实测延迟（同一事实同一来源）；
-    //     调用方显式传入仅在「同一次探测刚得到」时作为兜底。
+    // 不变量：selected 的延迟必须与**所选 npm 源同源**。
+    // 优先用随 selected_npm 一起落盘的实测延迟；调用方传入仅作兜底。
     let eff_latency_ms: Option<u128> = m
         .selected_npm_latency_ms
         .map(|v| v as u128)
@@ -269,7 +243,7 @@ pub fn export_to_kernel_with(m: &Mirrors, latency_ms: Option<u128>) -> Result<()
         "probe": {
             "kind": "package-metadata",
             "pathTemplate": npm_probe_path(),
-            // ⚠ P1 修复（2026-09-12）：**必须与壳实际探测用的超时一致**。
+            // P1 修复（2026-09-12）：**必须与壳实际探测用的超时一致**。
             //
             //   缺陷：此处硬编码 6000，而 `probe_all` 用 `PROBE_TIMEOUT` = **8s**（见上）。
             //     `probe` 字段的全部目的就是让两侧**选源一致**（见文件头说明与
@@ -308,7 +282,7 @@ pub struct Probe {
 
 /// npm registry 的探测探针包名（**必须是一个真实存在的包**）。
 ///
-/// ⚠ 为什么不能用空路径或根路径（2026-09-11 修复）：
+/// 为什么不能用空路径或根路径（2026-09-11 修复）：
 ///   原实现对 npm 源传 `""`，实际请求 `https://<源>/`—— 而多数 registry 根路径返回
 ///   **404**（它们只服务包元数据 API）。于是**健康的源被判为「不可达」**：
 ///   实测腾讯云 npm 镜像连测 3 次均 HTTP 200、能正确返回我们的包，
@@ -468,7 +442,7 @@ pub fn warmup_async() {
                 npm_probes: mp,
                 at: now_secs(),
             };
-            // ⚠ P2 修复（2026-09-13，失效模式 f + i）：**必须把选中的 npm 源落盘**。
+            // P2 修复（2026-09-13，失效模式 f + i）：**必须把选中的 npm 源落盘**。
             //
             //   缺陷：本函数算出了 npm 最快源与延迟，却只放进内存 ProbeSnapshot，
             //     **从不写入 m.selected_npm** —— 全仓没有任何地方把它设成一个被选中的源

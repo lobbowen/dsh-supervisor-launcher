@@ -171,7 +171,7 @@ fn install_deb(&self, bytes: &[u8]) -> Result<()> {
     "updater": {
       "pubkey": "<minisign 公钥>",
       "endpoints": [
-        "https://unpkg.com/@dsh-sup/shell-<os>-<arch>@latest/shell-manifest.json"
+        "https://unpkg.com/@dsh-sup/shell-release@latest/shell-manifest.json"
       ]
     }
   }

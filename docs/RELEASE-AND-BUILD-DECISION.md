@@ -13,7 +13,7 @@
 | | 内核仓 `advgyxqamf/dsh-supervisor-core`（公开） | 壳仓 `wasi7mglns/dsh-supervisor-launcher`（公开，本仓） |
 |---|---|---|
 | 职责 | 产品逻辑 + 守护：API/路由/relay/实例/插件/端口/更新编排 | **仅**桌面体验：引导页、托盘、安装程序、原生能力 |
-| 技术栈 | JS（CommonJS），运行时依赖 **0**、原生扩展 **0** | Rust（Tauri 2）+ TS/React |
+| 技术栈 | JS（CommonJS），运行时依赖 **0**、原生扩展 **0** | Rust（Tauri 2）+ 纯 HTML/CSS/JS 引导页（无构建步骤）|
 | 产物 | npm 平台子包 `@dsh-sup/dsh-core-*`（4 平台） | 安装程序 `deb/rpm`、`dmg/app`、`msi/nsis` + `@dsh-sup/shell-*` |
 | 分发 | npm registry | GitHub Release + npm（自更新产物） |
 | 节奏 | 高频、可单独 hotfix | 低频（安装程序） |
@@ -25,7 +25,7 @@
 ④ **为后期决策留空间**（两仓可独立决定开源策略、节奏、商业形态）。
 
 **代价与对策**：不共享代码 → 契约只能靠**文件**传递（`registry.json` / `identity.json` /
-`update-guard.json` / `update-journal.json`）。字段**新增**须向后兼容；
+`update-journal.json`）。字段**新增**须向后兼容；
 字段**移除或改语义**须**内核先行**，并允许两侧版本错配运行一个发布周期。
 
 ## 2. 壳的构建与发布 SOP
@@ -71,7 +71,7 @@ git push origin main && git push origin v<ver>
 > （嵌套未转义双引号 → macOS 无法出包），该错误在 Linux 上因 `#[cfg(target_os)]`
 > 完全不可见。
 
-> ⚠ **门禁必须自动枚举**：CI 的门禁步骤用 `ls tests/*.rs` 自动列出全部 test target
+> **门禁必须自动枚举**：CI 的门禁步骤用 `ls tests/*.rs` 自动列出全部 test target
 > （仅排除需打包产物的 `updater_artifacts`）。曾经的硬编码 `--test` 名单导致
 > **新增门禁被静默排除在 CI 之外**（实测漏 4 个）—— `tests/ci_gate_coverage_test.rs`
 > 现在锁死「不得硬编码 + 必须有 mac/win 构建」。

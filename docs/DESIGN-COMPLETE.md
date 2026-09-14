@@ -6,149 +6,6 @@
 
 ---
 
-## ⚠ 执行状态（本方案已执行 —— 请先读本节）
-
-本文件写于**执行之前**，其中的「缺陷清单」「重叠面」描述的是**改造前状态**。
-这些缺陷**绝大部分已修复**；下文表格里的 `文件:行号` 是**审计时快照**，行号因重构已移位。
-下表是唯一事实源；要看现状请直接读代码。
-
-### 批 A–F
-
-| 批 | 内容 | 状态 |
-|---|---|---|
-| **A** | 平台适配层（43 处平台分支 → 2 处白名单例外）| ✅ 完成 |
-| **B** | 分层：`main.rs` 1420 → 469 行，拆出 `commands/` + `domain/` | ✅ 完成 |
-| **C** | 结构化错误 `ShellError` | ✅ 完成（曾因 `mod error;` 丢失成孤儿文件，已修复并接线）|
-| **D** | 契约层 M1–M5（镜像目录归壳 / 探测统一 / Node 门槛 / 版本向量）| ✅ 完成 |
-| **E** | 前端拆分 + 全局错误上报 + IPC 自检 + 门禁 G5 | ✅ 完成（802 行单块 → **9 个模块**；`bootstrap.html` 963 → 221 行；B53/G5 已适配且**注入验证能失败**）|
-| **F** | 内核缺陷 K1–K10 + M6 有界执行 | ✅ 完成（含 K3 状态源合并）|
-
-### 壳侧缺陷 S1–S5
-
-| # | 内容 | 状态 |
-|---|---|---|
-| **S1** | 分层违规（服务定义与启停分居两层）| ✅ 并入 `platform::ServiceControl` |
-| **S2** | `main.rs` 单体 1487 行 | ✅ 469 行 + 门禁 G3 锁定 |
-| **S3** | 42 处 `Result<_, String>` | ✅ IPC 边界统一 `ShellResult`；内部函数保留字符串（有意渐进）|
-| **S4** | `bootstrap.html` 单块 JS | ✅ 已拆为 9 个模块（责任单一、逐文件语法检查）；全局 onerror + 启动自检保留在 `00-runtime` |
-| **S5** | 43 处平台分支散落 8 文件 | ✅ 收拢至 `platform/`（门禁 G1）|
-
-### 内核缺陷 K1–K10
-
-| # | 内容 | 状态 |
-|---|---|---|
-| **K1** | daemon 脚本路径全断（生产致命）| ✅ 修（`platform/srcpath.js` + 门禁 G10）|
-| **K2** | `platform/exec.js` 零引用 + 23 处无 timeout | ✅ 修（18 处绕过执行器的调用全部迁入 + 门禁 G9）|
-| **K3** | 双生命周期状态源 | ✅ 修 —— `managed.js` 曾自建一份分叉副本（多了死词 `degraded`、少了 `backoff`/`failed`/`restarting`/`installing`）；现改为引用 canonical（同一数组引用）。回归 `test/phase-vocabulary-test.js`（8 项）|
-| **K4** | `ManagedLifecycle.start` 忽略回调 `ok:false` | ✅ 修（`start`/`stop` 均尊重显式失败；保留「无 ok 字段=成功」兼容）；回归 `test/managed-lifecycle-failure-test.js`（13 项）|
-| **K5** | 影子决策未建模 `_crashHalted` | ✅ 修（快照补 `crashHalted`/`sessionHalting`，与 `_shouldRun()` 同序）；回归 `test/shadow-decision-test.js`（9 项）|
-| **K6** | `originAllowed` 只比端口不校验 host | ✅ 修（补 Host 闸 + 壳 origin；行为级断言）|
-| **K7** | `ports.js` 用 `HOME` 兜底 `/tmp` | ✅ 修（改 `os.homedir()`）|
-| **K8** | 平台命令泄漏到业务层 | ✅ 修（下沉 `platform/os/netinfo.js`）|
-| **K9** | 版本解析正则 `[^s]` | ✅ 修（改 `[^\s]`）|
-| **K10** | 卸载失败仍删 manifest | ✅ 修（成功才删）|
-
-### 重叠面 O1–O7
-
-| # | 内容 | 状态 |
-|---|---|---|
-| **O1** | npm 镜像目录 3 份副本 | ✅ 壳拥有，内核留 2 条最小兜底 |
-| **O2** | 镜像探测方法分叉（选源不一致）| ✅ 探测规格随契约投放，两侧同法 |
-| **O3** | npm 安装执行 | ✅ 规格共享（执行各自保留，见 D2）|
-| **O4** | Node 最低门槛不一致 | ✅ 内核三态判定 + 读壳投放的 `minNode` |
-| **O5** | 平台原语 | ✅ 内核侧统一执行器 |
-| **O6** | 版本语义 3 处分歧 | ✅ 共享测试向量（两仓逐字节相同）|
-| **O7** | 自启/服务定义所有权 | ✅ 已定案（所有权矩阵）|
-
-### 门禁（均已**实测能失败**）
-
-| 门禁 | 内容 | 仓库 |
-|---|---|---|
-| G1 / G1-2 | 平台分支只在 `platform/`；`all_rust_sources` 必须递归 | 壳 |
-| G2 / G3 | 命令层只做委托；`main.rs` 上限且不含 IPC 命令 | 壳 |
-| G5 | 前端每个内联 script 独立语法 + F2/F3 断言 | 壳 |
-| G9 | 仅 `platform/exec.js` 可调用 `execFileSync` | 内核 |
-| G10 | 受管 daemon 脚本路径必须可解析 | 内核 |
-
-**已全部执行**：本文件描述的缺陷清单（K1–K10 / S1–S5 / O1–O7 / 批 A–F）均已处理。
----
-
-## 审计后修复（2026-09-12，全仓架构与跨平台审计）
-
-对两仓做了一次全量只读审计（3 路并行 + 逐条复核），发现并修复 6 个 P1：
-
-| # | 位置 | 缺陷 | 修法 | 回归测试 |
-|---|---|---|---|---|
-| **P1-A** | 壳 `update.rs` | 自更新护栏**永久自锁**：`attempt` 只在成功时归零，而成功路径被 `attempt>=2` 掐断 → 用户永久收不到更新 | 改为**时间冷却**（6h）+ `reset_guard()` 显式恢复入口 + 前端可见提示 | `update_guard_test.rs`（5）|
-| **P1-B** | 两仓 CI | 壳 59+ 门禁与内核 `npm test` **从未在 CI 执行**（README 却声称有保障）| 壳入三平台矩阵；内核补 ubuntu `test` job + 日常触发 | CI 命令本地复现 |
-| **P1-C** | 内核 `dist`/`native` | Windows 上裸 npm 不做 PATHEXT 解析 → 升级/安装/卸载全失败 | `exec-path.npmBin()` 唯一解析入口（Windows → `npm.cmd`）| `npm-resolution-test.js`（10）|
-| **P1-D** | 壳 `windows.rs` | 计划任务 `/TR` 未加引号 → 用户名含空格时**登录自启静默失效** | 值内嵌引号（与内核已有写法一致）| `bootstrap_flow::b56` |
-| **P1-E** | 内核 `api/index.js` | 注释声称支持 RFC1918，实为只查回环 → 开局域网后**写操作全 403** | 复用 `identity.isPrivateIpv4`，双闸纳入私有网段（**不放宽公网拒绝**）| `lan-access-boundary-test.js`（20）|
-| **P1-F** | 内核 `native/manager.js` | 卸载 npm **无超时** → 一次挂起即永久锁死安装/卸载 | 15min 看门狗 + `killTree` + `finally` 释放锁 + `timedOut` 上报 | 静态（12）+ **行为级**（8）|
-
-### 附带修复
-
-- `40-shell-update.js` 的 `showUpdChoice` 曾被**重复定义两次**（前次拆分遗留）—— 已去重；
-- `api/index.js` 闸门上方注释与文件头的信任集合声明**自相矛盾** —— 已校准；
-- 新增 `test/test-safety-gate-test.js`：禁止测试用「patch 模块导出」伪造依赖
-  （`const { x } = require()` 是值绑定，patch 无效 → 会跑真实副作用；已发生一次真实事故，所幸 no-op）。
-
-### 验证
-
-```
-内核  npm test            61 文件 / 1153 断言 / 0 失败
-壳    cargo test          83 项 / 0 失败（12 + 60 + 5 + 6）
-壳    cargo check         0 警告
-壳    前端 9 模块语法      9/9 通过
-```
-
-每条修复都配了**注入 → 失败 → 还原 → 通过**的验证；门禁均实测能失败。
-### 第二轮：P2/P3 批量修复（2026-09-12 续）
-
-| # | 位置 | 缺陷 | 回归测试 |
-|---|---|---|---|
-| **G1 盲区** | 壳 `tests/bootstrap_flow.rs` | 门禁只拦 `#[cfg(` **属性**，看不见 `cfg!()` **宏** → 平台/ 之外实有 3 处生产平台分支（env/core/coreloc）| B59（含反向自检）|
-| **hint 未序列化** | 壳 `error.rs` | `hint()` 只是 Rust 方法、从未进 JSON → 前端 `e.hint` 恒 undefined，可操作建议永远到不了用户 | 2 项内嵌单测 |
-| **B45/B46 空转** | 壳 `tests/bootstrap_flow.rs` | 断言读的是**注释**（实现已下沉 platform/）→ 门禁永久为真，拦不住真实缺陷 | 注入验证：改坏实现即 FAIL |
-| **服务定义只创建不更新** | 壳三平台 `ensure_defined` | 「已存在即返回」→ 模板演进后老用户永远跑旧定义（P3 引号修复因此到不了已装用户）| B60（静态）+ B61（行为级）|
-| **GBK 丢诊断** | 壳 `bounded.rs`/`core.rs` | `read_to_string` 遇非 UTF-8 返回空 → 中文 Windows 上失败详情全丢 | B62 |
-| **重复执行器** | 壳 `core.rs` | 复制了 bounded.rs 的完整实现且**行为已分叉**（漏 stdin(null)/曾用毫秒名/漏 prepare）| B63 |
-| **内核死代码** | `supervisor.js`/`settings-view.js` | 死导入 child_process（G9 盲区）· 死方法 guardSelfUpdateDir | — |
-| **systemd 引号** | 壳 `platform/linux.rs` | `ExecStart` 路径未加引号 → 家目录含空格时命令被拆断（systemd-analyze 实测确认）| B58 |
-
-⚠ **两处审计误判已被拦下**（未采纳）：
-  · 「`self-update.js` 整文件死代码」—— 实际被 `guard-update-test.js` require、API 面在线；若照删会破坏守卫自更新；
-  · 我一度认定「内核 CI 不跑 npm test」—— 实际 `ci-core.sh [2/5]` 会跑（只是无 Linux runner）。
-
-两处均通过**逐条复核**发现，印证「子代理报告不构成证据」。
-### 第三轮：剩余 P2/P3（2026-09-12 续）
-
-| # | 位置 | 缺陷 |
-|---|---|---|
-| **G9 盲区** | 内核 bin/dsh-supervisor | 7 处裸 execFileSync（**无 timeout**）—— G9 只扫 src/，看不见 bin/；dbus 挂起时 CLI 无限阻塞 |
-| **死字段** | 内核 api/identity.js | trusted 每请求计算但零消费。⚠ **不能接线**：接到 access-key 门卫会让局域网**豁免**密钥 = 安全降级；故**删除** |
-| **架构静默当 x64** | 内核 dist._platformTag / 壳 linux.rs | 非 arm64 即 x64 → ppc64le 等按 x64 取产物（轻则 404，重则架构不符）；改白名单 + 未支持即报 |
-| **XML 转义** | 壳 macos.rs / 内核 autostart.js | plist 是 XML：真正会破坏它的是 & 与尖括号，而旧实现只转义双引号（XML 里本就合法）|
-| **Exec 未加引号** | 内核 .desktop | Desktop Entry 规范也是空格分词；家目录含空格时 Exec 被拆断 |
-| **clippy 16 条** | 壳 | 其中一条是**真问题**：B12 的 while let 循环体必定 panic 且 idx 从不更新 → 循环只跑 0/1 次（形态伪装成扫描全部）|
-
-⚠ **又发现两条既有测试把缺陷当成了要求**：
-autostart-ownership-test.js 的 P3-e/P3-f 断言的是「裸拼接 GUI_LABEL」与
-「用 replace 双引号当 XML 转义」—— 即测试**锁定了错误实现**，故修复后变红。
-已改为断言真正的 XML 转义。这与前两轮的「门禁空转」是同一族问题的另一面：
-**门禁不仅可能空转，还可能把 bug 固化为规范。**
-
-### 三轮累计验证
-
-```
-内核  npm test   64 文件 / 1187 断言 / 0 失败（起点 1098，+89）
-壳    cargo test  92 项 / 0 失败（起点 77，+15）
-壳    cargo check 0 警告      clippy 0 警告（排除 items-after-test-module 风格项）
-```
-
-
----
-
 # 第一部分　系统全貌
 
 ## 1. 三个进程，两种角色
@@ -282,8 +139,8 @@ ManagedRegistry.heartbeat(5000)                objects.js:289-324
 | `~/.dsh/supervisor/config.json` | 文件 | 内核写 / **壳读** | `apiPort`、`closeAction`(hide\|exit)、`apiAccessKey`、`shellWatchdog`…（**壳读内核配置的唯一入口**：`env.rs:229 config_json()`，一律真 JSON 解析，禁字符串扫描）|
 | `~/.dsh/supervisor/runtime.json` | 文件 | **壳写** / 内核读 | `{nodeVersion,nodePath,installedAt,source}`（`node.rs:378`；`settings-view.js:40` 读）|
 | `~/.dsh/supervisor/registry.json` | 文件 | **壳写** / 内核读 | 镜像源 `{mode,origins,manualOrigin}`（`mirror.rs:191 export_to_kernel`；`supervisor.js:192` 读）|
-| `~/.dsh/shell/identity.json` | 文件 | **壳写** / 内核读 | `{version,phase,pid,exe,attempt,pinned,…}`（`update.rs:187`；`domains/shell/index.js:45` 读）|
-| `~/.dsh/shell/update-journal.json` | 文件 | **内核写** / 壳读 | 更新账本 pending/confirmed/pinned（`domains/shell/index.js:50`）|
+| `~/.dsh/shell/identity.json` | 文件 | **壳写** / 内核读 | `{version,platform,arch,installKind,selfUpdateCapable,phase,pid,startedAt,lastSeenAt,exe}`（`update.rs::init_identity` 写；`domains/shell/index.js` 读）|
+| `~/.dsh/shell/update-journal.json` | 文件 | 内核写 / 内核读（面板与 CLI 经 `/shell/status`）| 壳更新账本 `{from,to,confirmed}`；**不含回退/拉黑**（`domains/shell/index.js`）|
 | 守卫服务定义 | 文件 | **壳写** / 服务管理器读 | systemd unit / LaunchAgent plist / schtasks（`service.rs:72-203`）|
 | 面板 HTTP API | HTTP | 内核提供 / 壳与浏览器消费 | **71 精确 + 14 前缀**（`api/surface.js`）；信任三层（socket 身份 → Origin 端口 → 可选 access key）|
 | 壳健康上报 | HTTP | 壳 → 内核 | `POST /shell/health`（`phase=ready` 即更新确认信号）|
@@ -293,11 +150,11 @@ ManagedRegistry.heartbeat(5000)                objects.js:289-324
 
 | 契约 | 单写入方？ | 原子写？ | schema？ |
 |---|---|---|---|
-| `config.json` | ✅ 内核 | ✅（`supervisor.js:735-750`）| ❌ |
-| `runtime.json` | ✅ 壳 | ❌ 直接 `fs::write`（`node.rs:387`）| ❌ |
-| `registry.json` | ⚠️ **壳写，2 个调用点**（`node.rs:178` 于 `latest_lts()` 内 / `main.rs:1079` 于手动改镜像）—— 但**只写 `origins`**，不写 `catalog`/`probe` | ✅（`mirror.rs:213` tmp+rename）| ❌ |
-| `identity.json` | ✅ 壳 | ✅（`update.rs:write_json` tmp+rename）| ❌ |
-| `update-journal.json` | ✅ 内核 | ✅（`domains/shell/index.js:34-40`）| ❌ |
+| `config.json` | 内核 | （`supervisor.js:735-750`）| |
+| `runtime.json` | 壳 | 直接 `fs::write`（`node.rs:387`）| |
+| `registry.json` | **壳写，2 个调用点**（`node.rs:178` 于 `latest_lts()` 内 / `main.rs:1079` 于手动改镜像）—— 但**只写 `origins`**，不写 `catalog`/`probe` | （`mirror.rs:213` tmp+rename）| |
+| `identity.json` | 壳 | （`update.rs:write_json` tmp+rename）| |
+| `update-journal.json` | 内核 | （`domains/shell/index.js:34-40`）| |
 
 → **契约面的三个结构缺口**：① `registry.json` **内容不完整**（只有 `origins`，无 `catalog` 与 `probe` 规格 → 两侧仍会选到不同的源；且 `latest_lts()` 失败时不导出）；② 全部无 schema 版本；③ `runtime.json` 非原子写。
 
@@ -346,14 +203,14 @@ ManagedRegistry.heartbeat(5000)                objects.js:289-324
 
 | 指标 | 实测 | 对照（内核）| 判断 |
 |---|---|---|---|
-| 平台分支 | **43 处 / 8 文件** | 67 处 / 60 在 `platform/os/`（90%）| ❌ **壳零平台层** |
-| 分支明细 | `node.rs` 11 / `main.rs` 10 / `service.rs` 9 / `env.rs` 6 / `bounded` 2 / `nodeprobe` 2 / `update` 2 / `core` 1 | — | ❌ 加平台翻 8 文件 |
-| `main.rs` | **1487 行**（20 命令 487 行 + 4 CLI + 平台服务控制 + 业务）| `supervisor.js` 1188 行但已拆 6 mixin | ❌ 单体，无分层 |
-| 错误类型 | `Result<_, String>` **42 处** / Error 枚举 **0** | 内核 `{ok:false,error,code?}` 对象 | ❌ 前端只能字符串匹配 |
-| 前端 | `bootstrap.html` **760 行单块 JS** | 内核 `ui-react/` 有构建与模块化 | ❌ 一处语法错全页死（已真实发生）|
-| **有界执行** | `bounded.rs` + **B32 门禁**（禁裸 `.output()`）| `platform/exec.js` **零引用** + 23 处无 timeout | ✅ **壳优于内核**（罕见）|
-| 文档 | 10 份，`Contract`/`不变量`/`平台矩阵` 出现 **0** 次 | `ARCHITECTURE-CONTRACT-phase0.md` 等 | ❌ 无规范 |
-| 测试 | `cargo test` **68 项**（B1–B55 + V1–V6 + 单元）| 47 文件 / 991 断言 | ✅ 基础健康 |
+| 平台分支 | **43 处 / 8 文件** | 67 处 / 60 在 `platform/os/`（90%）| **壳零平台层** |
+| 分支明细 | `node.rs` 11 / `main.rs` 10 / `service.rs` 9 / `env.rs` 6 / `bounded` 2 / `nodeprobe` 2 / `update` 2 / `core` 1 | — | 加平台翻 8 文件 |
+| `main.rs` | **1487 行**（20 命令 487 行 + 4 CLI + 平台服务控制 + 业务）| `supervisor.js` 1188 行但已拆 6 mixin | 单体，无分层 |
+| 错误类型 | `Result<_, String>` **42 处** / Error 枚举 **0** | 内核 `{ok:false,error,code?}` 对象 | 前端只能字符串匹配 |
+| 前端 | `bootstrap.html` **760 行单块 JS** | 内核 `ui-react/` 有构建与模块化 | 一处语法错全页死（已真实发生）|
+| **有界执行** | `bounded.rs` + **B32 门禁**（禁裸 `.output()`）| `platform/exec.js` **零引用** + 23 处无 timeout | **壳优于内核**（罕见）|
+| 文档 | 10 份，`Contract`/`不变量`/`平台矩阵` 出现 **0** 次 | `ARCHITECTURE-CONTRACT-phase0.md` 等 | 无规范 |
+| 测试 | `cargo test` **68 项**（B1–B55 + V1–V6 + 单元）| 47 文件 / 991 断言 | 基础健康 |
 
 **结论：壳不是「一塌糊涂」，是「缺一层抽象（platform/）＋ 缺一层分层（commands/domain）＋ 缺规范文档＋ 缺把规范变门禁」。**
 
@@ -403,13 +260,13 @@ ManagedRegistry.heartbeat(5000)                objects.js:289-324
 
 | # | 重叠 | 壳侧 | 内核侧 | 判定 |
 |---|---|---|---|---|
-| **O1** | **npm 镜像目录** | `mirror.rs` NPM_PRESETS **6** | `dist/index.js` REGISTRY_PRESETS **6** + `config.js` registries **6** | 🔴 **逐字节相同的 3 份** → **壳拥有，内核消费产物** |
-| **O2** | **镜像探测方法** | 真实包元数据 `@dsh-sup/dsh-core-<plat>` | `/-/ping` | 🔴 **方法不同 → 结论不同**（实测 ustclug 2613ms vs 389ms；内核选 huaweicloud、壳选 npmmirror）|
-| **O3** | **npm 安装执行** | `core.rs`（含三平台提权）| `dist/index.js runNpmInstall`（不提权）| 🟡 **执行各留**（提权需人在场，内核做不到）；**规格共享** |
-| **O4** | **环境探测** | `nodeprobe.rs` 639 + `env.rs` 272（含**最低门槛 v22.12**）| `env-catalog.js` 83（只 `which --version`）| 🟡 **规格必须统一**：内核现会谎报「环境就绪」 |
-| **O5** | **平台原语** | `bounded.rs` 191（有界执行）| `platform/exec.js` 48（**零引用**）| 🟡 **规格 + 测试向量**；且内核有 23 处无 timeout 的 `execFileSync` |
-| **O6** | **版本校验/比较** | `core.rs is_valid_version` / `semver_cmp` | `dist VERSION_RE` / `semverCompare` | 🟡 **测试向量**（实测 3 处分歧：`1.0.0+`、`1.0.0+!!!`、`1.0.0+あ`）|
-| **O7** | **自启/服务定义** | `service.rs` 258（三平台定义）| `autostart.js` 354（开关 + GUI 自启）| ✅ **已定案**（所有权矩阵）|
+| **O1** | **npm 镜像目录** | `mirror.rs` NPM_PRESETS **6** | `dist/index.js` REGISTRY_PRESETS **6** + `config.js` registries **6** | **逐字节相同的 3 份** → **壳拥有，内核消费产物** |
+| **O2** | **镜像探测方法** | 真实包元数据 `@dsh-sup/dsh-core-<plat>` | `/-/ping` | **方法不同 → 结论不同**（实测 ustclug 2613ms vs 389ms；内核选 huaweicloud、壳选 npmmirror）|
+| **O3** | **npm 安装执行** | `core.rs`（含三平台提权）| `dist/index.js runNpmInstall`（不提权）| **执行各留**（提权需人在场，内核做不到）；**规格共享** |
+| **O4** | **环境探测** | `nodeprobe.rs` 639 + `env.rs` 272（含**最低门槛 v22.12**）| `env-catalog.js` 83（只 `which --version`）| **规格必须统一**：内核现会谎报「环境就绪」 |
+| **O5** | **平台原语** | `bounded.rs` 191（有界执行）| `platform/exec.js` 48（**零引用**）| **规格 + 测试向量**；且内核有 23 处无 timeout 的 `execFileSync` |
+| **O6** | **版本校验/比较** | `core.rs is_valid_version` / `semver_cmp` | `dist VERSION_RE` / `semverCompare` | **测试向量**（实测 3 处分歧：`1.0.0+`、`1.0.0+!!!`、`1.0.0+あ`）|
+| **O7** | **自启/服务定义** | `service.rs` 258（三平台定义）| `autostart.js` 354（开关 + GUI 自启）| **已定案**（所有权矩阵）|
 
 ### 11.3 **不做**的事（诚实说明）
 
@@ -556,17 +413,17 @@ pub enum ShellError {
 
 | 能力 | Linux | macOS | Windows | 实现位 |
 |---|---|---|---|---|
-| 环境探针（候选/版本/PATH）| ✅ | ✅ | ✅ | `domain/probe` |
-| Node 制品解析 | ✅ `tar.xz` | ✅ `pkg` | ✅ `msi` | `platform/*::node_artifact` |
-| Node 安装（提权）| ✅ `pkexec` | ✅ `osascript` | ✅ `msiexec` | `platform/*::install_node` |
-| 镜像测速与选择 | ✅ | ✅ | ✅ | `domain/mirror` |
-| 内核安装/升级 | ✅ | ✅ | ✅ | `domain/provision` |
-| 服务定义（守卫）| ✅ systemd | ✅ LaunchAgent | ✅ schtasks | `platform/*::ServiceControl` |
-| 服务启停 | ✅ `systemctl --user` | ✅ `launchctl` | ✅ `schtasks` | 同上 |
-| 提权通道探测 | ✅ | ✅（恒有）| ✅ | `platform/*::has_privilege_channel` |
-| 壳自更新 | ✅ deb/rpm | ✅ app | ✅ exe/msi | `domain/update` |
-| 壳崩溃自愈 | ✅ 守卫看护 | ✅ 守卫看护 | ✅ 守卫看护 | 内核 `domains/shell/watchdog` |
-| 壳开机自启 | ✅ XDG | ✅ LaunchAgent gui | ✅ schtasks GUI | `platform/os/autostart`（内核）|
+| 环境探针（候选/版本/PATH）| | | | `domain/probe` |
+| Node 制品解析 | `tar.xz` | `pkg` | `msi` | `platform/*::node_artifact` |
+| Node 安装（提权）| `pkexec` | `osascript` | `msiexec` | `platform/*::install_node` |
+| 镜像测速与选择 | | | | `domain/mirror` |
+| 内核安装/升级 | | | | `domain/provision` |
+| 服务定义（守卫）| systemd | LaunchAgent | schtasks | `platform/*::ServiceControl` |
+| 服务启停 | `systemctl --user` | `launchctl` | `schtasks` | 同上 |
+| 提权通道探测 | | （恒有）| | `platform/*::has_privilege_channel` |
+| 壳自更新 | deb/rpm | app | exe/msi | `domain/update` |
+| 壳崩溃自愈 | 守卫看护 | 守卫看护 | 守卫看护 | 内核 `domains/shell/watchdog` |
+| 壳开机自启 | XDG | LaunchAgent gui | schtasks GUI | `platform/os/autostart`（内核）|
 
 **不变量 P1**：每格必须是「实现」或「显式 Unsupported」。
 
@@ -701,22 +558,22 @@ bootstrap/
 | F3 | **K2**：`platform/exec.js` 接入全部 `execFileSync`（或删除并统一到 `bounded` 等价物）+ 加「禁裸 exec」门禁 | 无 timeout 的 `execFileSync` 归零 |
 | F4 | K6：`originAllowed` 增加 host 校验（补上 `identity.js` 声称的 Host 闸）| 新增 rebinding 测试 |
 | F5 | K7/K8/K9/K10：`ports.js` HOME 兜底 / 平台命令下沉 / 正则修正 / manifest 保留 | 逐条断言 |
-| F6 | K3/K4/K5：生命周期双源收敛、`start` 尊重 `ok:false`、影子建模 `crashHalted` | ✅ 全部完成 |
+| F6 | K3/K4/K5：生命周期双源收敛、`start` 尊重 `ok:false`、影子建模 `crashHalted` | 全部完成 |
 
 ## 21. 门禁清单（规范的可执行化）
 
 | # | 门禁 | 类型 |
 |---|---|---|
-| **G1** | 平台分支只在 `platform/` 内 | ✅ 会失败 |
-| **G2** | `commands/` 内零 `Command`、零 `#[cfg]` | ✅ |
-| **G3** | `main.rs` ≤ 150 行；命令体 ≤ 40 行 | ✅ |
-| **G4** | 每能力 × 每平台 = 实现 或 `Unsupported` | ✅ |
-| **G5** | 每个前端 JS 独立语法正确 | ✅ |
-| **G6** | 契约带 `schema`；壳启动必导出 | ✅ |
-| **G7** | 阻塞调用经 `infra::bounded` | ✅（B32 扩展）|
-| **G8** | 注释引用的**仓内路径必须存在** | ✅（新增；已发现 30+ 悬空）|
-| **G9** | 内核：无 timeout 的 `execFileSync` 归零 | ✅（新增）|
-| **G10** | 内核：脚本路径引用必须 `existsSync` | ✅（新增；直接防 K1 复发）|
+| **G1** | 平台分支只在 `platform/` 内 | 会失败 |
+| **G2** | `commands/` 内零 `Command`、零 `#[cfg]` | |
+| **G3** | `main.rs` ≤ 150 行；命令体 ≤ 40 行 | |
+| **G4** | 每能力 × 每平台 = 实现 或 `Unsupported` | |
+| **G5** | 每个前端 JS 独立语法正确 | |
+| **G6** | 契约带 `schema`；壳启动必导出 | |
+| **G7** | 阻塞调用经 `infra::bounded` | （B32 扩展）|
+| **G8** | 注释引用的**仓内路径必须存在** | （新增；已发现 30+ 悬空）|
+| **G9** | 内核：无 timeout 的 `execFileSync` 归零 | （新增）|
+| **G10** | 内核：脚本路径引用必须 `existsSync` | （新增；直接防 K1 复发）|
 
 ## 22. 验收标准（何时算「标准壳工程」）
 
@@ -925,7 +782,7 @@ check("A10 内核按契约 spec 探测", kernelProbeUrl(spec) === shellProbeUrl(
 async selectRegistry(force) {
   const rc = this.registryConfig || {};
   if (rc.mode === "manual" && rc.manualOrigin) { /* 既有：手动固定优先 */ }
-  // ★ 新增：优先使用壳投放的选择结果（未过期 = TTL 内）
+  // 新增：优先使用壳投放的选择结果（未过期 = TTL 内）
   const fromShell = this._selectedFromContract();
   if (!force && fromShell && (Date.now() - fromShell.checkedAt) < TTL) {
     this.selectedRegistry = { origin: fromShell.origin, latencyMs: fromShell.latencyMs,
@@ -949,7 +806,7 @@ async selectRegistry(force) {
 | 壳 | `Node >= v22.12.0`（否则拒绝启动内核）| `node.rs MIN_NODE = "v22.12.0"` |
 | 内核 | `which node` 成功即「ok」 | `env-catalog.js:36` `probe: () => cachedWhichVersion("node")` |
 
-**后果**：装了 Node v18 时，面板显示「环境就绪 ✅」，而壳因门槛不满足**拒绝启动** → 用户看到「面板说没问题，但就是起不来」。
+**后果**：装了 Node v18 时，面板显示「环境就绪 」，而壳因门槛不满足**拒绝启动** → 用户看到「面板说没问题，但就是起不来」。
 
 ### 30.2 迁移动作
 
@@ -1061,7 +918,7 @@ check("A11 门槛值来自壳契约", envCatalogWith("v18.0.0").items.node.detai
 | 设施 | `bounded.rs`（191 行，临时文件重定向 + try_wait 轮询 + 超时 kill + `CREATE_NO_WINDOW`）| `platform/exec.js`（48 行，`execFileSync + timeout`）|
 | 使用 | `bounded::run` 21 处（main 9 / service 9 / node 3）| **0 处 require**（死代码）|
 | 裸调用 | **0**（B32 门禁强制）| **23 处无 timeout** |
-| 门禁 | ✅ B32 | ❌ 无 |
+| 门禁 | B32 | 无 |
 
 **壳的 `bounded.rs` 更完整**（`execFileSync` 的 timeout 在管道写满时可能失效，需临时文件避免）。故此项**不是迁移到壳**，而是**内核补齐**。
 
@@ -1130,15 +987,15 @@ BEFORE                          AFTER
   壳：Node >= v22.12 才放行        壳：把 minNode 写进 runtime.json
   内核：which node 成功即 ok       内核：读 minNode，低于即报 outdated
   面板显示「环境就绪」            面板显示「Node v18 低于最低要求」
-  壳却拒绝启动内核 ❌             两侧结论一致 ✅
+  壳却拒绝启动内核             两侧结论一致 
 ```
 
 ### 34.3 有界执行（M6）
 
 ```
 BEFORE                                    AFTER
-  壳：bounded.rs + B32 门禁 ✅            壳：不变
-  内核：exec.js 零引用 + 23 处裸调用 ❌    内核：接入 exec.js + G9 门禁 ✅
+  壳：bounded.rs + B32 门禁            壳：不变
+  内核：exec.js 零引用 + 23 处裸调用    内核：接入 exec.js + G9 门禁 
 ```
 
 ---
@@ -1157,420 +1014,3 @@ BEFORE                                    AFTER
 **关键点**：本清单的 6 项中，**5 项集中在批 D（契约层）**，1 项在批 F。
 即：**「把东西移到壳里」实际上就是「建立契约层 + 删除内核副本」这一件事**。
 
-### 第四轮：转发链路 + 前端门禁（2026-09-12 续）
-
-覆盖此前未审计的转发三文件（proxy 893 / forward-core 448 / relay 488 行）与
-router 其余（switch/evidence/router-ops/index/quota-strategies）、guard/ports、relay/manager，
-以及 `ui/src` 前端源码。修 7 P1 + 7 P2/P3。
-
-| 级别 | 位置 | 缺陷 |
-|---|---|---|
-| **P1 安全** | 内核 relay | `config.js` 声称「LAN 受 RFC1918 白名单约束」，**全仓从未实现**；relay 监听 0.0.0.0 且把 Origin 改写成回环 → 未设 token 时同网段零认证触达 DSH 特权面 |
-| **P1** | 内核 forward-core | 请求级熔断**完全失效**：`markUsed` 在请求**发出前**无条件清零失败计数 → 阈值 2 数学上不可达 |
-| **P1** | 内核 forward-core | `prov.markNetFail` —— **方法全仓不存在**，guard 恒 false；注释声称的「2026-09 二次修正」从未生效 |
-| **P1** | 内核 proxy.js | `_restartPending` 只写不读（延后=丢弃）且 2min 退避在延迟**之前**置位 |
-| **P1** | 内核 proxy.js | 裸 `npx` 未走平台解析（Windows ENOENT），且门禁正则只覆盖 npm、对 npx 盲区 |
-| **P1** | 内核 base.js | `applyDetection` 失败分支不设 nextResetAt → 探测闸门**恒真**，每 5min 起停实例（启停风暴）|
-| **P1 门禁** | 内核 CI | 前端门禁**从未执行**：CI 注释指向的「release-core.sh 的 [3/7]」**不存在**（只有 [1/5]），而 build-ui 只构建不测试 |
-| **P2** | relay / ports / router-ops | 注释谎称 HOLD_MS 上限 · `readUpstreamBody` 无时间上限 · `acc.instance` 与 instanceOf 双源（12 处）· `release` 忽略 owner · `setProviderKeys` 删反代账号不释放实例/端口 · 更新进度双状态源 · OAuth 跨轮误杀 |
-
-⚠ 前端门禁修复前**实测**：`tsc --noEmit` 0 错、`vitest run` 3 文件 15 用例全绿、`eslint` 0 错 ——
-即这些测试一直是对的，只是从未被调用。已补进 `ci-core.sh`（verify 在 build **之前**）。
-
-### 四轮累计
-
-```
-内核  npm test   68 文件 / 1255 断言 / 0 失败（起点 1098，+157）
-壳    cargo test  92 项 / 0 失败（起点 77，+15）
-前端  verify     tsc 0 错 / eslint 0 错 / vitest 15 通过（此前从未运行）
-```
-### 第五轮：剩余 P2/P3 + frpmgr/objects 审计（2026-09-12 续）
-
-| # | 位置 | 缺陷 |
-|---|---|---|
-| **P2-5** | 内核 router-ops + 前端 | `added++` **不 await 检测** → 计数虚高（N 个全被 discarded 也报「已添加 N 个」）；后端改为等齐结果并回报 discarded/discardedKeys，前端如实提示 |
-| **P2-8** | 内核 relay/manager | `list()` 每次触发 reconcile，而 reconcile 内**逐实例串行 TCP 探测**（600ms/个）→ 与 2s 节拍叠加；加**单飞** |
-| **P2 双写** | 内核 supervisor | daemon 模式下「守卫不得写 providers.json」的纪律**只在 3 条路径中的 1 条**执行 → 另两条会与 daemon 双写覆盖；收敛为 `_disableRouterPersist()` |
-| **P2 配套** | 内核 objects.js | P2-2 修复后，无 owner 的 `release(port)` 回退变成**绕过归属校验**的路径 → 删除 |
-
-本轮对 `relay/frpmgr.js`（384 行）与 `guard/lifecycle/objects.js`（353 行）做只读审计：**未发现新缺陷**。
-两者质量突出：frpmgr 的定时器全部 unref、SIGKILL 兜底用 `exit` 而非 `killed`（注释记录了旧实现的错）、
-tar 解包只写硬编码文件名（无遍历风险）、下载带 60s 超时；objects.js 的四条设计公理与实现一致。
-
-### 五轮累计
-
-```
-内核  npm test   69 文件 / 1278 断言 / 0 失败（起点 1098，+180）
-壳    cargo test  92 项 / 0 失败（起点 77，+15）
-前端  verify     tsc 0 错 / eslint 0 错 / vitest 15 通过 / build 成功
-```
-### 第六/七轮：lifecycle 剩余 + platform 层（2026-09-12 续）
-
-| 级别 | 位置 | 缺陷 |
-|---|---|---|
-| **P1** | 内核 lifecycle/supervisor | **优雅停机被 process.exit 截断**：`shutdown()` 内部 `stopAll` 是 async 却不 await，三个调用方都紧接着 `process.exit` → 子进程/端口成孤儿（同类第二处：relay-daemon 的 frpc）|
-| **P1** | 内核 `platform/loghub.js` | 4 处 `this._log` **方法从未定义** → 写盘失败分支抛 TypeError 被同条 catch 再抛 → 事件与告警**双双丢失** |
-| **P1** | 内核 `platform/os/pidlookup.js` | Windows PowerShell 回退**不可达**（wmic 存在但解析不中即 return null）→ cmdline 防线整条静默失效 |
-| **P2** | 内核 platform | `writePrivate` 丢弃保护失败仍报 ok · `hasTool` 负结果永久缓存 + 沙箱能力构造期冻结 · .desktop `Exec` 未转义 `%` |
-| **P2** | 内核 relay/manager | reconcile 无单飞去重（2s 节拍叠加串行 TCP 探测）|
-| **P2** | 内核 router-ops | `added++` 不 await 检测 → 计数虚高；daemon 模式下守卫可能双写 providers.json（三条路径只在一处设防）|
-| **P3** | 内核 platform | 死声明 `guiSupported`/`_logFileFor` · **一条恒真断言**（`undefined` 也通过）|
-
-⚠ **本轮又拦下 1 处子代理误判**（累计 4 次）：
-称 `extractTarGz` 是「全仓零调用的死导出」—— 实际被 `dist/self-update.js:87` 调用，
-正是「纯 Node 解包取代 execFileSync(tar)」那次修复的落点；**照删会破坏守卫自更新**。
-
-### 七轮累计
-
-```
-内核  npm test   71 文件 / 1316 断言 / 0 失败（起点 1098，+218）
-壳    cargo test  92 项 / 0 失败（起点 77，+15）
-前端  verify     tsc 0 错 / eslint 0 错 / vitest 15 通过 / build 成功
-```
-### 第八轮：proc / deploy / dist / shell / plugin（2026-09-12 续）
-
-| 级别 | 位置 | 缺陷 |
-|---|---|---|
-| **P0** | 内核 platform/deploy.js | 只认二进制 magic 头，而发布形态**早已弃 SEA** → 真实用户落 source-shell → **自更新永久不可用**；配套放宽两处 form===sea-binary 硬判 |
-| **P0** | 内核 guard/proc/daemon-lifecycle.js | cmdMark 传 router-daemon，真实 cmdline 是 .../domains/router/daemon.js → **永不匹配**（实测 -1）→ 换代逻辑与「异主不接管」全线死代码 |
-| **P1** | 内核 domains/shell | restartShell 对 spawn 失败返回 ok:true，且无 error 监听 → ENOENT 逃逸为 uncaughtException（守卫 60s 内 3 次**自杀**）+ watchdog 假成功每 90s 风暴 |
-| **P1** | 内核 dist/index.js | semverCompare 用 split(连字符) 只取前两段 → 1.0.0-beta-2 与 -beta-1 **判等** |
-| **P1** | 内核 self-update | prune/currentDir 用**字符串**比版本 → v0.10.0 排最前 → **删掉刚装的当前版本** |
-| **P1** | 内核 daemon-lifecycle._spawn | 不接 error、不看 child.pid 就写身份 → 异常逃逸 + 每轮重复 spawn |
-| **P1** | 内核 plugin | 重定向 Location 不校验协议（file:// 让 http.get 同步抛 → uncaughtException）· registry 为 null 时写进 env 变字符串 null |
-| **P1** | 内核 plugin | 停用插件的 entryId 用**子串**匹配 → 停 @scope/dsh-tool 误伤 -extra |
-| **P2** | 内核 daemon / dist | stop() 超时仍报 ok 并抹掉身份（孤儿无人可寻）· 插件 CLI 只杀直接子进程（pnpm 孙进程孤儿）· 内核改写壳拥有的 registry.json 抹掉 v2 字段 |
-
-⚠ **又拦下 1 处审计误判**（累计 5 次）：称 fs-utils.extractTarGz 是死导出 —— 实际被 self-update.js:87 调用，**照删会破坏守卫自更新**。
-
-### 八轮累计
-
-```
-内核  npm test   72 文件 / 1369 断言 / 0 失败（起点 1098，+271）
-壳    cargo test  92 项 / 0 失败（起点 77，+15）
-前端  verify     tsc 0 错 / eslint 0 错 / vitest 15 通过 / build 成功
-```
-### 第九轮：native 管理器 + 实例域 + 壳看护（2026-09-12 续）
-
-| 级别 | 位置 | 缺陷 |
-|---|---|---|
-| **P1** | 内核 native/manager.js | 安装/升级/卸载三入口锁**不对称** —— upgrade 从不设 installing、install/uninstall 不查 busy() → **升级中可卸载**（装了一半 + manifest 被清 = 不可恢复）|
-| **P1** | 内核 instance/index.js | 升级失败**两条路径都无回滚**（安装失败 / 重启失败）→ 实例停机 + 版本不确定，guardian 不自愈 |
-| **P1** | 内核 instance/index.js | removeInstance 未确认单元已停就 rm -rf 实例根目录 → 对运行中实例**不可逆数据丢失** |
-| **P1** | 内核 instance/index.js | ports.release(port) **不带 ownerId** → 误删他人端口登记（上一轮刚加归属校验，此处置之不理）|
-| **P1** | 内核 instance/index.js | _updCache 只写不删（内存单调增长）+ 两处 60s 定时器未 unref |
-| **P2** | 内核 shell | 「谁是壳主程序」两份实现已分叉（watchdog 排 6 flag / restartShell 只排 3）→ **运维自检进程被误杀** |
-| **P2** | 内核 instance/index.js | 我上一轮留下的**自相矛盾**：setter 与「用方法而非 setter」的注释并存 |
-
-### 九轮累计
-
-```
-内核  npm test   73 文件 / 1381 断言 / 0 失败（起点 1098，+283）
-壳    cargo test  92 项 / 0 失败（起点 77，+15）
-前端  verify     tsc 0 错 / eslint 0 错 / vitest 15 通过 / build 成功
-```
-### 第九轮续：实例域安全（2026-09-12）
-
-| 级别 | 位置 | 缺陷 |
-|---|---|---|
-| **P1** | 内核 instance/index.js | 升级失败**两条路径都无回滚**（npm 失败 / 重启失败）→ 实例停机 + 版本不确定，guardian 不自愈 |
-| **P1** | 内核 instance/index.js | removeInstance **未确认单元已停**就 rm -rf 实例根目录 → 对运行中实例**不可逆数据丢失**（service.js:41 已提示可经 isUnitActive 复核，实例域从未调用）|
-| **P1** | 内核 instance/index.js | ports.release(port) **不带 ownerId** → 可误删他人端口登记（上一轮刚加归属校验）|
-| **P1** | 内核 instance/index.js | _updCache 只写不删（内存单调增长）+ 60s 定时器未 unref |
-| **P2** | 内核 instance/index.js | systemd 模板**无条件删除**（可能删掉用户同名文件）→ 改**改名让位**（不丢数据）|
-| **P2** | 内核 instance/index.js | 我上一轮留下的**自相矛盾**：`set sandboxSupported` 与「用方法而非 setter」的注释并存 |
-
-### 最终累计（九轮）
-
-```
-内核  npm test   74 文件 / 1401 断言 / 0 失败（起点 1098，+303）
-壳    cargo test  92 项 / 0 失败（起点 77，+15）
-前端  verify     tsc 0 错 / eslint 0 错 / vitest 15 通过 / build 成功
-
-新增回归测试 14 个文件；每条修复均做「注入 → 失败 → 还原 → 通过」验证。
-
----
-
-### 第十二轮：D-3 第一步 —— identity.json 写入收敛到单一 helper（2026-09-13）
-
-（第十轮 update/mirror/node/platform/main 六项与第十一轮插件市场回归的明细见
- git 提交历史与 `AUDIT-HANDOFF.md`，本文件当时未逐轮追加。）
-
-#### 缺陷（第二状态源）
-
-`update.rs::init_identity()` 把 `attempt` / `pinned` / `pendingVersion` **抄进**
-`identity.json`；而 `reset_guard()` / `mark_pending()` **只写** `update-guard.json`，
-**不回写** `identity.json`。同一事实两份存储，且只在壳启动时刷新一次 → **必然分叉**。
-
-两个消费方读的都是那份陈旧副本：
-
-```
-壳   commands/mod.rs:416-424  shell_identity 快照（引导页展示 attempt/pinned）
-内核 domains/shell/index.js:119-121  用 id.attempt 作「失败次数」权威来源（决定回滚）
-```
-
-后果：用户点【立即恢复】（`reset_guard`：attempt 归零、pinned 清空）之后，
-引导页与内核**仍读到旧 attempt/pinned** —— 恢复动作在 UI 与回滚判定上都不生效，
-直到下次壳重启；若壳因更新失败被反复抑制，可能很久都不纠正。
-`mark_pending` 同理：内核看不到「已装待确认」的版本，更新确认状态机停在旧态。
-
-#### 修法（第一步：单一写入路径）
-
-新增 `write_identity_for(&Guard, runtime_fields)` 为 identity.json 的**唯一写入点**；
-`init_identity` / `set_phase` / `reset_guard` / `mark_pending` **全部经它**。
-护栏字段一律由传入的 Guard 注入（**即便调用方在 runtime_fields 里写同名键也会被覆盖**），
-使 identity.json 永远是 Guard 的投影。运行时字段与未知字段从旧文件保留。
-
-**不动任何消费方** → 零跨仓风险。第二步（从 identity.json 移除这三个字段、
-消费方改读 update-guard.json）是跨仓契约变更，需两侧协调发版，另行定夺。
-
-⚠ 一处易犯的错：`set_phase` 原实现是「读回旧文件再改 phase」。改为统一入口时若图省事
-沿用内存里的旧 Guard，会把护栏投影**退回旧值**（新风险）。故 `set_phase` 内**必须重新
-`Guard::load()`**；D-3-c 正是为这一条设的门禁。
-
-#### 注入验证（每条门禁都证明了可失败）
-
-| 注入 | 命中 |
-|---|---|
-| A 删 `reset_guard` 的 `write_identity(&g)` | d3a FAIL（19/1）|
-| B 删 `mark_pending` 的 `write_identity(&g)` | d3b FAIL（19/1）|
-| C `set_phase` 的 `Guard::load()` → `Guard::default()` | d3c FAIL（19/1）|
-| D 删 helper 里 `attempt` 的 map.insert | d3a/d3c/d3d/d3f FAIL（16/4）|
-| E helper 不读旧文件（`read_json` → `json!({})`） | d3c/d3e FAIL（18/2）|
-
-五次注入**全部编译通过**（注入不破坏可编译性），还原后 sha256 与注入前**逐字一致**
-（`RESTORE-OK` 五次 + 备份 diff 为空）。
-
-#### 新门禁（行为级，非源码字符串断言）
-
-`update.rs` 内 `mod d3_tests`（6 个用例）：直接调用真实写入方并**读回 identity.json**，
-故任何一处「漏写 / 写回旧值 / 调用方可覆盖」都会失败。
-经 `state_dir()` 的测试注入点（`#[cfg(test)] static TEST_STATE_DIR`）把状态目录指向
-临时目录，绝不触碰开发者真实的 `~/.dsh/shell/identity.json`；
-模块内用静态串行锁（测试线程池默认并发，会互相踩同一注入点）。
-
-- D-3-a reset_guard 同步护栏投影（核心症状）
-- D-3-b mark_pending 同步 pendingVersion
-- D-3-c set_phase 不得写回陈旧投影
-- D-3-d 调用方无法覆盖 Guard 字段（投影保证的机制证明）
-- D-3-e 运行时字段与未知字段必须保留（收敛不得变成裁剪）
-- D-3-f init_identity 从零投影正确
-
-#### 计数变化
-
-```
-壳    cargo test 100 项 → 106 项（+6，全部在 src/update.rs 的 bin 单测）
-      bin 单测 14 → 20；其余 5 个 test target 不变
-壳    cargo check --all-targets  0 警告
-内核  npm test  77 文件 / 1444 断言 / 0 失败（D-3 未动内核）
-前端  npm run verify  tsc 0 / eslint 0 / vitest 15 / build 成功（D-3 未动前端）
-```
-
----
-
-### 第十二轮续：A 节四项（壳仓，2026-09-13）
-
-| 级别 | 位置 | 缺陷 | 修法 |
-|---|---|---|---|
-| P3 | `platform/linux.rs` | `has_privilege_channel` 探测「pkexec **或** sudo」，而 `install_node` **硬编码 pkexec** → 有 sudo 无 pkexec 的机器被误判「可自更新」，却在装 Node 时失败 | 两者共用 `find_privilege_command()` + `PRIVILEGE_COMMANDS`（单一事实源）|
-| P3 | `env.rs` | 同一事实两个默认端口：`api_base_url` 用 36360、`api_port` 回退 **3100**（已退役端口）| 新增 `DEFAULT_API_PORT` 常量，两处共用；回退指向它 |
-| P3 | `bounded.rs` | 第二个临时日志创建失败 / `spawn` 失败时，**已建的 temp 日志不清理** → temp 目录残留 | 两条失败路径都 `cleanup()`（spawn 改为 match）|
-| P3 | `update.rs` | `pinned` **只增不剪**（唯一移除点只解除与当前版本相等的一项）→ 文件与 identity 投影单调增长 | `Guard::pruned_pinned()` 为**唯一裁剪实现**；`save`（文件）与 `write_identity_for`（identity 投影）都经它，保留最近 `MAX_PINNED`=8 项 |
-| P3 | `domain/windowing.rs` | 一段描述自更新命令的文档注释后**无任何代码**（命令实际在 `commands/mod.rs`）| 改为指向性说明，消除「这里应该有一组命令」的误导 |
-
-#### 注入验证
-
-| 注入 | 命中 |
-|---|---|
-| `install_node` 还原为硬编码 pkexec | a2_ 结构断言 FAIL（可编译的前修复代码）|
-| `has_privilege_channel` 还原为内联双命令 | a2_ 结构断言 FAIL |
-| `api_port` 回退改回 3100 | a3_default_api_port_is_single_source FAIL |
-| `spawn` 改回 `?` 直接返回（不清理）| a4_spawn_failure_leaves_no_temp_logs FAIL |
-| `Guard::save` 改回不裁剪 | a6_pinned_is_pruned + a6_pinned_projection FAIL |
-| `pruned_pinned` 改成返回全量 | a6_pinned_is_pruned + a6_pinned_projection FAIL |
-| `write_identity_for` 的 pinned 改回 `g.pinned`（文件与投影不同源）| a6_projection_and_file_use_same_pruning FAIL |
-
-⚠ 第三项注入最初**没有失败** —— 说明我第一版的投影用例没有真正覆盖「文件裁剪、投影不裁剪」这一分叉。
-已补 `a6_projection_and_file_use_same_pruning`（对 n = 0/1/7/8/9/40 断言
-「投影 == 文件 == 裁剪后长度」），并确认该注入现在确实 FAIL。**门禁不失败就是门禁没用。**
-
-⚠ 首次注入 A-2 时我写出了**不可编译**的注入（`?` 作用于非 Try 类型）→ 测试根本没跑。
-改用「可编译的前修复代码」作为注入后，门禁确实 FAIL。**这正是 AUDIT-HANDOFF 3 节记录的坑。**
-
-#### 一处自造假门禁（已修正）
-
-A-2/A-3 的断言用 `include_str!` 读自身源码，而**针脚字符串本身出现在测试源码里**
-→ 断言计数 2 ≠ 1 或恒假。改用**运行时拼接的针脚**（`format!("const {}: ", "PRIVILEGE_COMMANDS")`
-与 `(3636 * 10).to_string()`）。这是本任务第 8 次「断言命中自己的文字」。
-
-#### 计数变化（本轮壳仓累计）
-
-```
-壳    cargo test 100 项 → 114 项（bin 单测 14 → 28，新增 14）
-      bootstrap_flow 66 / platform_unsupported 4 / service_self_heal 1 /
-      update_guard 9 / updater_artifacts 6 —— 五项不变
-壳    cargo check --all-targets  0 警告
-```
-
----
-
-### 第十三轮续：macOS 构建断裂（P1）+ 跨平台导入门禁（2026-09-13）
-
-| 级别 | 位置 | 缺陷 | 修法 |
-|---|---|---|---|
-| **P1** | `platform/macos.rs:18` | 使用 `SVC_QUICK`（:202）却**未导入** → `target_os=macos` 构建 **E0425**，macOS（arm64/x64）无法出包；因 `#[cfg(target_os)]` 条件编译，Linux 上的 cargo test/check 根本不编译该文件，117 项测试全绿也掩盖它 | use 列表补 `SVC_QUICK`（与 linux.rs / windows.rs 对齐）|
-
-**为什么长期不可见**：`platform/mod.rs` 按平台条件编译；CI 在 Linux 上不编译 macos.rs。
-已用 rustc 最小复现确证作用域规则（子模块不继承父模块作用域）：
-
-```text
-mod parent { pub const SVC_NORMAL: u8 = 1; pub const SVC_QUICK: u8 = 2;
-  pub mod macos_like { use super::{SVC_NORMAL}; pub fn f() -> u8 { SVC_NORMAL + SVC_QUICK } } }
-→ error[E0425]: cannot find value SVC_QUICK in this scope
-```
-
-**新增门禁** `tests/platform_shared_items_test.rs`（3 断言；静态结构 —— 与既有
-`platform_unsupported_structure_test.rs` 同一理由：CI 无法编译非本平台的 cfg 分支）：
-
-- S-a 每个平台文件用到的**父模块共享项**，须经 `use super::` 导入或以限定路径访问
-- S-b `SVC_*` 常量在三平台文件均已导入（从 mod.rs **动态解析**常量名，防硬编码过时）
-- S-c 反向：判据能识别「使用但未导入」形态，且不误报已导入形态（门禁非空转）
-
-⚠ S-c 第一版**门禁空转**：`defined_locally` 写成「以 fn/const 开头且 contains(item)」，
-  于是 `fn f() { SVC_QUICK }`（**使用**）被误判为「本地定义」→ 反向断言不成立。
-  已改为要求「该项是**被声明的名字**」，重跑确认 S-c 通过、且注入确实使 S-a/S-b FAIL。
-
-**注入验证**：把 `SVC_QUICK` 从 macos.rs 导入移除（还原修复前）→ S-a / S-b 两条 FAIL；
-还原后 sha256 逐字一致，全绿。
-
-**计数变化**：壳 cargo test 114 → **117 项**（新增 3）；cargo check --all-targets 0 警告。
-
-### 第十三轮续二：壳仓 P2/P3 五组（2026-09-13）
-
-| 级别 | 位置 | 缺陷 | 修法 |
-|---|---|---|---|
-| **P2** | `mirror.rs::warmup_async` | 算出 npm 最快源却**从不写入** `selected_npm` → registry.json 的 `selected` **永远是 null** → 内核「优先采用壳投放的 selected……两侧必然同源」分支永不执行（跨仓同源承诺失效）| 把选中源**与其延迟一起落盘**；export 用同源延迟 |
-| **P2** | `node.rs` | 唯一带延迟的导出传的是 **Node 源**延迟，却与 **npm 语义**的 selected 配对（潜伏错配）| 改调无延迟导出，由落盘的同源延迟填充 |
-| **P2** | `bootstrap/js/80-init.js` | `env_progress` 监听以 `if (p.busy)` 为闸，而该条件**永远为假**（带 busy 的 emit 在前一行刚把 busy 置 false；进度事件来自 `push_status`，payload 根本没有 busy）→ 装 Node（数分钟）期间**零进度零状态**| 改为「只要 status 就展示」+ progress 驱动进度条；`push_status` payload 补 `busy:true` |
-| **P2** | `nodeprobe.rs` | 硬上限时置回 Idle，而**卡死的 worker 线程无法回收** → 用户每点一次「重试」就多一条永不退出的线程（与注释所称「不会堆积线程」相反）；旧 worker 还可能污染新一轮诊断 | 代际作废防污染；孤儿计数；**孤儿未退出前拒绝新建**并给出明确结论 |
-| **P3** | `main.rs` `--service-plan` | 用 `definition_path().is_file()`，而 Windows 是标识串 `schtasks://…` → **恒报「现存 = 否」** | 新增 `ServiceControl::is_defined()`（默认文件存在性；Windows 覆写为 `schtasks /Query`）|
-| **P3** | `platform/linux.rs` | `capabilities().privilege_channel` 硬编码 true，与 `has_privilege_channel()` 的实探分叉 → 同一机器两个相反答案 | 改为调用同一探测函数 |
-| **P3** | `bootstrap/js/50-kernel.js` | 远端版本查询失败时 `core_plan` 已带回 `error`，前端**不看**它 → 离线时谎报「内核已是最新」| 消费 `p.error`，如实显示失败原因 |
-| **P3** | `main.rs` / `80-init.js` | `env_status` 全仓**零监听**（死广播），且其 latest 与 node_status 构成第二真源；`env_done`（安装完成信号）同样零接收方 | 删 `env_status`；给 `env_done` 补监听（明确「已就绪」文案）|
-
-**注入验证**（9 次注入，全部使对应门禁 FAIL；还原后 sha256 逐字一致）：
-
-| 注入 | 命中 |
-|---|---|
-| warmup 不落盘 selected_npm | M-a FAIL |
-| export 延迟回到调用方参数 | M-b FAIL |
-| node.rs 传回 Node 延迟 | M-c FAIL |
-| 前端回到 if (p.busy) 闸 | E-a FAIL |
-| push_status 去掉 busy | E-c FAIL |
-| 去掉 nodeprobe 孤儿守卫 | orphan 门禁 FAIL |
-| --service-plan 回到 is_file | P-a FAIL |
-| Linux capability 回到硬编码 true | P-b + P-e FAIL |
-| 前端不消费 core_plan.error | P-c FAIL |
-| env_status 加回 + 删 env_done 监听 | P-d FAIL |
-
-**新增门禁**：`tests/mirror_env_wiring_test.rs`(6) / `tests/round13_p3_batch_test.rs`(5) /
-`nodeprobe` 单测新增 1（孤儿不累积）。
-
-⚠ 两处门禁自身的第一版是**假红/空转**，已修正：
-  · M-a 用全文件 find 命中了 `load()` 里的读取赋值（位置在 warmup 之前）→ 改为**限定在
-    warmup_async 函数体内**搜索；
-  · `defined_locally` 写成「以 fn/const 开头且 contains(item)」→ 把 `fn f() { SVC_QUICK }`
-    （**使用**）误判为「本地定义」→ 改为要求「该项是**被声明的名字**」。
-
-**计数变化**：壳 cargo test 117 → **129 项**（+12）；cargo check --all-targets 0 警告。
-
----
-
-### 第十三轮续三：CI 接线（门禁漏跑 / 平台盲区）+ macOS 第二个编译错误（2026-09-13）
-
-#### ① CI 硬编码 --test 名单 → 4 个门禁被静默排除
-
-「门禁测试」步骤原先硬编码 `--test bootstrap_flow --test update_guard_test
---test platform_unsupported_structure_test`。于是**新增的 tests/*.rs 不在 CI 执行**，
-实测漏了 4 个：`platform_shared_items_test`（**正是为 macOS E0425 建的那道，建了却不在 CI 跑**）、
-`mirror_env_wiring_test`、`round13_p3_batch_test`、以及**既有的** `service_self_heal_test`。
-该步骤自己的注释就写着「60+ 个门禁此前从未在 CI 执行」——同类问题以「新增文件被硬编码漏掉」复发。
-
-**修法**：自动枚举 `tests/*.rs`（只排除 `updater_artifacts`，它需打包产物）。
-新增测试文件从此自动纳入 CI。
-
-#### ② 平台盲区：macos.rs / windows.rs 从不被任何门禁编译
-
-二者被 `#[cfg(target_os)]` 条件编译，Linux 上**连解析都不做**；而 CI 原先只在 tag 时触发。
-
-**修法（经一次政策修订，以下是最终形态）**：
-
-初版我加了一个只做 `cargo check` 的轻量 **platform-check** job，并给 `build` 加 tag 守卫，
-让日常 push 走轻量路径。**这被明确否决，且否决是对的**：
-仅编译校验发现不了**打包 / 签名 / 产物装配**阶段的问题（glibc 基座、bundle 装配、
-验签清单、UPDATE 资产），而本仓恰在那些阶段踩过坑；轻量检查会给出「绿了」的假象，
-**反而掩盖问题**。
-
-最终形态：**push main 直接跑完整构建矩阵**
-（`ubuntu-22.04` / `windows-latest` / `macos-latest` / `macos-15-intel` 四平台 bundle），
-**删除 platform-check、去掉 build 的 `if` 守卫**。公开仓 Actions 免费，
-以「跑得久」换「问题暴露得早、暴露得全」。
-
-#### ③ 该 CI 第一次运行就抓到 P1：macOS **第二个**编译错误
-
-platform-check 首次运行：**windows success / macos failure**。
-无法下载 job 日志（未认证 403），本机改用**「临时把 macos 实现切到 Linux 上编译」**
-复现出与 CI 相同的错误：
-
-```text
-macos.rs:108  "do shell script "installer -pkg '{}' -target /" with administrator privileges"
-→ error: character literal may only contain one codepoint
-```
-
-**嵌套双引号未转义 = 纯语法错误 → macOS target 根本无法编译**。
-与先前那处 `SVC_QUICK` 未导入（E0425）是**同一盲区下的两个独立缺陷**。
-（该本地手法只对 macos.rs 有效 —— 它仅用 std + 本仓模块；windows.rs 用了
-`std::os::windows::…`，切到 Linux 只会得到 `raw_arg` 找不到的假错误。）
-
-#### ④ 「Linux 侧轻量语法门禁」**已删除**（政策否决）
-
-曾加入 `tests/platform_files_parse_test.rs`：用 `rustfmt` 作独立解析器，
-在 Linux 上解析每个 `src/platform/*.rs`，以拦住 cfg 屏蔽文件里的语法错误。
-**已按「不要轻量替代」的要求删除** —— 它是「用一个便宜检查代替完整构建」的思路，
-正是被否决的那一类。语法错误由**完整构建**在真实平台上暴露（本轮 CI 已实证：
-platform-check 第一次运行就抓到了 macos.rs 的语法错误）。
-
-#### ⑤ 门禁的门禁
-
-`tests/ci_gate_coverage_test.rs`（5 断言）：C-a CI 必须**自动枚举**（不得硬编码）；
-C-b 唯一允许排除的是 `updater_artifacts`；
-**C-c push 必须跑完整构建矩阵**（build job 不得有 job 级 `if:` 守卫、矩阵必须含
-macOS/Windows、且 build 内要跑 `cargo test`）；
-**C-d 反悔防护：不得存在只做 `cargo check` 的轻量 job 替代完整构建**；
-C-e 反向判据非空转（含 `job_block` 定位有效性）。该文件本身由自动枚举纳入 CI（自覆盖）。
-
-#### 注入验证（5 次，全部 FAIL；还原后 sha256 逐字一致）
-
-| 注入 | 命中 |
-|---|---|
-| 改回硬编码 --test 三连 | C-a + C-b FAIL |
-| **给 build 加回 tag 守卫**（=退回轻量替代的形态）| C-c FAIL |
-| **把轻量 platform-check job 加回来** | C-d FAIL |
-| **矩阵里删掉 windows** | C-c FAIL |
-| 多加一个 grep -v 排除项 | C-b FAIL |
-
-⚠ 注入 1 第一次**没生效**：python 匹配串里把 `${TARGETS}` 误写成带反斜杠形态，
-  assert 报错进了 **stderr 而我只看了 stdout**，误以为成功。改用锚点定位后复现成功。
-
-#### CI 实证
-
-| run | sha | 结论 |
-|---|---|---|
-| 34737146315 | `06a1700`（加 platform-check）| **failure**（macOS leg 抓到上述 P1）|
-| 34737470174 | `0225df9`（修 macos.rs）| **success**（macos + windows 双绿）|
-
-两次 run 的 `build` / `publish` 均 **skipped**（不打包、不发布）—— 门控按设计生效。
-（GitHub job 日志下载需认证，403；结论取自公开 API 的 runs/jobs 接口。）
-
-**计数变化**：壳 cargo test 129 → **135 项**（+6）；cargo check --all-targets 0 警告。
-CI 实际执行：3 → **8 个 test target** + mac/win 编译检查。

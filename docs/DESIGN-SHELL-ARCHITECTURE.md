@@ -2,10 +2,10 @@
 
 > 2026-09-11 · 目标：把壳做成**标准的、跨平台的、工业级**工程
 >
-> ## ⚠ 本文件是**规范**（主张「应该长什么样」），§一 的现状诊断描述**改造前状态**
+> ## 本文件是**规范**（主张「应该长什么样」），§一 的现状诊断描述**改造前状态**
 >
-> §一 的实测数字与行号是**审计时快照**；其中的平台分支、分层、错误模型三条**已落地**
-> （见 `DESIGN-COMPLETE.md` 的「执行状态」）。**前端模块拆分（§3.3）尚未执行。**
+> §一 的实测数字与行号是**审计时快照**；其中的平台分支、分层、错误模型、前端模块拆分四条**已落地**
+> （前端已拆为 `bootstrap/js/00..80` 九个模块；见 `DESIGN-COMPLETE.md` 的「执行状态」）。
 > 本文件是**规范**（normative）。每条不变量都对应一条**会失败的测试**。
 
 ---
@@ -14,16 +14,16 @@
 
 | 指标 | 实测值 | 判断 |
 |---|---|---|
-| **平台分支分布** | **43 处 / 8 个文件**（另 7 处 `#[cfg(test)]` 不计）| ❌ **零平台抽象层** |
-| 内核对照（同口径）| **67 处，60 处在 `platform/os/`（90%）**，仅 7 处泄漏到域层 | ✅ 内核有平台层，壳没有 |
-| `main.rs` 规模 | **1487 行** = 20 个 IPC 命令 + 4 个 CLI + 平台服务控制 + 业务逻辑 | ❌ 单体，无分层 |
-| 平台分支明细 | `node.rs` 11 / `main.rs` 10 / `service.rs` 9 / `env.rs` 6 / `bounded.rs` 2 / `nodeprobe.rs` 2 / `update.rs` 2 / `core.rs` 1 | ❌ 加一个平台要翻 8 个文件 |
-| 分层违规 | `main.rs:542-605` 有 4 份 `#[cfg]` 的 `start/stop_guard_service`，与 `service.rs` 的 `ensure_defined` **同属一个概念却分居两层** | ❌ 加平台要改两处不同层 |
-| 错误类型 | `Result<_, String>` **42 处**，自定义 Error 枚举 **0 个** | ❌ 只能字符串匹配，无法程序化处理 |
-| 前端隔离 | `bootstrap.html` **760 行单个 `<script>` 块** | ❌ 一处语法错 → 全页不执行（已真实发生一次）|
-| 架构文档 | 10 份 docs，全文 `Contract` 0 次、`不变量` 0 次、`平台矩阵` 0 次 | ❌ 没有能回答「加一个平台要改哪些地方」的文档 |
-| 测试 | `cargo test` 68 项；`bootstrap_flow.rs` 1159 行（B1–B55）| ✅ 测试基础健康 |
-| 有界执行 | `bounded.rs` 191 行，全部阻塞调用经它 | ✅ **良好基础设施**，应推广 |
+| **平台分支分布** | **43 处 / 8 个文件**（另 7 处 `#[cfg(test)]` 不计）| **零平台抽象层** |
+| 内核对照（同口径）| **67 处，60 处在 `platform/os/`（90%）**，仅 7 处泄漏到域层 | 内核有平台层，壳没有 |
+| `main.rs` 规模 | **1487 行** = 20 个 IPC 命令 + 4 个 CLI + 平台服务控制 + 业务逻辑 | 单体，无分层 |
+| 平台分支明细 | `node.rs` 11 / `main.rs` 10 / `service.rs` 9 / `env.rs` 6 / `bounded.rs` 2 / `nodeprobe.rs` 2 / `update.rs` 2 / `core.rs` 1 | 加一个平台要翻 8 个文件 |
+| 分层违规 | `main.rs:542-605` 有 4 份 `#[cfg]` 的 `start/stop_guard_service`，与 `service.rs` 的 `ensure_defined` **同属一个概念却分居两层** | 加平台要改两处不同层 |
+| 错误类型 | `Result<_, String>` **42 处**，自定义 Error 枚举 **0 个** | 只能字符串匹配，无法程序化处理 |
+| 前端隔离 | `bootstrap.html` **760 行单个 `<script>` 块** | 一处语法错 → 全页不执行（已真实发生一次）|
+| 架构文档 | 10 份 docs，全文 `Contract` 0 次、`不变量` 0 次、`平台矩阵` 0 次 | 没有能回答「加一个平台要改哪些地方」的文档 |
+| 测试 | `cargo test` 68 项；`bootstrap_flow.rs` 1159 行（B1–B55）| 测试基础健康 |
+| 有界执行 | `bounded.rs` 191 行，全部阻塞调用经它 | **良好基础设施**，应推广 |
 
 **结论：壳不是「一塌糊涂」，是「缺一层抽象 + 缺一份规范 + 缺把规范变成门禁」。**
 
@@ -142,15 +142,15 @@ pub enum ShellError {
 
 | 能力 | Linux | macOS | Windows | 实现位 |
 |---|---|---|---|---|
-| 环境探针（候选枚举/版本/PATH）| ✅ | ✅ | ✅ | `domain/probe` |
-| Node 制品解析 | ✅ `tar.xz` | ✅ `pkg` | ✅ `msi` | `platform/*::node_artifact` |
-| Node 安装（提权）| ✅ `pkexec` | ✅ `osascript` | ✅ `msiexec` | `platform/*::install_node` |
-| 镜像测速与选择 | ✅ | ✅ | ✅ | `domain/mirror` |
-| 内核安装/升级 | ✅ | ✅ | ✅ | `domain/provision` |
-| 服务定义（守卫）| ✅ systemd | ✅ LaunchAgent | ✅ schtasks | `platform/*::ServiceControl` |
-| 服务启停 | ✅ `systemctl --user` | ✅ `launchctl` | ✅ `schtasks` | 同上 |
-| 提权通道探测 | ✅ | ✅（恒有）| ✅ | `platform/*::has_privilege_channel` |
-| 壳自更新 | ✅ deb/rpm | ✅ app | ✅ exe/msi | `domain/update` |
+| 环境探针（候选枚举/版本/PATH）| | | | `domain/probe` |
+| Node 制品解析 | `tar.xz` | `pkg` | `msi` | `platform/*::node_artifact` |
+| Node 安装（提权）| `pkexec` | `osascript` | `msiexec` | `platform/*::install_node` |
+| 镜像测速与选择 | | | | `domain/mirror` |
+| 内核安装/升级 | | | | `domain/provision` |
+| 服务定义（守卫）| systemd | LaunchAgent | schtasks | `platform/*::ServiceControl` |
+| 服务启停 | `systemctl --user` | `launchctl` | `schtasks` | 同上 |
+| 提权通道探测 | | （恒有）| | `platform/*::has_privilege_channel` |
+| 壳自更新 | deb/rpm | app | exe/msi | `domain/update` |
 
 **不变量 P1**：矩阵的每一格必须是「实现」或「显式不支持」。
 「显式不支持」在代码里表现为返回 `ShellError::Unsupported`，**绝不静默成功**。
@@ -233,12 +233,12 @@ fn g1_platform_branches_only_in_platform_layer() {
 
 | 阶段 | 内容 | 风险 | 可回滚 |
 |---|---|---|---|
-| **P0** | 建 `platform/` 层，把 **43 处平台分支**搬位置不改逻辑；合并「服务定义 + 启停」；加门禁 **G1/G2** | 低（纯搬移）| ✅ 单提交回滚 |
-| **P1** | `main.rs` 拆成 `commands/` + `domain/`；加门禁 **G3** | 中（拆文件）| ✅ |
-| **P2** | 引入 `ShellError`，IPC 边界改为结构化错误；前端按 `kind` 出建议 | 中（前后端同时改）| ⚠️ 需前后端一起回滚 |
-| **P3** | 前端拆分 + 全局 onerror；门禁 **G5** | 低 | ✅ |
-| **P4** | 契约层（`domain/contract/`）+ 壳启动导出 + `schema`；门禁 **G6** | 低（新增能力）| ✅ |
-| **P5** | 平台矩阵自检 CLI（`--platform-matrix`）+ 三平台 CI 跑真实调用；门禁 **G4** | 低 | ✅ |
+| **P0** | 建 `platform/` 层，把 **43 处平台分支**搬位置不改逻辑；合并「服务定义 + 启停」；加门禁 **G1/G2** | 低（纯搬移）| 单提交回滚 |
+| **P1** | `main.rs` 拆成 `commands/` + `domain/`；加门禁 **G3** | 中（拆文件）| |
+| **P2** | 引入 `ShellError`，IPC 边界改为结构化错误；前端按 `kind` 出建议 | 中（前后端同时改）| 需前后端一起回滚 |
+| **P3** | 前端拆分 + 全局 onerror；门禁 **G5** | 低 | |
+| **P4** | 契约层（`domain/contract/`）+ 壳启动导出 + `schema`；门禁 **G6** | 低（新增能力）| |
+| **P5** | 平台矩阵自检 CLI（`--platform-matrix`）+ 三平台 CI 跑真实调用；门禁 **G4** | 低 | |
 
 **顺序不可颠倒**：P0 是地基（没有平台层，后面的分层都无处安放）。
 
@@ -248,11 +248,11 @@ fn g1_platform_branches_only_in_platform_layer() {
 
 | 已有 | 状态 |
 |---|---|
-| `bounded.rs`（有界执行）| ✅ **保留并强化** —— 它是本仓最好的基础设施，应成为 `infra::bounded` |
-| `bootstrap_flow.rs` B1–B55 | ✅ **全部保留** —— 门禁体系的基础 |
-| `service.rs` 的 per-OS 实现 | ✅ **作为 `platform/` 的模板** —— 它本来就是正确模式 |
-| `nodeprobe.rs` 的「规则一/规则二」（每步上报 + 硬死线）| ✅ **提升为全仓不变量** |
-| 主帧 IPC 不变量（B54）| ✅ **保留** —— 已由真实事故确立 |
+| `bounded.rs`（有界执行）| **保留并强化** —— 它是本仓最好的基础设施，应成为 `infra::bounded` |
+| `bootstrap_flow.rs` B1–B55 | **全部保留** —— 门禁体系的基础 |
+| `service.rs` 的 per-OS 实现 | **作为 `platform/` 的模板** —— 它本来就是正确模式 |
+| `nodeprobe.rs` 的「规则一/规则二」（每步上报 + 硬死线）| **提升为全仓不变量** |
+| 主帧 IPC 不变量（B54）| **保留** —— 已由真实事故确立 |
 
 ---
 

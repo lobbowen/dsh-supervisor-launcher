@@ -6,6 +6,30 @@
 
 （下一版本待记）
 
+## [1.1.0]（2026-09-14）
+
+### 内核零回退（产品硬规则落地）
+
+内核更新强制且唯一：检测到新版本即安装最新，**不得回退旧内核**（唯一保留回退的是 DSH 自身升级）。
+
+| 位置 | 内容 |
+|---|---|
+| `bootstrap/js/60-guard.js` | 删除「守卫未就绪 → 回退内核 vX」整段；失败即失败 |
+| `bootstrap/js/{00-runtime,50-kernel,70-boot,10-ui}.js` | 删除 `coreFrom/coreTo` 状态，改为单一 `coreVersion` |
+| `src/commands/mod.rs` | `core_apply` 删除 `version` 参数，永远解析并安装最新 |
+| `src/core.rs` | 移除「失败回退/方案 B」注释 |
+
+### 全面审计与清理
+
+- 删除过时文档（时间点记录/归档）与未使用图标、重复副本（LAUNCHER_README/LICENSE/app-icon/.gitignore.shell）；
+- emoji 全仓清零；自我论证式长注释统一收敛为约束/不变量；
+- `bump-shell.sh` 的 GNU `sed -i` 改为可移植写法；`make-manifest.js` 删除 no-op 与失效 `--base`；
+- 文档修正：RELEASE-STANDARD / README / 跨仓契约表等与现实现对齐。
+
+### 验证
+
+`cargo test --bins <全部 tests>` 137 passed / 0 failed / 0 warnings。
+
 ## [1.0.10]（2026-09-14）
 
 > 修复 **Windows 上内核升级必然失败** 的致命缺陷。根因来自 npm debug log，已确证。

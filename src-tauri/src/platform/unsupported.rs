@@ -84,7 +84,7 @@ impl ServiceControl for Impl {
     }
 }
 
-// ⚠ 2026-09-12（P1 修复）：**这里必须收束 ServiceControl，另起 Platform 的 impl**。
+// 2026-09-12（P1 修复）：**这里必须收束 ServiceControl，另起 Platform 的 impl**。
 //
 //   缺陷：原实现把 Platform 的 11 个必需方法（node_artifact / node_candidate_paths /
 //     node_bin_after_install / is_usable_executable / core_extra_candidates /
