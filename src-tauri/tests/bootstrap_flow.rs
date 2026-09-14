@@ -1516,7 +1516,20 @@ fn g1_platform_branches_only_in_platform_layer() {
             //   平台知识会随调用点扩散；`#[cfg]` 才按目标平台裁剪。
             //   三者现已下沉为 Platform trait 方法（见 platform/mod.rs）。
             let is_macro = t.contains("cfg!(");
-            if !is_attr && !is_macro {
+            // ── 形态 ③：`std::env::consts::OS/ARCH` 的**分支**用法（2026-09-14）──
+            //   与 `cfg!()` 同族：core.rs 曾用 `match std::env::consts::OS { ... }`
+            //   在平台层之外做 OS→标签映射，G1/B59 都看不见。
+            //   判据：非 platform/ 文件里，consts::OS/ARCH 出现在 match / 比较 / if / 箭头
+            //   分支中即违规；纯上报（json!/println!）放行。
+            let is_consts = t.contains("std::env::consts::OS") || t.contains("std::env::consts::ARCH");
+            let consts_branch = is_consts
+                && (t.contains("match") || t.contains("==") || t.contains("!=")
+                    || t.contains("if ") || t.contains("=>"));
+            if !is_attr && !is_macro && !consts_branch {
+                continue;
+            }
+            if consts_branch && !is_attr && !is_macro {
+                offenders.push(format!("{}:{} {}", name, i + 1, t));
                 continue;
             }
             if t.contains("cfg(test)") {
@@ -1851,6 +1864,15 @@ fn b59_g1_covers_cfg_macro_form() {
             }
             let is_attr = t.starts_with("#[cfg(");
             let is_macro = t.contains("cfg!(");
+            // 形态 ③：std::env::consts::OS/ARCH 的分支用法（与 G1 同步，2026-09-14）
+            let is_consts = t.contains("std::env::consts::OS") || t.contains("std::env::consts::ARCH");
+            let consts_branch = is_consts
+                && (t.contains("match") || t.contains("==") || t.contains("!=")
+                    || t.contains("if ") || t.contains("=>"));
+            if is_consts && !is_attr && !is_macro {
+                if consts_branch { offenders.push(format!("{}:{} {}", name, i + 1, t)); }
+                continue;
+            }
             if !is_attr && !is_macro {
                 continue;
             }
@@ -1877,6 +1899,11 @@ fn b59_g1_covers_cfg_macro_form() {
     let sample = "    if cfg!(windows) { \"node.exe\" } else { \"node\" }";
     let sample_hit = sample.trim().contains("cfg!(") && sample.contains("windows");
     assert!(sample_hit, "B59 FAIL 识别逻辑对 cfg!() 样本失效（门禁成空转）");
+    // ②b 反向自检：consts::OS 分支样本必须被同一判据识别
+    let cs = "    let os = match std::env::consts::OS { \"linux\" => \"linux\", _ => \"win\" };";
+    let cs_hit = cs.contains("std::env::consts::OS")
+        && (cs.contains("match") || cs.contains("==") || cs.contains("!=") || cs.contains("if ") || cs.contains("=>"));
+    assert!(cs_hit, "B59 FAIL 识别逻辑对 consts::OS 分支样本失效（门禁成空转）");
 
     // ③ 且 trait 必须真的暴露这三个能力（下沉的落点存在）
     let pm = fs::read_to_string(manifest_dir().join("src").join("platform").join("mod.rs"))

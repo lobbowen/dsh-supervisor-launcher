@@ -78,6 +78,13 @@ pub trait Platform: Send + Sync {
     /// 能力声明。
     fn capabilities(&self) -> Capabilities;
 
+    /// 内核 npm 子包的**平台标签**（`linux-x64` / `darwin-arm64` / `win-x64` …）。
+    ///
+    /// 这是**平台事实**（OS × ARCH → 标签），必须在平台层解析；
+    /// `core.rs::package_name()` 只负责拼 `@dsh-sup/dsh-core-<tag>`。
+    /// 返回 `None` = 本平台/架构无对应组合（调用方如实报错，不得猜一个）。
+    fn core_platform_tag(&self) -> Option<&'static str>;
+
     /// **Node 官方制品**：`index.json` 的 files 标签 + 发布文件名。
     ///
     /// 这是纯**制品解析**（平台 → 文件名映射），不含下载/安装逻辑 ——
@@ -263,4 +270,25 @@ pub fn matrix_text() -> String {
         format!("definition_exists={}", def.is_file()),
     ]
     .join(" | ")
+}
+
+#[cfg(test)]
+mod tests {
+    /// 平台标签契约（2026-09-14）：`core_platform_tag()` 必须与**当前构建 target** 一致。
+    /// 在 CI 的 4 个 runner（linux-x64 / win-x64 / darwin-arm64 / darwin-x64）上各跑一次，
+    /// 把「OS × ARCH → 内核包标签」这条跨平台事实钉死。
+    #[test]
+    fn core_platform_tag_matches_build_target() {
+        let got = super::current().core_platform_tag();
+        let want = match (std::env::consts::OS, std::env::consts::ARCH) {
+            ("linux", "x86_64") => Some("linux-x64"),
+            ("linux", "aarch64") => Some("linux-arm64"),
+            ("macos", "x86_64") => Some("darwin-x64"),
+            ("macos", "aarch64") => Some("darwin-arm64"),
+            ("windows", "x86_64") => Some("win-x64"),
+            ("windows", "aarch64") => Some("win-arm64"),
+            _ => None,
+        };
+        assert_eq!(got, want, "core_platform_tag 必须与构建 target 一致");
+    }
 }

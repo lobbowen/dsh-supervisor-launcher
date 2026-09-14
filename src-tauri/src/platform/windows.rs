@@ -44,6 +44,14 @@ impl Platform for Impl {
         }
     }
 
+    fn core_platform_tag(&self) -> Option<&'static str> {
+        match std::env::consts::ARCH {
+            "x86_64" => Some("win-x64"),
+            "aarch64" => Some("win-arm64"),
+            _ => None,
+        }
+    }
+
     fn node_artifact(&self, version: &str) -> Option<super::NodeArtifact> {
         // 官方**没有** win-arm64-msi（files[] 只有 win-arm64-7z / win-arm64-zip）。
         // 故 arm64 Windows 也取 x64 msi —— 依赖系统的 x64 模拟执行。

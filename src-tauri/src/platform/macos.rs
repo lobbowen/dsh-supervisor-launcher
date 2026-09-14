@@ -49,6 +49,14 @@ impl Platform for Impl {
         }
     }
 
+    fn core_platform_tag(&self) -> Option<&'static str> {
+        match std::env::consts::ARCH {
+            "x86_64" => Some("darwin-x64"),
+            "aarch64" => Some("darwin-arm64"),
+            _ => None,
+        }
+    }
+
     fn node_artifact(&self, version: &str) -> Option<super::NodeArtifact> {
         // macOS 必须用官方 **.pkg**（2026-09-11 修复）：
         //   原实现下载 `node-v<ver>-darwin-<arch>.tar.gz`（tarball），却交给

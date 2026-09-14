@@ -61,6 +61,15 @@ impl Platform for Impl {
         }
     }
 
+    fn core_platform_tag(&self) -> Option<&'static str> {
+        // 与 node_artifact 同一套 ARCH 归一；未知架构如实返回 None。
+        match std::env::consts::ARCH {
+            "x86_64" => Some("linux-x64"),
+            "aarch64" => Some("linux-arm64"),
+            _ => None,
+        }
+    }
+
     fn node_artifact(&self, version: &str) -> Option<super::NodeArtifact> {
         // 官方 files[] 两个标签都存在（实测）。
         //

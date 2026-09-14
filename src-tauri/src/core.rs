@@ -31,18 +31,12 @@ const DEFAULT_ORIGINS: [&str; 6] = [
 
 /// 平台 → npm 子包名（唯一真源；错误提示/安装/查询共用，杜绝散落硬编码）。
 pub fn package_name() -> Result<String, String> {
-    let os = match std::env::consts::OS {
-        "linux" => "linux",
-        "macos" => "darwin",
-        "windows" => "win",
-        other => return Err(format!("不支持的平台: {}", other)),
-    };
-    let arch = match std::env::consts::ARCH {
-        "x86_64" => "x64",
-        "aarch64" => "arm64",
-        other => return Err(format!("不支持的架构: {}", other)),
-    };
-    Ok(format!("@dsh-sup/dsh-core-{}-{}", os, arch))
+    // 平台标签是**平台事实**，只在 platform 层解析（门禁 G1）；
+    // 这里只负责拼包名，不得再出现 std::env::consts 的平台分支。
+    let tag = crate::platform::current()
+        .core_platform_tag()
+        .ok_or_else(|| "当前平台/架构无对应的内核发布包".to_string())?;
+    Ok(format!("@dsh-sup/dsh-core-{}", tag))
 }
 
 /// npm 可执行名（Windows 需 .cmd 后缀）—— 下沉到 trait（P2/G1）。

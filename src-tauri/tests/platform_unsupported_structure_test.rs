@@ -27,7 +27,7 @@
 //!
 //! ## 锁定不变量
 //!   U-a  `impl ServiceControl for Impl` 只含 ServiceControl 的 6 个方法
-//!   U-b  `impl Platform for Impl`（可多块）含 Platform 的**全部** 14 个方法
+//!   U-b  `impl Platform for Impl`（可多块）含 Platform 的**全部** 15 个方法
 //!   U-c  两个集合**不相交**（同一方法不得同时出现在两个 trait 的 impl 里）
 //!   U-d  真实 trait 定义的方法集与预期一致（防 trait 演进后本门禁失效）
 
@@ -136,7 +136,7 @@ fn strip_comments(src: &str) -> String {
 }
 
 const PLATFORM_METHODS: &[&str] = &[
-    "name", "service", "capabilities",
+    "name", "service", "capabilities", "core_platform_tag",
     "node_artifact", "node_candidate_paths", "node_bin_after_install",
     "is_usable_executable", "core_extra_candidates", "is_local_fixed_dir",
     "install_node", "has_privilege_channel",
@@ -177,7 +177,7 @@ fn u_b_platform_impl_has_all_platform_methods() {
         "U-b FAIL Platform impl 缺少必需方法 {:?} —— 未知平台 target 会编译失败",
         missing
     );
-    eprintln!("U-b PASS Platform impl 含全部 14 个方法");
+    eprintln!("U-b PASS Platform impl 含全部 15 个方法");
 }
 
 #[test]

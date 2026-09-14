@@ -39,6 +39,10 @@ impl Platform for Impl {
             node_artifact: "unknown",
         }
     }
+
+    fn core_platform_tag(&self) -> Option<&'static str> {
+        None // 未知平台无对应内核发布包（如实返回，不猜）
+    }
 }
 
 impl ServiceControl for Impl {
