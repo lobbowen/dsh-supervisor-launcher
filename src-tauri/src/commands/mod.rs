@@ -274,6 +274,8 @@ pub async fn core_apply(app: tauri::AppHandle, version: Option<String>) -> Shell
             }
         }
     };
+    // 失败回传用（闭包会 move origins）
+    let origins_for_report = origins.clone();
     let pkg2 = pkg.clone();
     let target2 = target.clone();
     let pref = prefix.clone();
@@ -292,7 +294,16 @@ pub async fn core_apply(app: tauri::AppHandle, version: Option<String>) -> Shell
             "ok": true, "version": target, "origin": origin, "output": out,
             "prefix": prefix.map(|p| p.display().to_string()),
         }),
-        Err(e) => serde_json::json!({"ok": false, "version": target, "error": e}),
+        // 2026-09-14 修复：失败分支**必须**回传 prefix 与尝试过的源。
+        //   原实现只在成功分支带 prefix —— 现场报「npm 退出码 1」时，
+        //   连「装到哪个前缀」都不知道，导致定位多花一轮（真实事故）。
+        Err(e) => serde_json::json!({
+            "ok": false, "version": target, "error": e,
+            "prefix": prefix.as_ref().map(|p| p.display().to_string()),
+
+            "originsTried": origins_for_report,
+            "prefixIsNodeDir": prefix.as_ref().map(|p| crate::core::is_node_install_prefix(p)),
+        }),
     })
 }
 

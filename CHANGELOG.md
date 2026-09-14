@@ -6,6 +6,61 @@
 
 （下一版本待记）
 
+## [1.0.10]（2026-09-14）
+
+> 修复 **Windows 上内核升级必然失败** 的致命缺陷。根因来自 npm debug log，已确证。
+
+### 修复：--prefix 带 Windows verbatim 前缀 -> npm arborist 无限递归爆栈
+
+现场：Windows 用户升级内核报 Maximum call stack size exceeded（退出码 1）。
+
+决定性证据（npm debug log 的 argv）：我们传给 npm 的 --prefix 带着 Windows
+verbatim 前缀（两反斜杠+问号+反斜杠开头）。而 npm prefix -g 对同一目录返回干净形式。
+堆栈指向 @npmcli/arborist 的 realpathCached **无限递归** —— 它在 verbatim 前缀上不收敛。
+
+根因：Rust 的 std::fs::canonicalize() 在 Windows 上总是返回 verbatim 形式；
+locate_core -> global_prefix_for 按组件重建前缀时把它原样带上，最终交给 npm。
+
+修法：新增 strip_verbatim（字符串级，跨平台可测）+ 单一 simplify，在三处调用点生效：
+
+- global_prefix_for 的两个返回分支（node_modules 布局 / Windows 垫片布局）；
+- run_npm_install 构造 --prefix 处（单一实现、两处调用，不分叉）。
+
+### 修复：失败路径的证据缺失（本次事故难查的直接原因）
+
+core_apply 的成功分支一直回传 prefix，失败分支却丢了；install_version 的错误
+也只有一句「npm 退出码 1」，没有命令、没有 prefix、没有试过哪些源。
+现失败时回传：命令 + prefix + registry + 每次尝试的输出 + originsTried + prefixIsNodeDir。
+
+> 纪律：失败路径的信息量必须 >= 成功路径 —— 否则最需要诊断的时刻恰恰没有证据。
+
+### 加固：缓存隔离重试（有界）
+
+该类错误的次要成因是 npm 缓存损坏。首次失败且失败得很快（<=120s）时，用全新临时缓存重试一次；
+窗口外不重试（否则两次 15 分钟会突破引导页 17 分钟预算），并说明为何未重试。
+
+### 新增门禁 kernel_install_evidence_test.rs（8 断言）+ 4 条单测
+
+K-1 失败证据含命令/prefix/源；K-2 缓存隔离存在；K-3 重试有界；K-4 失败分支带 prefix 与来源；
+K-5 无「声明无调用点」；K-6 反向判据；K-7 verbatim 前缀在交给 npm 前被剥除（3 处调用点 + 回归单测）；
+K-8 反向识别未剥前缀形态。
+
+注入验证（三次，均按「注入 -> 确认门禁红 -> 还原 -> 确认绿」）：
+
+| 注入 | 结果 |
+|---|---|
+| global_prefix_for 不剥前缀 | K-7 抓到 |
+| npm --prefix 去掉 simplify | K-7 + K-8 抓到 |
+| 失败分支去掉 prefix | K-4 抓到 |
+
+> 第三次注入在第一版门禁下未被抓到 —— 因为 K-4 取到的是函数体内更早的 resolve 守卫分支，
+> 而切片一直延伸到函数末尾，把成功分支的 prefix 也算进来 -> 断言恒真。
+> 现锚定 Ok(match res 之后的那个 Err，并加反空转断言。这正是注入验证不可省的原因。
+
+### 计数
+
+壳仓 cargo test：137 -> **149 断言 / 0 失败**（+4 单测 +8 门禁）；cargo check：0 告警。
+
 ## [1.0.9]（2026-09-14）
 
 > 本轮为**底座审计与硬标准落地**：壳仓同样必须有唯一规范、同样必须走 GitHub 完整四平台构建。

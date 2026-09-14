@@ -306,7 +306,7 @@ pub fn global_prefix_for(bin: &Path) -> Option<PathBuf> {
             let mut p = PathBuf::new();
             for c in &comps[..cut] { p.push(c.as_os_str()); }
             if p.as_os_str().is_empty() { return None; }
-            return Some(p);
+            return Some(simplify(p));
         }
     }
     // Windows npm 垫片兜底（2026-09-11 修复）：
@@ -316,7 +316,7 @@ pub fn global_prefix_for(bin: &Path) -> Option<PathBuf> {
     //   判据：该目录直接含 node_modules 时，它本身就是 npm 全局前缀。
     if let Some(dir) = bin.parent() {
         if dir.join("node_modules").is_dir() {
-            return Some(dir.to_path_buf());
+            return Some(simplify(dir.to_path_buf()));
         }
     }
     None
@@ -331,13 +331,145 @@ fn tail(s: &str, n: usize) -> String {
 /// 安装/升级/回退到指定版本（npm install -g [--prefix] pkg@version）。
 /// 显式 --prefix 保证装回「内核当前所在前缀」，避免 npm 默认前缀不一致导致旧内核遮蔽新内核。
 /// 返回 npm 输出（成功）或含退出码与 stderr 的错误（失败——供引导页如实呈现，不再吞错）。
+///
+/// ## 2026-09-14 加固：缓存隔离重试 + 失败回传完整证据
+///
+/// 现场：Windows 用户升级内核报 `npm error Maximum call stack size exceeded`（npm 退出码 1）。
+/// 已排除（本地实测）：包本身零依赖/无 node_modules/无符号链接；
+///   npmjs / npmmirror / 华为云三源均可**全新安装与升级**；自引用 file: 依赖与 400 层
+///   .package-lock.json 也不触发。故**不是发布产物的问题**，而是该机器的 npm 环境。
+///
+/// 该类错误的**首要成因是 npm 缓存损坏**（其次才是 npm 自身缺陷）。
+/// 但现场无法远程清缓存，故此处做**缓存隔离重试**：首次失败且**失败得很快**时，
+///   用**全新临时缓存目录**再试一次 —— 这既是绕行，也把「是否缓存问题」变成可判定的证据。
+///
+/// ⚠ 只在**快失败**时重试：爆栈/缓存类错误秒级返回；若首次已耗时很久（网络慢/超时），
+///   再试一次会突破引导页 17 分钟预算。故用 FAST_FAIL_RETRY 窗口约束总时长。
+///
+/// ⚠ 失败时**必须回传证据**（命令 / prefix / 源 / 两次尝试的输出）——
+///   原实现只回一句「npm 退出码 1」，导致现场无法定位（本次事故即因此多花一轮）。
 pub fn install_version(pkg: &str, version: &str, prefix: Option<&Path>, registry: Option<&str>) -> Result<String, String> {
     if !is_valid_version(version) { return Err(format!("非法目标版本: {}", version)); }
     let spec = format!("{}@{}", pkg, version);
+
+    let t0 = std::time::Instant::now();
+    let first = run_npm_install(&spec, prefix, registry, None);
+    match &first {
+        Ok(out) if out.success => return Ok(tail(&out.stdout, 500)),
+        Err(_) => {} // 连启动都失败（npm 不存在等）—— 直接回报，不重试
+        Ok(_) => {}
+    }
+    let first_out = first.as_ref().ok();
+
+    // 只在**快失败**时做缓存隔离重试（见上方说明）
+    let mut second: Option<crate::bounded::Output> = None;
+    if first_out.is_some() && t0.elapsed() <= FAST_FAIL_RETRY {
+        if let Some(dir) = fresh_cache_dir() {
+            let s = run_npm_install(&spec, prefix, registry, Some(&dir));
+            let ok = matches!(&s, Ok(o) if o.success);
+            if !ok { second = s.ok(); }
+            let _ = std::fs::remove_dir_all(&dir); // 尽力清理，失败不报错
+            if ok {
+                return Ok("（默认缓存首次失败，改用隔离缓存重试后成功）"
+                    .to_string()
+                    + &tail(first_out.map(|o| o.stdout.as_str()).unwrap_or(""), 200));
+            }
+        }
+    }
+
+    // 组织**完整证据**（现场定位所需：命令 / prefix / 源 / 两次输出）
+    let mut ev = String::new();
+    ev.push_str(&format!("cmd: {} install -g --no-audit --no-fund {}", npm_exe(), spec));
+    if let Some(p) = prefix { ev.push_str(&format!(" --prefix {}", p.display())); }
+    if let Some(r) = registry { if !r.is_empty() { ev.push_str(&format!(" [registry {}]", r)); } }
+    let fmt = |o: &crate::bounded::Output| {
+        let code = o.code.clone().unwrap_or_else(|| "killed".into());
+        format!("退出码 {}：{}", code, tail(&o.stderr, 700))
+    };
+    match (first_out, second.as_ref()) {
+        (Some(a), Some(b)) => Err(format!("{}；缓存隔离重试仍失败：{}", fmt(a), fmt(b))),
+        (Some(a), None) => Err(format!("{}{}", fmt(a), FAST_SKIP_NOTE)),
+        _ => Err(first.err().unwrap_or_else(|| "npm 未能启动".into())),
+    }
+    .map_err(|e| format!("{}\n  [{}]", e, ev))
+}
+
+/// prefix 是否为 **Node 安装目录**（含 node_modules/npm）。
+///
+/// 为什么单独判定：把包 --prefix 装进 Node 自身，通常需要管理员权限，
+/// 且会让 npm 遍历自身庞大的依赖树；现场那条栈溢出无法本地复现，
+/// 故此处**只回传证据**、不擅自改变语义（丢弃 prefix 可能装到别的前缀，
+/// 反而制造「装了但检测不到」）。
+pub fn is_node_install_prefix(p: &Path) -> bool {
+    p.join("node_modules").join("npm").is_dir()
+}
+/// 剥掉 Windows verbatim / device 命名空间前缀 —— **交给外部工具（npm / node）前必须做**。
+///
+/// ## 为什么必须有（2026-09-14 真实事故，附 npm debug log 证据）
+///   现场：Windows 用户升级内核报 `npm error Maximum call stack size exceeded`。
+///   npm debug log 的 argv 显示我们传的是：
+///       --prefix "\\?\C:\Users\Administrator\AppData\Roaming\npm"
+///   而 `npm prefix -g` 对同一目录给的是干净形式（无前缀）。
+///   栈指向 `@npmcli/arborist` 的 `realpathCached` **无限递归** ——
+///   该函数在 verbatim 前缀路径上不收敛（node:path resolve 不收敛）。
+///
+///   来源：Rust 的 `std::fs::canonicalize()` 在 Windows 上**总是**返回 verbatim 形式；
+///   而 `global_prefix_for` 按组件重建前缀时把它原样带上。
+///
+/// ## 规则
+///   \\?\UNC\server\share -> \\server\share（UNC 段大小写不敏感）
+///   \\?\C:\x             -> C:\x
+///   \.\C:\x             -> C:\x
+///   其它                             原样返回（非 Windows 路径不受影响）
+pub fn strip_verbatim(s: &str) -> String {
+    // concat! 拼出「以反斜杠结尾」的字面量（raw string 不能以反斜杠结尾）
+    const V: &str = concat!(r"\\?", "\\");
+    const VU: &str = concat!(r"\\?\UNC", "\\");
+    const D: &str = concat!(r"\\.", "\\");
+    if s.len() >= VU.len() && s.is_char_boundary(VU.len()) && s[..VU.len()].eq_ignore_ascii_case(VU) {
+        return format!("{}{}", r"\\", &s[VU.len()..]);
+    }
+    if let Some(r) = s.strip_prefix(V) {
+        return r.to_string();
+    }
+    if let Some(r) = s.strip_prefix(D) {
+        return r.to_string();
+    }
+    s.to_string()
+}
+
+/// 把 PathBuf 中的 verbatim 前缀剥掉（无前缀时原样返回，不做多余分配）。
+/// 单一实现：global_prefix_for 与 npm 参数构造都调它，避免两份规则分叉。
+fn simplify(p: PathBuf) -> PathBuf {
+    let s = p.to_string_lossy();
+    let cleaned = strip_verbatim(&s);
+    if cleaned == s { p } else { PathBuf::from(cleaned) }
+}
+
+/// 缓存隔离重试窗口：首次失败耗时不超过此值才重试（避免突破引导页 17 分钟预算）。
+const FAST_FAIL_RETRY: std::time::Duration = std::time::Duration::from_secs(120);
+/// 未重试时的说明——让现场知道「为什么没有第二次尝试」。
+const FAST_SKIP_NOTE: &str = "（首次失败耗时较长，未做缓存隔离重试）";
+
+/// 构造一个**全新的**临时缓存目录（用于隔离损坏的 npm 缓存）。
+fn fresh_cache_dir() -> Option<std::path::PathBuf> {
+    let d = std::env::temp_dir().join(format!("dsh-npmcache-{}", std::process::id()));
+    std::fs::create_dir_all(&d).ok()?;
+    Some(d)
+}
+
+/// 执行一次 npm install（cache 为 Some 时使用隔离缓存）。
+fn run_npm_install(
+    spec: &str,
+    prefix: Option<&Path>,
+    registry: Option<&str>,
+    cache: Option<&Path>,
+) -> Result<crate::bounded::Output, String> {
     let mut cmd = std::process::Command::new(npm_exe());
-    cmd.args(["install", "-g", "--no-audit", "--no-fund"]).arg(&spec);
-    if let Some(p) = prefix { cmd.arg("--prefix").arg(p); }
+    cmd.args(["install", "-g", "--no-audit", "--no-fund"]).arg(spec);
+    if let Some(p) = prefix { cmd.arg("--prefix").arg(simplify(p.to_path_buf())); }
     if let Some(r) = registry { if !r.is_empty() { cmd.env("npm_config_registry", r); } }
+    if let Some(c) = cache { cmd.env("npm_config_cache", c); }
     // CREATE_NO_WINDOW：GUI 进程调 npm 不弹控制台。
     // 经 bounded::prepare（**infra 原语**，与 bounded::run 同一处实现）——
     // 本文件因此不再需要平台分支（门禁 G1）。
@@ -348,12 +480,8 @@ pub fn install_version(pkg: &str, version: &str, prefix: Option<&Path>, registry
     //   实现要点：输出重定向到**临时文件**而非管道 —— 若用 Stdio::piped() 且不读取，
     //   冗长的 npm 输出（npm 会打印大量进度）填满 OS 管道缓冲区（约 64KB）后子进程会阻塞，
     //   反而制造死锁。临时文件无此问题，且便于超时后保留现场。
-    let out = run_command_bounded(cmd, NPM_INSTALL_TIMEOUT)?;
-    if out.success { return Ok(tail(&out.stdout, 500)); }
-    let code = out.code.unwrap_or_else(|| "killed".into());
-    Err(format!("npm 退出码 {}：{}", code, tail(&out.stderr, 800)))
+    run_command_bounded(cmd, NPM_INSTALL_TIMEOUT)
 }
-
 /// npm install 的时间上限。npm 在慢网下确实可能耗时数分钟，故给足预算；
 /// 但绝不无限等待 —— 超时即杀进程并如实报错（引导页据此给出重试/回退）。
 const NPM_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
@@ -530,5 +658,32 @@ mod tests {
         assert!(nv >= 15, "合法性向量过少：{}", nv);
         assert!(nc >= 8, "比较向量过少：{}", nc);
         eprintln!("版本向量通过：合法性 {} 条 / 比较 {} 条", nv, nc);
+    }
+
+    // ── 2026-09-14：verbatim 前缀剥除（真实事故的针对性回归）──
+    //   用 Windows 形状的字符串在**任意平台**断言，不必等 Windows runner ——
+    //   这正是该缺陷此前只在用户机器上暴露的补救。
+    #[test]
+    fn strips_verbatim_drive_prefix() {
+        assert_eq!(strip_verbatim("\\\\?\\C:\\Users\\x"), "C:\\Users\\x");
+    }
+
+    #[test]
+    fn strips_verbatim_unc_prefix_case_insensitively() {
+        assert_eq!(strip_verbatim("\\\\?\\UNC\\srv\\share\\x"), "\\\\srv\\share\\x");
+        assert_eq!(strip_verbatim("\\\\?\\unc\\srv\\share"), "\\\\srv\\share");
+    }
+
+    #[test]
+    fn strips_device_prefix() {
+        assert_eq!(strip_verbatim("\\\\.\\C:\\x"), "C:\\x");
+    }
+
+    #[test]
+    fn leaves_clean_paths_untouched() {
+        // 反向：干净路径**不得**被改写（否则引入新的「路径变了」问题）
+        for p in ["C:\\Users\\x", "/home/u/x", ""] {
+            assert_eq!(strip_verbatim(p), p, "不应改写: {}", p);
+        }
     }
 }
