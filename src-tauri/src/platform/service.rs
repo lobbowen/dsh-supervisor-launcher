@@ -8,7 +8,7 @@
 //! · **B1 有界性**：所有外部命令经 [`crate::bounded`]（超时即 kill）。
 //! · **幂等性**：`ensure_defined` 对已存在的定义直接返回成功。
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 pub trait ServiceControl: Send + Sync {
     /// 服务管理器种类（`systemd` / `launchagent` / `schtasks` / `none`）。
@@ -38,7 +38,7 @@ pub trait ServiceControl: Send + Sync {
     /// 返回人类可读的状态描述。**注意**：`enable` 失败不应返回 Err ——
     /// 定义已写入时仍可在 `start` 阶段拉起（并另有 `spawn_daemon` 兜底），
     /// 把「可继续」误判为「彻底失败」会让用户卡在引导页。
-    fn ensure_defined(&self, guard: &Path) -> Result<String, String>;
+    fn ensure_defined(&self, spec: &crate::platform::LaunchSpec) -> Result<String, String>;
 
     /// 请求服务管理器启动（不直接 spawn）。
     fn start(&self) -> Result<(), String>;
@@ -55,5 +55,5 @@ pub trait ServiceControl: Send + Sync {
     ///
     /// 第二实例风险由调用方规避：spawn 前已确认端口不存活，
     /// 且 spawn 后仍以「端口就绪」为唯一成功判据（而非进程是否存活）。
-    fn spawn_daemon(&self, guard: &Path) -> Result<u32, String>;
+    fn spawn_daemon(&self, spec: &crate::platform::LaunchSpec) -> Result<u32, String>;
 }

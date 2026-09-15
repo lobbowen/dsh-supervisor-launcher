@@ -9,7 +9,7 @@
 use std::path::{Path, PathBuf};
 
 use super::service::ServiceControl;
-use super::{Capabilities, Platform};
+use super::{Capabilities, LaunchSpec, Platform};
 
 pub const NAME: &str = "unsupported";
 
@@ -54,7 +54,7 @@ impl ServiceControl for Impl {
         PathBuf::from("unsupported")
     }
 
-    fn ensure_defined(&self, _guard: &Path) -> Result<String, String> {
+    fn ensure_defined(&self, _spec: &LaunchSpec) -> Result<String, String> {
         Err(format!("当前平台（{}）不支持服务定义", std::env::consts::OS))
     }
 
@@ -66,13 +66,15 @@ impl ServiceControl for Impl {
         Err(format!("当前平台（{}）不支持守卫服务管理", std::env::consts::OS))
     }
 
-    fn spawn_daemon(&self, guard: &Path) -> Result<u32, String> {
+    fn spawn_daemon(&self, spec: &LaunchSpec) -> Result<u32, String> {
         // spawn 是**平台无关**的兜底能力（进程启动本身处处可用），
         // 故这里不像服务管理那样直接拒绝 —— 但必须在文档与自检中如实反映
         // 「本平台没有原生服务管理器，只有 spawn 兜底」。
         use std::process::{Command, Stdio};
-        let child = Command::new(guard)
+        let child = Command::new(&spec.node)
+            .arg(&spec.guard)
             .arg("daemon")
+            .env("PATH", &spec.env_path)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())

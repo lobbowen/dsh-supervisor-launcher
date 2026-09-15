@@ -171,6 +171,32 @@ domain/contract/
 | **C3** | 写入必须**原子**（`tmp + rename`），读取必须容忍缺失 |
 | **C4** | 壳启动时**必须导出完整契约**（含 `catalog` + `probe`；现仅在 `latest_lts()` 成功时导出部分内容）|
 
+### 3.2b 运行期启动契约（Runtime Launch Contract，2026-09-15）
+
+**根因（实测）**：守卫是 env-node 脚本。旧实现里 Node/npm 有**四处独立推导**
+（nodeprobe / npm install / systemd ExecStart / spawn_daemon），且服务定义不绑定 node。
+nvm/fnm/volta 或 GUI 最小 PATH 下，systemd --user 的 PATH 不含 node 目录 →
+ExecStart 以 127 失败 → **内核装上了却永远拉不起来**。
+
+**契约**：壳写 ~/.dsh/supervisor/runtime.json（schema 2），**保留**内核 env-catalog 已读的旧键：
+
+| 键 | 含义 |
+|---|---|
+| nodePath / nodeVersion | Node 可执行与版本（**旧键，内核已读，不得删**）|
+| nodeBinDir / npmPath | 服务/子进程 PATH 首位；npm 绝对路径 |
+| minNode | 壳投放的最低门槛 |
+| schema / writtenBy | 契约版本与写者 |
+
+**所有者 = 壳**（R1：装壳时机器上没有内核）—— 符合 DESIGN-BOUNDARY R3-②「壳拥有定义、内核消费产物」。
+
+**消费面（缺一不可）**：
+- 内核安装：core.rs 用契约里的**绝对 npm** + PATH（不再裸 npm）；
+- 服务定义：三平台 ensure_defined 显式绑定 node（systemd ExecStart=node+guard+daemon 且 Environment=PATH=…；launchd ProgramArguments=[node,guard,daemon] 且 EnvironmentVariables.PATH；Windows 包装脚本注入 PATH）；
+- spawn 兜底：spawn_daemon 用 node + guard + env PATH；
+- 端口发现：壳读 ports.json 的 supervisor-api **实际**端口，等待循环**每 tick 重读**。
+
+**门禁**：src-tauri/tests/platform_launch_contract_test.rs（L-1..L-4，含反向判据）。
+
 ### 3.3 前端隔离（消除「静默死亡」）
 
 现状：`bootstrap.html` 760 行单块 JS —— 一处语法错 → **全页不执行**（已真实发生）。

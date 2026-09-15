@@ -13,7 +13,7 @@ use std::process::{Command, Stdio};
 
 use super::service::ServiceControl;
 // 必须导入 SVC_QUICK：子模块不继承父模块作用域（漏导入 → macOS 构建 E0425）。
-use super::{home_dir, Capabilities, Platform, SVC_NORMAL, SVC_QUICK};
+use super::{home_dir, Capabilities, LaunchSpec, Platform, SVC_NORMAL, SVC_QUICK};
 
 pub const NAME: &str = "macos";
 /// 守卫的 LaunchAgent 标签（**定义由本文件建立**；内核只做 enable/disable）。
@@ -179,7 +179,7 @@ impl ServiceControl for Impl {
     /// 2026-09-12（P2）：原实现「`is_file()` → 直接返回」= **只创建、永不更新**，
     ///   模板演进后老用户永远跑旧 plist。与 Linux unit / Windows 计划任务同病。
     ///   现：算期望内容 → 比对 → 一致不动、不同则重写（并重新 bootstrap）。
-    fn ensure_defined(&self, guard: &Path) -> Result<String, String> {
+    fn ensure_defined(&self, spec: &LaunchSpec) -> Result<String, String> {
         let path = self.definition_path();
         let log = home_dir()
             .join(".dsh")
@@ -197,8 +197,13 @@ impl ServiceControl for Impl {
                 .replace('<', "&lt;")
                 .replace('>', "&gt;")
         };
-        let body = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n  <key>Label</key><string>com.dsh.supervisor</string>\n  <key>ProgramArguments</key>\n  <array><string>@BIN@</string><string>daemon</string></array>\n  <key>RunAtLoad</key><true/>\n  <key>KeepAlive</key><true/>\n  <key>ProcessType</key><string>Interactive</string>\n  <key>StandardOutPath</key><string>@LOG@</string>\n  <key>StandardErrorPath</key><string>@LOG@</string>\n</dict></plist>\n"
-            .replace("@BIN@", &xml_escape(&guard.display().to_string()))
+        // 硬规则（2026-09-15）：ProgramArguments 显式 [node, guard, daemon]，并注入 PATH ——
+        //   不再依赖 launchd 的 ambient PATH 去满足 launcher 的 `#!/usr/bin/env node`
+        //   （GUI/launchd 环境常不含 nvm/fnm 的 node 目录，这正是「装了起不来」的根因）。
+        let body = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n  <key>Label</key><string>com.dsh.supervisor</string>\n  <key>ProgramArguments</key>\n  <array><string>@NODE@</string><string>@BIN@</string><string>daemon</string></array>\n  <key>EnvironmentVariables</key><dict><key>PATH</key><string>@PATH@</string></dict>\n  <key>RunAtLoad</key><true/>\n  <key>KeepAlive</key><true/>\n  <key>ProcessType</key><string>Interactive</string>\n  <key>StandardOutPath</key><string>@LOG@</string>\n  <key>StandardErrorPath</key><string>@LOG@</string>\n</dict></plist>\n"
+            .replace("@NODE@", &xml_escape(&spec.node.display().to_string()))
+            .replace("@BIN@", &xml_escape(&spec.guard.display().to_string()))
+            .replace("@PATH@", &xml_escape(&spec.env_path))
             .replace("@LOG@", &xml_escape(&log.display().to_string()));
         // ── 内容比对：决定「新写」「重写」还是「不动」──
         let existing = std::fs::read_to_string(&path).ok();
@@ -276,9 +281,12 @@ impl ServiceControl for Impl {
         .map(|_| ())
     }
 
-    fn spawn_daemon(&self, guard: &Path) -> Result<u32, String> {
-        let child = Command::new(guard)
+    fn spawn_daemon(&self, spec: &LaunchSpec) -> Result<u32, String> {
+        // 显式用契约里的 node 执行内核 launcher（不再依赖 ambient PATH 的 env node）。
+        let child = Command::new(&spec.node)
+            .arg(&spec.guard)
             .arg("daemon")
+            .env("PATH", &spec.env_path)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())

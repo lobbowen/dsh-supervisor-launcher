@@ -4,7 +4,13 @@
 
 ## [未发布]
 
-（下一版本待记）
+### 运行期启动契约：修「内核装上却永远拉不起来」（Phase 1）
+
+- 新增 runtime.json（schema 2）由壳写、内核读；node/nodeBinDir/npmPath + 保留旧键（nodePath/nodeVersion/minNode）；
+- 服务定义三平台显式绑定 Node + PATH（systemd ExecStart=node+guard / launchd ProgramArguments / Windows 包装脚本注入 PATH）；
+- 内核安装改用契约里的绝对 npm + PATH；spawn 兜底用 node+guard+env PATH；
+- 端点从 ports.json 的 supervisor-api **实际**值发现，等待循环每 tick 重读；
+- 门禁：tests/platform_launch_contract_test.rs（L-1..L-4，含反向判据）。
 
 ## [1.1.0]（2026-09-14）
 

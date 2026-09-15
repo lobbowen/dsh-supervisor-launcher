@@ -431,7 +431,19 @@ fn run_npm_install(
     registry: Option<&str>,
     cache: Option<&Path>,
 ) -> Result<crate::bounded::Output, String> {
-    let mut cmd = std::process::Command::new(npm_exe());
+    // 单一事实源：优先用运行期契约里的**绝对 npm** 与 PATH（不再依赖 ambient PATH 的裸名）。
+    //   根因同守卫拉起：GUI/服务环境的 PATH 常不含 nvm/fnm 的 npm。
+    let (npm_bin, env_path) = match crate::runtime_contract::read_node() {
+        Some(rt) if rt.npm.is_file() => (
+            rt.npm,
+            Some(crate::runtime_contract::env_path(&rt.node_bin_dir)),
+        ),
+        _ => (std::path::PathBuf::from(npm_exe()), None),
+    };
+    let mut cmd = std::process::Command::new(&npm_bin);
+    if let Some(p) = &env_path {
+        cmd.env("PATH", p);
+    }
     cmd.args(["install", "-g", "--no-audit", "--no-fund"]).arg(spec);
     if let Some(p) = prefix { cmd.arg("--prefix").arg(simplify(p.to_path_buf())); }
     if let Some(r) = registry { if !r.is_empty() { cmd.env("npm_config_registry", r); } }

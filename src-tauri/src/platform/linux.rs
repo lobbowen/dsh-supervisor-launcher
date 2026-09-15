@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use super::service::ServiceControl;
-use super::{home_dir, user_name, Capabilities, Platform, SVC_NORMAL, SVC_QUICK};
+use super::{home_dir, user_name, Capabilities, LaunchSpec, Platform, SVC_NORMAL, SVC_QUICK};
 
 pub const NAME: &str = "linux";
 
@@ -198,7 +198,7 @@ impl ServiceControl for Impl {
     ///     · 不存在 → 写入（原行为）；
     ///     · 存在但内容不同 → **重写**并 reload（自愈，使模板修复能触达用户）；
     ///     · 存在且一致 → 不触碰（真正的幂等，避免每次启动都写盘/reload）。
-    fn ensure_defined(&self, guard: &Path) -> Result<String, String> {
+    fn ensure_defined(&self, spec: &LaunchSpec) -> Result<String, String> {
         let path = self.definition_path();
 // 模板内嵌（不依赖外部 systemd/*.service 文件）。
         //
@@ -215,8 +215,13 @@ impl ServiceControl for Impl {
         //
         //   注意：引号写在**值内部**（systemd 需要它来界定第一个参数），
         //   这与给 Rust args 加引号不同 —— 后者只会被原样作为路径的一部分。
-        let exec_start = format!("\"{}\" daemon", guard.display());
-        let body = "[Unit]\nDescription=dsh-supervisor - DSH lifecycle guard\nAfter=network.target\nStartLimitIntervalSec=600\nStartLimitBurst=3\n\n[Service]\nType=simple\nExecStart=@EXEC@\nRestart=always\nRestartSec=5\nKillMode=process\n\n[Install]\nWantedBy=default.target\n"
+        // 硬规则（2026-09-15）：服务定义必须**显式绑定 Node** —— 内核 launcher 是
+        //   `#!/usr/bin/env node`，而 systemd --user 的 PATH 常不含 nvm/fnm 的 node 目录
+        //   （实测：本机 systemd PATH 无 ~/.nvm/.../bin，unit 以 127 失败、守卫永不启动）。
+        //   故 ExecStart 用契约里的绝对 node，并以 Environment 注入含 nodeBinDir 的 PATH。
+        let exec_start = format!("\"{}\" \"{}\" daemon", spec.node.display(), spec.guard.display());
+        let body = "[Unit]\nDescription=dsh-supervisor - DSH lifecycle guard\nAfter=network.target\nStartLimitIntervalSec=600\nStartLimitBurst=3\n\n[Service]\nType=simple\nEnvironment=\"PATH=@PATH@\"\nExecStart=@EXEC@\nRestart=always\nRestartSec=5\nKillMode=process\n\n[Install]\nWantedBy=default.target\n"
+            .replace("@PATH@", &spec.env_path)
             .replace("@EXEC@", &exec_start);
         // ── 内容比对：决定「新写」「重写」还是「不动」──
         let existing = std::fs::read_to_string(&path).ok();
@@ -286,9 +291,12 @@ impl ServiceControl for Impl {
         .map(|_| ())
     }
 
-    fn spawn_daemon(&self, guard: &Path) -> Result<u32, String> {
-        let child = Command::new(guard)
+    fn spawn_daemon(&self, spec: &LaunchSpec) -> Result<u32, String> {
+        // 显式用契约里的 node 执行内核 launcher（不再依赖 ambient PATH 的 env node）。
+        let child = Command::new(&spec.node)
+            .arg(&spec.guard)
             .arg("daemon")
+            .env("PATH", &spec.env_path)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())

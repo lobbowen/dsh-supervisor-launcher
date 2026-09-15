@@ -53,6 +53,13 @@ pub async fn node_status(app: tauri::AppHandle) -> serde_json::Value {
         }
         o
     };
+    // 契约落盘：只要探测到可用 Node 就写运行期契约（**不论是否由壳安装**）——
+    //   否则「用户本机已有 Node」的机器永远没有 runtime.json，拉起守卫时无从绑定 node。
+    if let (Some(p), Some(v)) = (out.path.as_ref(), out.version.as_ref()) {
+        if let Some(rt) = crate::runtime_contract::derive(p, v) {
+            crate::runtime_contract::write(&rt);
+        }
+    }
     o["probing"] = serde_json::json!(!out.finished);
     // 明确失败原因（到硬上限 / worker 异常）。前端据此立即给出可操作结论，
     // 而非等自己的预算耗尽后只报一句「超时」。
@@ -240,6 +247,8 @@ pub async fn core_plan(app: tauri::AppHandle) -> ShellResult<serde_json::Value> 
 ///   - 如实回传成败（含退出码/stderr），绝不吞错。
 #[tauri::command]
 pub async fn core_apply(app: tauri::AppHandle) -> ShellResult<serde_json::Value> {
+    // 契约先行：安装内核需要 npm，而 npm 的单一来源是运行期契约（缺失则解析并落盘）。
+    let _ = crate::runtime_contract::ensure();
     let pkg = crate::core::package_name()?;
     let prefix = crate::domain::coreloc::locate_core(&app).and_then(|b| crate::core::global_prefix_for(&b));
     let origins = crate::core::registry_origins();
@@ -314,7 +323,7 @@ pub async fn guard_start(app: tauri::AppHandle) -> ShellResult<serde_json::Value
 #[tauri::command]
 pub async fn guard_ready() -> serde_json::Value {
     tauri::async_runtime::spawn_blocking(|| {
-        let port = crate::env::api_port();
+        let port = crate::env::current_api_port();
         if !crate::domain::guardctl::is_alive(port) { return serde_json::json!({"ready": false, "reason": "tcp", "port": port}); }
         match crate::domain::localhttp::http_get_local(port, "/healthz", std::time::Duration::from_secs(3)) {
             Some((code, _)) if (200..300).contains(&code) => serde_json::json!({"ready": true, "port": port}),

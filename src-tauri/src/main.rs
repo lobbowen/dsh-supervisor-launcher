@@ -19,6 +19,8 @@ mod mirror;
 // 根因：探测内含无界阻塞系统调用，且被命令 await —— 详见本文件根因说明。
 mod nodeprobe;
 mod node;
+// 运行期启动契约（2026-09-15）：Node/npm 的**单一事实源**；安装/服务定义/spawn 都只读它。
+mod runtime_contract;
 // 平台适配层（2026-09-11）：**全仓唯一的平台分支所在地**。
 // 它接管了原先分居两处的「服务定义」（service.rs）与「服务启停」（原本文件），
 // 消除「同一概念分居两层」的分层违规 —— 加平台不再需要改两处不同层。
@@ -238,7 +240,13 @@ fn cli_service_plan() -> i32 {
         eprintln!("无法建立：未定位到守卫可执行文件（先安装内核）");
         return 2;
     };
-    match platform::service().ensure_defined(&g) {
+    // 运行期契约：服务定义需要的 node/npm 单一事实源（缺失则解析并落盘）。
+    let Some(rt) = runtime_contract::ensure() else {
+        eprintln!("无法建立：Node 运行环境未就绪（无法解析 node/npm）");
+        return 2;
+    };
+    let spec = platform::LaunchSpec::from_runtime(&rt, g);
+    match platform::service().ensure_defined(&spec) {
         Ok(desc) => {
             println!();
             println!("建立结果      = {}", desc);
