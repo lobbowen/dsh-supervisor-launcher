@@ -6,6 +6,21 @@
 
 （下一版本待记）
 
+## [1.1.4]（2026-09-15）
+
+### 修复：Windows 守卫「从未被执行」的三处加固
+
+真机现象：状态目录里 `config.json`/`ports.json`/`guard.log` **一个都没建** —— 而 `cmdDaemon`
+第一行就是 `mkdirSync(SUPERVISOR_DIR)`，说明守卫进程**从未被启动**（不是启动后崩）。
+
+- 包装脚本正文改 **ASCII**：绝对路径经 `%LOCALAPPDATA%`/`%APPDATA%`/`%ProgramFiles%` 引用。
+  非 ASCII 用户名（中文）写进 `.cmd` 会被 `cmd` 按 OEM 码页误解码 → node/guard 找不到；
+- 包装脚本与兜底 spawn **全程落日志**（`guard-task.log` / `guard-spawn.log`，含 exit code）——
+  下次失败必有证据，不再「什么都没有」；
+- 修 `stop()`：守卫是 `node.exe`，旧的 `taskkill /IM dsh-supervisor.exe` 根本杀不掉 →
+  残留进程/锁使后续启动被 `guard.lock` 拒绝；改为按命令行精确杀 dsh-supervisor 的 node；
+- 门禁：K-10（ASCII/日志/杀进程）、L-1 判据同步。
+
 ## [1.1.3]（2026-09-15）
 
 ### 修复：Windows 上守卫从未被执行 —— 内核永远拉不起来
