@@ -12,6 +12,15 @@
 - 端点从 ports.json 的 supervisor-api **实际**值发现，等待循环每 tick 重读；
 - 门禁：tests/platform_launch_contract_test.rs（L-1..L-4，含反向判据）。
 
+### 统一更新决策模型（Phase 2）
+
+问题 1：桌面自更新与内核更新是两套检测/形状，前端表现为「两套流程」。
+- 新增 src/update_plan.rs：统一形状 artifact/current/latest/available/channel/source/error + channel 词表；
+- core.rs::build_plan 与 shell_update_check 都经 update_plan::unified（保留旧字段向后兼容前端）；
+- 内核侧新增 platform/runtime-contract.js（壳写内核读）：runNpmInstall 用契约的绝对 npm + PATH，
+  env-catalog 读同一契约 —— 内核自身执行 npm 与壳**同源**；
+- 门禁：update_pipeline_test（U-1..U-3）、runtime-contract-test（R-1..R-5）。
+
 ## [1.1.0]（2026-09-14）
 
 ### 内核零回退（产品硬规则落地）

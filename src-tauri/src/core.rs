@@ -499,14 +499,22 @@ pub fn build_plan(installed: Option<String>, latest: Result<(String, String), St
         (Some(i), Some(l)) => if semver_cmp(l, i) > 0 { "upgrade" } else { "none" },
         _ => "unknown",
     };
-    serde_json::json!({
-        "installed": installed,
-        "latest": latest_v,
-        "action": action,
-        "updateAvailable": action == "upgrade",
-        "registry": origin,
-        "error": err,
-    })
+    // 统一更新决策形状（与桌面自更新同一组键）；保留原字段向后兼容前端。
+    let origin_out = origin.clone();
+    let mut extra = serde_json::Map::new();
+    extra.insert("installed".into(), serde_json::json!(installed.clone()));
+    extra.insert("action".into(), serde_json::json!(action));
+    extra.insert("updateAvailable".into(), serde_json::json!(action == "upgrade"));
+    extra.insert("registry".into(), serde_json::json!(origin));
+    crate::update_plan::unified(
+        "kernel",
+        installed,
+        latest_v,
+        action == "upgrade" || action == "install",
+        origin_out,
+        err,
+        extra,
+    )
 }
 
 /// 无头自检输出（--core-plan 用，便于发布后冒烟验证，无需 GUI）。

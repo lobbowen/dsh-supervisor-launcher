@@ -31,6 +31,8 @@ mod domain;
 mod platform;
 // 桌面壳自更新 + 落盘日志 + 身份上报（2026-09-11）
 mod update;
+// 统一更新决策模型（2026-09-15）：壳与内核**同一形状**（问题 1 的机制层统一）。
+mod update_plan;
 
 use std::path::PathBuf;
 use std::sync::Mutex;
