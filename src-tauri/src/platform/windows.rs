@@ -42,6 +42,26 @@ fn watchdog_script(spec: &LaunchSpec) -> String {
     ].join("\r\n")
 }
 
+/// 守卫进程的可执行命令行（**不含** cmd /C 外层引号）。
+///
+/// Windows 上守卫是 npm 包内**无扩展名的 Node 脚本**；cmd 不能执行无扩展名文件、也不认 shebang，
+///   故必须显式用契约里的 node：`"<node>" "<guard>" daemon`。
+///   仅当守卫**确是** .cmd/.bat 垫片时才直接执行它（node 无法解析 cmd 脚本）。
+fn guard_argv(spec: &LaunchSpec) -> String {
+    let g = spec.guard.display().to_string();
+    let is_cmd = spec
+        .guard
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| { let e = e.to_ascii_lowercase(); e == "cmd" || e == "bat" })
+        .unwrap_or(false);
+    if is_cmd {
+        format!("\"{}\" daemon", g)
+    } else {
+        format!("\"{}\" \"{}\" daemon", spec.node.display(), g)
+    }
+}
+
 /// PowerShell 单引号字符串（内部单引号翻倍；反斜杠为字面量，无需转义）。
 fn ps_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
@@ -364,11 +384,12 @@ impl ServiceControl for Impl {
         if let Some(dir) = wrapper.parent() {
             std::fs::create_dir_all(dir).map_err(|e| format!("创建状态目录失败: {}", e))?;
         }
-        // 硬规则（2026-09-15）：包装脚本先注入 PATH（nodeBinDir 首位）再执行 npm 垫片 ——
-        //   计划任务/登录自启的 ambient PATH 不含 nvm/fnm 的 node 目录，
-        //   cmd 垫片找不到 node 就是「装了起不来」。
+        // 硬规则（2026-09-15）：包装脚本先注入 PATH（nodeBinDir 首位），再**经 node 显式执行守卫**。
+        //   关键：Windows 上守卫是 npm 包内**无扩展名的 Node 脚本**（bin/dsh-supervisor），
+        //   cmd **不能执行无扩展名文件、也不认 shebang** —— 旧写法 "<guard>" daemon 必然失败，
+        //   而 schtasks /Run 只报「任务已触发」→ 表现为「服务管理器错误：无 但守卫永不就绪」。
         let node_dir = spec.node.parent().map(|p| p.to_path_buf()).unwrap_or_default();
-        let shim = format!("@echo off\r\nset \"PATH={};%PATH%\"\r\n\"{}\" daemon\r\n", node_dir.display(), spec.guard.display());
+        let shim = format!("@echo off\r\nset \"PATH={};%PATH%\"\r\nset \"DSH_SUPERVISOR_HOME={}\"\r\n{}\r\n", node_dir.display(), spec.state_root.display(), guard_argv(spec));
         // ── 内容比对（P2 自愈）：任务在 + 包装脚本内容一致 → 才算「已是最新」。
         //    否则继续往下走 `/Create /F` 重建（覆盖语义）。
         let wrapper_current = std::fs::read_to_string(&wrapper).ok().as_deref() == Some(shim.as_str());
@@ -471,13 +492,15 @@ impl ServiceControl for Impl {
         //   症状是「守卫启动失败」，且错误信息难以解读（cmd 报路径语法错误）。
         //
         //   正确形态（cmd 的经典引号规则）：整个命令用**外层引号**包住，
-        //   路径自身再包一层 —— 即 `cmd /C ""<path>" daemon"`。
+        //   各参数自身再包一层 —— 即 `cmd /C ""<node>" "<guard>" daemon"`。
         //   用 raw_arg 直接给出该形式，避免 Rust 再次转义。
-        let line = format!("\"\"{}\" daemon\"", spec.guard.display());
+        // 2026-09-15 修复：guard_argv 对无扩展名的 Node 脚本**显式用 node 执行**（见其说明）。
+        let line = format!("\"{}\"", guard_argv(spec));
         let child = Command::new("cmd")
             .arg("/C")
             .raw_arg(line)
             .env("PATH", &spec.env_path)
+            .env("DSH_SUPERVISOR_HOME", &spec.state_root)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())

@@ -197,3 +197,15 @@ fn k8_reverse_not_vacuous() {
     assert!(!state_root_is_independent(old), "K-8 反向失败：旧 ~/.dsh 形态被判为独立");
     assert!(state_root_is_independent(&read("src/env.rs")), "K-8 反向失败：当前实现未判合格");
 }
+// ── K-9：状态根随启动注入（单一事实源，防壳/内核各自推导分叉）──
+#[test]
+fn k9_state_root_injected_into_launch() {
+    let m = read("src/platform/mod.rs");
+    assert!(m.contains("pub state_root: std::path::PathBuf"), "K-9 失败：LaunchSpec 缺 state_root");
+    assert!(m.contains("state_root: crate::env::state_root()"), "K-9 失败：未从壳解析状态根");
+    for f in ["src/platform/linux.rs", "src/platform/macos.rs", "src/platform/windows.rs"] {
+        let s = read(f);
+        assert!(s.contains("DSH_SUPERVISOR_HOME"), "K-9 失败：{} 未注入 DSH_SUPERVISOR_HOME", f);
+        assert!(s.contains("spec.state_root"), "K-9 失败：{} 未使用壳解析的状态根", f);
+    }
+}
