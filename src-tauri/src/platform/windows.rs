@@ -48,7 +48,7 @@ fn watchdog_script(spec: &LaunchSpec) -> String {
 ///   故必须显式用契约里的 node：`"<node>" "<guard>" daemon`。
 ///   仅当守卫**确是** .cmd/.bat 垫片时才直接执行它（node 无法解析 cmd 脚本）。
 fn guard_argv(spec: &LaunchSpec) -> String {
-    let g = spec.guard.display().to_string();
+    let g = win_path_expr(&spec.guard);
     let is_cmd = spec
         .guard
         .extension()
@@ -58,8 +58,28 @@ fn guard_argv(spec: &LaunchSpec) -> String {
     if is_cmd {
         format!("\"{}\" daemon", g)
     } else {
-        format!("\"{}\" \"{}\" daemon", spec.node.display(), g)
+        format!("\"{}\" \"{}\" daemon", win_path_expr(&spec.node), g)
     }
+}
+
+/// 把绝对路径的已知前缀替换为 cmd 环境变量引用（%LOCALAPPDATA% 等），使 **.cmd 正文保持 ASCII**。
+///
+/// 为什么必须：用户名/路径可含非 ASCII（中文用户名常见），而 cmd 读 .cmd **正文**时按 OEM 码页解码，
+///   Rust 写出的是 UTF-8 → 路径乱码 → node/guard 找不到 → 守卫从未执行（表现：状态文件一个都没建）。
+///   用 %ENV% 引用后正文全 ASCII；cmd 在**命令行**（Unicode）展开，非 ASCII 用户名也能正确传参。
+fn win_path_expr(p: &std::path::Path) -> String {
+    let ps = p.display().to_string();
+    for var in ["LOCALAPPDATA", "APPDATA", "ProgramFiles", "ProgramFiles(x86)", "USERPROFILE"] {
+        if let Some(v) = std::env::var_os(var) {
+            let prefix = v.to_string_lossy().to_string();
+            if !prefix.is_empty() {
+                if let Some(rest) = ps.strip_prefix(&prefix) {
+                    return format!("%{}%{}", var, rest);
+                }
+            }
+        }
+    }
+    ps
 }
 
 /// PowerShell 单引号字符串（内部单引号翻倍；反斜杠为字面量，无需转义）。
@@ -389,7 +409,20 @@ impl ServiceControl for Impl {
         //   cmd **不能执行无扩展名文件、也不认 shebang** —— 旧写法 "<guard>" daemon 必然失败，
         //   而 schtasks /Run 只报「任务已触发」→ 表现为「服务管理器错误：无 但守卫永不就绪」。
         let node_dir = spec.node.parent().map(|p| p.to_path_buf()).unwrap_or_default();
-        let shim = format!("@echo off\r\nset \"PATH={};%PATH%\"\r\nset \"DSH_SUPERVISOR_HOME={}\"\r\n{}\r\n", node_dir.display(), spec.state_root.display(), guard_argv(spec));
+        let shim = {
+            // 正文保持 **ASCII**（路径经 %ENV% 引用）+ 全程落日志：
+            //   即使 node/guard 启动失败，guard-task.log 也会留下「wrapper 是否执行、node 报了什么」。
+            let log = win_path_expr(&crate::env::supervisor_dir().join("guard-task.log"));
+            format!(
+                "@echo off\r\nset \"DSH_SUPERVISOR_HOME={}\"\r\nset \"PATH={};%PATH%\"\r\necho [guard-task] start %DATE% %TIME% >> \"{}\"\r\n{} >> \"{}\" 2>&1\r\necho [guard-task] exit %ERRORLEVEL% >> \"{}\"\r\n",
+                win_path_expr(&spec.state_root),
+                win_path_expr(&node_dir),
+                log,
+                guard_argv(spec),
+                log,
+                log
+            )
+        };
         // ── 内容比对（P2 自愈）：任务在 + 包装脚本内容一致 → 才算「已是最新」。
         //    否则继续往下走 `/Create /F` 重建（覆盖语义）。
         let wrapper_current = std::fs::read_to_string(&wrapper).ok().as_deref() == Some(shim.as_str());
@@ -475,8 +508,18 @@ impl ServiceControl for Impl {
             Command::new("schtasks").args(["/End", "/TN", GUARD_TASK]),
             SVC_NORMAL,
         );
+        // 守卫是 `node.exe`（**不是** dsh-supervisor.exe）——旧的按镜像名 taskkill 根本杀不掉它，
+        //   会残留进程/锁，导致后续启动被 guard.lock 拒绝（「永远拉不起来」）。
+        //   按**命令行**精确匹配 dsh-supervisor 的 node 进程再杀，绝不误杀 DSH 自身的 node。
         crate::bounded::run_lossy(
-            Command::new("taskkill").args(["/F", "/IM", "dsh-supervisor.exe"]),
+            Command::new("powershell").args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                "Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" | Where-Object { $_.CommandLine -like '*dsh-supervisor*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }",
+            ]),
             SVC_NORMAL,
         );
         Ok(())
@@ -496,17 +539,32 @@ impl ServiceControl for Impl {
         //   用 raw_arg 直接给出该形式，避免 Rust 再次转义。
         // 2026-09-15 修复：guard_argv 对无扩展名的 Node 脚本**显式用 node 执行**（见其说明）。
         let line = format!("\"{}\"", guard_argv(spec));
-        let child = Command::new("cmd")
-            .arg("/C")
+        let dir = crate::env::supervisor_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        // 兜底 spawn 的输出落 guard-spawn.log：失败时能看到 node/cmd 到底报了什么。
+        let log_path = dir.join("guard-spawn.log");
+        let mut cmd = Command::new("cmd");
+        cmd.arg("/C")
             .raw_arg(line)
             .env("PATH", &spec.env_path)
             .env("DSH_SUPERVISOR_HOME", &spec.state_root)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
-            .spawn()
-            .map_err(|e| format!("直接拉起守卫失败: {}", e))?;
+            .stdin(Stdio::null());
+        match std::fs::File::create(&log_path) {
+            Ok(f) => {
+                let err = f.try_clone();
+                cmd.stdout(Stdio::from(f));
+                match err {
+                    Ok(e) => { cmd.stderr(Stdio::from(e)); }
+                    Err(_) => { cmd.stderr(Stdio::null()); }
+                }
+            }
+            Err(_) => {
+                cmd.stdout(Stdio::null());
+                cmd.stderr(Stdio::null());
+            }
+        }
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        let child = cmd.spawn().map_err(|e| format!("直接拉起守卫失败: {}", e))?;
         Ok(child.id())
     }
 }

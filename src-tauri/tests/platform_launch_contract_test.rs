@@ -72,7 +72,7 @@ fn l1_windows_executes_guard_via_node() {
 fn windows_guard_argv_uses_node(src: &str) -> bool {
     let f = match src.find("fn guard_argv") { Some(i) => &src[i..], None => return false };
     let body = match f.find("\n}") { Some(i) => &f[..i], None => f };
-    body.contains("spec.node.display()")
+    body.contains("spec.node")
 }
 
 #[test]
