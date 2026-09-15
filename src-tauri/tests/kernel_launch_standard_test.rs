@@ -86,7 +86,7 @@ fn k4_platforms_uniform() {
     for (f, node, path) in [
         ("src/platform/linux.rs", "spec.node", "@PATH@"),
         ("src/platform/macos.rs", "@NODE@", "@PATH@"),
-        ("src/platform/windows.rs", "node_dir", "%PATH%"),
+        ("src/platform/windows.rs", "node_dir", "$env:PATH"),
     ] {
         let s = read(f);
         let missing = has_all(&s, &[node, path, "daemon"]);
