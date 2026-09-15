@@ -220,8 +220,9 @@ impl ServiceControl for Impl {
         //   （实测：本机 systemd PATH 无 ~/.nvm/.../bin，unit 以 127 失败、守卫永不启动）。
         //   故 ExecStart 用契约里的绝对 node，并以 Environment 注入含 nodeBinDir 的 PATH。
         let exec_start = format!("\"{}\" \"{}\" daemon", spec.node.display(), spec.guard.display());
-        let body = "[Unit]\nDescription=dsh-supervisor - DSH lifecycle guard\nAfter=network.target\nStartLimitIntervalSec=600\nStartLimitBurst=3\n\n[Service]\nType=simple\nEnvironment=\"PATH=@PATH@\"\nExecStart=@EXEC@\nRestart=always\nRestartSec=5\nKillMode=process\n\n[Install]\nWantedBy=default.target\n"
+        let body = "[Unit]\nDescription=dsh-supervisor - DSH lifecycle guard\nAfter=network.target\nStartLimitIntervalSec=600\nStartLimitBurst=3\n\n[Service]\nType=simple\nEnvironment=\"PATH=@PATH@\"\nEnvironment=\"DSH_SUPERVISOR_HOME=@ROOT@\"\nExecStart=@EXEC@\nRestart=always\nRestartSec=5\nKillMode=process\n\n[Install]\nWantedBy=default.target\n"
             .replace("@PATH@", &spec.env_path)
+            .replace("@ROOT@", &spec.state_root.display().to_string())
             .replace("@EXEC@", &exec_start);
         // ── 内容比对：决定「新写」「重写」还是「不动」──
         let existing = std::fs::read_to_string(&path).ok();
@@ -297,6 +298,7 @@ impl ServiceControl for Impl {
             .arg(&spec.guard)
             .arg("daemon")
             .env("PATH", &spec.env_path)
+            .env("DSH_SUPERVISOR_HOME", &spec.state_root)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())

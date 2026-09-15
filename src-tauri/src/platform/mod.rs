@@ -80,15 +80,20 @@ pub struct LaunchSpec {
     pub guard: std::path::PathBuf,
     /// 服务/子进程应继承的 PATH（nodeBinDir 必在首位）。
     pub env_path: String,
+    /// 产品状态根：**必须**注入服务/spawn 环境（`DSH_SUPERVISOR_HOME`），
+    ///   否则壳与内核各自推导状态根（XDG 环境差异）→ 契约/端口写到两个目录 → 永远拉不起来。
+    pub state_root: std::path::PathBuf,
 }
 
 impl LaunchSpec {
     /// 由运行期契约 + 已定位守卫组装（PATH 经 runtime_contract 单一实现）。
+    /// 状态根取壳进程解析值（单一事实源），随服务定义与 spawn 注入内核。
     pub fn from_runtime(rt: &crate::runtime_contract::NodeRuntime, guard: std::path::PathBuf) -> Self {
         LaunchSpec {
             node: rt.node.clone(),
             guard,
             env_path: crate::runtime_contract::env_path(&rt.node_bin_dir),
+            state_root: crate::env::state_root(),
         }
     }
 }

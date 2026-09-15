@@ -202,10 +202,11 @@ impl ServiceControl for Impl {
         // 硬规则（2026-09-15）：ProgramArguments 显式 [node, guard, daemon]，并注入 PATH ——
         //   不再依赖 launchd 的 ambient PATH 去满足 launcher 的 `#!/usr/bin/env node`
         //   （GUI/launchd 环境常不含 nvm/fnm 的 node 目录，这正是「装了起不来」的根因）。
-        let body = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n  <key>Label</key><string>com.dsh.supervisor</string>\n  <key>ProgramArguments</key>\n  <array><string>@NODE@</string><string>@BIN@</string><string>daemon</string></array>\n  <key>EnvironmentVariables</key><dict><key>PATH</key><string>@PATH@</string></dict>\n  <key>RunAtLoad</key><true/>\n  <key>KeepAlive</key><true/>\n  <key>ProcessType</key><string>Interactive</string>\n  <key>StandardOutPath</key><string>@LOG@</string>\n  <key>StandardErrorPath</key><string>@LOG@</string>\n</dict></plist>\n"
+        let body = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n  <key>Label</key><string>com.dsh.supervisor</string>\n  <key>ProgramArguments</key>\n  <array><string>@NODE@</string><string>@BIN@</string><string>daemon</string></array>\n  <key>EnvironmentVariables</key><dict><key>PATH</key><string>@PATH@</string><key>DSH_SUPERVISOR_HOME</key><string>@ROOT@</string></dict>\n  <key>RunAtLoad</key><true/>\n  <key>KeepAlive</key><true/>\n  <key>ProcessType</key><string>Interactive</string>\n  <key>StandardOutPath</key><string>@LOG@</string>\n  <key>StandardErrorPath</key><string>@LOG@</string>\n</dict></plist>\n"
             .replace("@NODE@", &xml_escape(&spec.node.display().to_string()))
             .replace("@BIN@", &xml_escape(&spec.guard.display().to_string()))
             .replace("@PATH@", &xml_escape(&spec.env_path))
+            .replace("@ROOT@", &xml_escape(&spec.state_root.display().to_string()))
             .replace("@LOG@", &xml_escape(&log.display().to_string()));
         // ── 内容比对：决定「新写」「重写」还是「不动」──
         let existing = std::fs::read_to_string(&path).ok();
@@ -289,6 +290,7 @@ impl ServiceControl for Impl {
             .arg(&spec.guard)
             .arg("daemon")
             .env("PATH", &spec.env_path)
+            .env("DSH_SUPERVISOR_HOME", &spec.state_root)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())

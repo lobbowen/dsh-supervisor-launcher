@@ -57,6 +57,24 @@ fn l1_windows_wrapper_binds_node() {
     assert!(missing.is_empty(), "L-1 失败：Windows 包装脚本未注入 Node PATH，缺 {:?}", missing);
 }
 
+/// Windows 必须**显式用 node 执行守卫**（无扩展名 Node 脚本，cmd 不能执行）。
+#[test]
+fn l1_windows_executes_guard_via_node() {
+    let src = read("src/platform/windows.rs");
+    assert!(src.contains("fn guard_argv"), "L-1 失败：缺 guard_argv（Windows 执行器）");
+    assert!(windows_guard_argv_uses_node(&src),
+        "L-1 失败：Windows 未显式用 node 执行守卫 —— schtasks /Run 会成功但守卫永不起来");
+    // 反向：旧形态（guard_argv 只用 guard，不含 node）必须被判为不合格
+    let old = "fn guard_argv(spec: &LaunchSpec) -> String { spec.guard only }";
+    assert!(!windows_guard_argv_uses_node(old), "L-1 反向失败：裸守卫形态被判为合格（门禁空转）");
+}
+
+fn windows_guard_argv_uses_node(src: &str) -> bool {
+    let f = match src.find("fn guard_argv") { Some(i) => &src[i..], None => return false };
+    let body = match f.find("\n}") { Some(i) => &f[..i], None => f };
+    body.contains("spec.node.display()")
+}
+
 #[test]
 fn l1_spawn_daemon_binds_node() {
     // 三平台 spawn 兜底都必须用契约里的 node/PATH，而不是 ambient PATH。
