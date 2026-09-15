@@ -145,9 +145,56 @@ pub fn known_install_node_path() -> Option<PathBuf> {
     }
 }
 
+/// 产品状态根 schema（与内核 src/platform/state-root.js 的 SCHEMA 握手；门禁锁定）。
+pub const STATE_ROOT_SCHEMA: u32 = 1;
+
+/// 产品状态根（**独立于 DSH 的 ~/.dsh**）：`DSH_SUPERVISOR_HOME` 覆盖，否则平台默认。
+///
+/// 为什么独立：本产品**管控** DSH，把状态放在被管控对象的 ~/.dsh 下是概念错位 ——
+///   DSH 卸载/清理/迁移数据目录会把我们的 config/state/ports/logs 一并带走。
+pub fn state_root() -> PathBuf {
+    if let Ok(v) = std::env::var("DSH_SUPERVISOR_HOME") {
+        if !v.trim().is_empty() {
+            return PathBuf::from(v.trim());
+        }
+    }
+    crate::platform::current().state_root_default()
+}
+
+/// 内核状态目录（config/state/ports/logs/契约）：<状态根>/supervisor。
 pub fn supervisor_dir() -> PathBuf {
-    let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_else(|_| "/tmp".into());
-    PathBuf::from(home).join(".dsh").join("supervisor")
+    state_root().join("supervisor")
+}
+
+/// 桌面壳状态目录（identity/mirrors/shell.log）：<状态根>/shell。
+pub fn shell_dir() -> PathBuf {
+    state_root().join("shell")
+}
+
+/// 前向自愈迁移：旧位置（DSH 数据目录下）→ 产品状态根，按条目合并（不覆盖已存在文件）。
+/// 在壳启动早期调用一次；失败不阻断（下次启动再试）。
+pub fn migrate_legacy() {
+    let home = home();
+    let root = state_root();
+    for (from, to) in [
+        (home.join(".dsh").join("supervisor"), root.join("supervisor")),
+        (home.join(".dsh").join("shell"), root.join("shell")),
+    ] {
+        if !from.is_dir() {
+            continue;
+        }
+        let _ = std::fs::create_dir_all(&to);
+        if let Ok(entries) = std::fs::read_dir(&from) {
+            for e in entries.flatten() {
+                let dst = to.join(e.file_name());
+                if dst.exists() {
+                    continue;
+                }
+                let _ = std::fs::rename(e.path(), &dst);
+            }
+        }
+        let _ = std::fs::remove_dir(&from);
+    }
 }
 
 /// 读取并解析守卫配置 ~/.dsh/supervisor/config.json（serde_json，**壳读内核配置的唯一解析入口**）。
