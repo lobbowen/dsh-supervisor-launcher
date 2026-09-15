@@ -1016,7 +1016,7 @@ fn b43_windows_cmd_quoting_handles_spaces() {
 ///
 /// `schtasks /Create ... /TR <wrapper>` 的 `/TR` 值是**纯字符串**，schtasks 内部按
 /// 命令行规则解析 —— 路径含空格时若不自带引号，动作会被**截断到第一个空格**。
-/// 而 wrapper = `%USERPROFILE%\.dsh\supervisor\guard-task.cmd`，含用户名；
+/// 而 `/TR` 指向状态目录下的包装脚本（1.1.5 起为 `guard-task.ps1`），路径含 Windows 用户名；
 /// Windows 用户名**可以含空格**（如 "John Smith"）。
 ///
 /// 症状：任务创建**成功**（schtasks 不报错）但执行时找不到目标 → **登录自启静默失效**。

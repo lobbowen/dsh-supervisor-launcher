@@ -44,14 +44,14 @@ P6 就绪         readiness            healthz 200（端口 = ports.json 的 sup
 
 | 步骤 | Linux | macOS | Windows |
 |---|---|---|---|
-| 服务管理器 | systemd --user | launchd LaunchAgent | schtasks ONLOGON + 包装 .cmd |
+| 服务管理器 | systemd --user | launchd LaunchAgent | schtasks ONLOGON + 包装 `.ps1`（UTF-8 BOM） |
 | 定义文件 | `~/.config/systemd/user/dsh-supervisor.service` | `~/Library/LaunchAgents/com.dsh.supervisor.plist` | 计划任务 `DSH-Supervisor`（+ 包装脚本） |
-| 绑定 Node | `ExecStart="<node>" "<guard>" daemon` + `Environment=PATH` | `ProgramArguments=[node,guard,daemon]` + `EnvironmentVariables.PATH` | 包装脚本 `set "PATH=<nodeDir>;%PATH%"` |
+| 绑定 Node | `ExecStart="<node>" "<guard>" daemon` + `Environment=PATH` | `ProgramArguments=[node,guard,daemon]` + `EnvironmentVariables.PATH` | PowerShell 包装脚本 `$env:PATH = '<nodeDir>' + ';' + $env:PATH`，路径字面量 |
 | 启动 | `systemctl --user start` | `launchctl kickstart -k gui/<uid>/...`（失败退 bootstrap） | `schtasks /Run /TN DSH-Supervisor` |
-| 停止 | `systemctl --user stop` | `launchctl bootout gui/<uid>/...` | 停 watchdog + 停任务 + taskkill |
+| 停止 | `systemctl --user stop` | `launchctl bootout gui/<uid>/...` | 停 watchdog + 停任务 + 按命令行精确杀守卫 node（`Stop-Process`） |
 | 自愈 | `Restart=always` | `KeepAlive` | 壳拥有的 watchdog 任务 |
 | 定位候选 | PATH + `~/.npm-global/bin` + `~/.local/bin` + **core.json** | 同左 + Homebrew 落点 + **core.json** | PATH/PATHEXT + `%APPDATA%\npm` + **core.json** |
-| spawn 兜底 | `node <guard> daemon` | `node <guard> daemon` | `cmd /C ""<guard.cmd>" daemon"`（CREATE_NO_WINDOW） |
+| spawn 兜底 | `node <guard> daemon` | `node <guard> daemon` | `cmd /C ""<node>" "<guard>" daemon"`（CREATE_NO_WINDOW，字面量 Unicode 路径） |
 
 **跨平台不变量**：上表每一行，四平台都必须有实现或**显式 Unsupported**；不存在「某平台少一步」。
 
