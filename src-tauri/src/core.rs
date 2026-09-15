@@ -431,7 +431,19 @@ fn run_npm_install(
     registry: Option<&str>,
     cache: Option<&Path>,
 ) -> Result<crate::bounded::Output, String> {
-    let mut cmd = std::process::Command::new(npm_exe());
+    // 单一事实源：优先用运行期契约里的**绝对 npm** 与 PATH（不再依赖 ambient PATH 的裸名）。
+    //   根因同守卫拉起：GUI/服务环境的 PATH 常不含 nvm/fnm 的 npm。
+    let (npm_bin, env_path) = match crate::runtime_contract::read_node() {
+        Some(rt) if rt.npm.is_file() => (
+            rt.npm,
+            Some(crate::runtime_contract::env_path(&rt.node_bin_dir)),
+        ),
+        _ => (std::path::PathBuf::from(npm_exe()), None),
+    };
+    let mut cmd = std::process::Command::new(&npm_bin);
+    if let Some(p) = &env_path {
+        cmd.env("PATH", p);
+    }
     cmd.args(["install", "-g", "--no-audit", "--no-fund"]).arg(spec);
     if let Some(p) = prefix { cmd.arg("--prefix").arg(simplify(p.to_path_buf())); }
     if let Some(r) = registry { if !r.is_empty() { cmd.env("npm_config_registry", r); } }
@@ -487,14 +499,22 @@ pub fn build_plan(installed: Option<String>, latest: Result<(String, String), St
         (Some(i), Some(l)) => if semver_cmp(l, i) > 0 { "upgrade" } else { "none" },
         _ => "unknown",
     };
-    serde_json::json!({
-        "installed": installed,
-        "latest": latest_v,
-        "action": action,
-        "updateAvailable": action == "upgrade",
-        "registry": origin,
-        "error": err,
-    })
+    // 统一更新决策形状（与桌面自更新同一组键）；保留原字段向后兼容前端。
+    let origin_out = origin.clone();
+    let mut extra = serde_json::Map::new();
+    extra.insert("installed".into(), serde_json::json!(installed.clone()));
+    extra.insert("action".into(), serde_json::json!(action));
+    extra.insert("updateAvailable".into(), serde_json::json!(action == "upgrade"));
+    extra.insert("registry".into(), serde_json::json!(origin));
+    crate::update_plan::unified(
+        "kernel",
+        installed,
+        latest_v,
+        action == "upgrade" || action == "install",
+        origin_out,
+        err,
+        extra,
+    )
 }
 
 /// 无头自检输出（--core-plan 用，便于发布后冒烟验证，无需 GUI）。

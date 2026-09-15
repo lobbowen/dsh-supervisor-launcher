@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use super::service::ServiceControl;
-use super::{home_dir, Capabilities, Platform, SVC_NORMAL, SVC_QUICK};
+use super::{home_dir, Capabilities, LaunchSpec, Platform, SVC_NORMAL, SVC_QUICK};
 
 pub const NAME: &str = "windows";
 /// 计划任务名（**定义由本文件建立**；内核只做 /ENABLE /DISABLE）。
@@ -246,7 +246,7 @@ impl ServiceControl for Impl {
     ///   但它的动作指向我们写的 `.cmd` 包装脚本（可比对）；
     ///   故判据改为「任务存在 **且** 包装脚本内容一致」才提前返回，
     ///   否则用 `/Create /F` 强制重建（`/F` 本就是覆盖语义）。
-    fn ensure_defined(&self, guard: &Path) -> Result<String, String> {
+    fn ensure_defined(&self, spec: &LaunchSpec) -> Result<String, String> {
         let task_exists = matches!(
             crate::bounded::run(
                 Command::new("schtasks").args(["/Query", "/TN", GUARD_TASK]),
@@ -263,7 +263,11 @@ impl ServiceControl for Impl {
         if let Some(dir) = wrapper.parent() {
             std::fs::create_dir_all(dir).map_err(|e| format!("创建状态目录失败: {}", e))?;
         }
-        let shim = format!("@echo off\r\n\"{}\" daemon\r\n", guard.display());
+        // 硬规则（2026-09-15）：包装脚本先注入 PATH（nodeBinDir 首位）再执行 npm 垫片 ——
+        //   计划任务/登录自启的 ambient PATH 不含 nvm/fnm 的 node 目录，
+        //   cmd 垫片找不到 node 就是「装了起不来」。
+        let node_dir = spec.node.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+        let shim = format!("@echo off\r\nset \"PATH={};%PATH%\"\r\n\"{}\" daemon\r\n", node_dir.display(), spec.guard.display());
         // ── 内容比对（P2 自愈）：任务在 + 包装脚本内容一致 → 才算「已是最新」。
         //    否则继续往下走 `/Create /F` 重建（覆盖语义）。
         let wrapper_current = std::fs::read_to_string(&wrapper).ok().as_deref() == Some(shim.as_str());
@@ -350,7 +354,7 @@ impl ServiceControl for Impl {
         Ok(())
     }
 
-    fn spawn_daemon(&self, guard: &Path) -> Result<u32, String> {
+    fn spawn_daemon(&self, spec: &LaunchSpec) -> Result<u32, String> {
         use std::os::windows::process::CommandExt;
         // 引号处理必须正确（2026-09-11 修复）：
         //   npm 全局安装的守卫是 `dsh-supervisor.cmd` 垫片，须经 `cmd /C` 启动。
@@ -362,10 +366,11 @@ impl ServiceControl for Impl {
         //   正确形态（cmd 的经典引号规则）：整个命令用**外层引号**包住，
         //   路径自身再包一层 —— 即 `cmd /C ""<path>" daemon"`。
         //   用 raw_arg 直接给出该形式，避免 Rust 再次转义。
-        let line = format!("\"\"{}\" daemon\"", guard.display());
+        let line = format!("\"\"{}\" daemon\"", spec.guard.display());
         let child = Command::new("cmd")
             .arg("/C")
             .raw_arg(line)
+            .env("PATH", &spec.env_path)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())

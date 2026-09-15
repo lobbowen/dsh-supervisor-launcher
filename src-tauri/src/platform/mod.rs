@@ -67,6 +67,32 @@ pub struct NodeArtifact {
     pub file: String,
 }
 
+/// 守卫启动所需的**已解析运行期事实**（来自 `runtime_contract`，见其头部的根因说明）。
+///
+/// 为什么单独成类型：守卫是 `#!/usr/bin/env node` 脚本；服务管理器与 spawn 的 ambient PATH
+///   经常不含"壳解析出的 Node"（nvm/fnm/volta、GUI 最小 PATH）。把 node/guard/PATH 作为
+///   **显式入参**交给平台实现，服务定义不再假设 ambient 环境。
+#[derive(Clone, Debug)]
+pub struct LaunchSpec {
+    /// Node 可执行绝对路径。
+    pub node: std::path::PathBuf,
+    /// 内核守卫可执行文件。
+    pub guard: std::path::PathBuf,
+    /// 服务/子进程应继承的 PATH（nodeBinDir 必在首位）。
+    pub env_path: String,
+}
+
+impl LaunchSpec {
+    /// 由运行期契约 + 已定位守卫组装（PATH 经 runtime_contract 单一实现）。
+    pub fn from_runtime(rt: &crate::runtime_contract::NodeRuntime, guard: std::path::PathBuf) -> Self {
+        LaunchSpec {
+            node: rt.node.clone(),
+            guard,
+            env_path: crate::runtime_contract::env_path(&rt.node_bin_dir),
+        }
+    }
+}
+
 /// 平台契约。
 ///
 /// **不变量 P1**：每个能力要么实现，要么显式 `Unsupported`（见 [`service`]）。

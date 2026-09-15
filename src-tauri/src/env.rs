@@ -199,6 +199,32 @@ pub fn api_port() -> u16 {
         .unwrap_or(DEFAULT_API_PORT)
 }
 
+/// 内核持久化的**实际** API 端口（ports.json 的 supervisor-api 记录）。
+///
+/// 为什么必须读实际值：内核在 EADDRINUSE 时会自动顺延端口并持久化
+///   （supervisor.js 的端口自动避让）。只认 config.json 的期望值会让壳
+///   永远等一个没人监听的端口 —— 表现为「守卫启动失败」，即使守卫已健康运行。
+pub fn discovered_api_port() -> Option<u16> {
+    let s = std::fs::read_to_string(supervisor_dir().join("ports.json")).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&s).ok()?;
+    for r in v.get("records")?.as_array()? {
+        if r.get("role").and_then(|x| x.as_str()) != Some("supervisor-api") {
+            continue;
+        }
+        if let Some(port) = r.get("port").and_then(|x| x.as_u64()) {
+            if port > 0 && port <= u16::MAX as u64 {
+                return Some(port as u16);
+            }
+        }
+    }
+    None
+}
+
+/// 当前应使用的内核 API 端口：**实际绑定值优先**，退回配置期望值（单一入口）。
+pub fn current_api_port() -> u16 {
+    discovered_api_port().unwrap_or_else(api_port)
+}
+
 pub fn home() -> PathBuf {
     std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE"))
         .map(PathBuf::from)

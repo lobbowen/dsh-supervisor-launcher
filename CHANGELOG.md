@@ -4,7 +4,30 @@
 
 ## [未发布]
 
-（下一版本待记）
+### 运行期启动契约：修「内核装上却永远拉不起来」（Phase 1）
+
+- 新增 runtime.json（schema 2）由壳写、内核读；node/nodeBinDir/npmPath + 保留旧键（nodePath/nodeVersion/minNode）；
+- 服务定义三平台显式绑定 Node + PATH（systemd ExecStart=node+guard / launchd ProgramArguments / Windows 包装脚本注入 PATH）；
+- 内核安装改用契约里的绝对 npm + PATH；spawn 兜底用 node+guard+env PATH；
+- 端点从 ports.json 的 supervisor-api **实际**值发现，等待循环每 tick 重读；
+- 门禁：tests/platform_launch_contract_test.rs（L-1..L-5，含反向判据）。
+
+### 统一更新决策模型（Phase 2）
+
+问题 1：桌面自更新与内核更新是两套检测/形状，前端表现为「两套流程」。
+- 新增 src/update_plan.rs：统一形状 artifact/current/latest/available/channel/source/error + channel 词表；
+- core.rs::build_plan 与 shell_update_check 都经 update_plan::unified（保留旧字段向后兼容前端）；
+- 内核侧新增 platform/runtime-contract.js（壳写内核读）：runNpmInstall 用契约的绝对 npm + PATH，
+  env-catalog 读同一契约 —— 内核自身执行 npm 与壳**同源**；
+- 门禁：update_pipeline_test（U-1..U-3）、runtime-contract-test（R-1..R-6）。
+
+### 契约 schema 握手门禁（Phase 3）
+
+两仓各自断言 schema 版本，**互不读源码**；任一侧改 schema 必须同时改两侧，否则各自 CI 变红。
+
+- 壳 `runtime_contract.rs` 的 `SCHEMA` 恒为 2，门禁 L-5 锁定；
+- 内核 `platform/runtime-contract.js` 的 `SUPPORTED_SCHEMA` 恒为 2，门禁 R-6 锁定；
+- 门禁：`platform_launch_contract_test`（L-1..L-5，共 9 断言）。
 
 ## [1.1.0]（2026-09-14）
 

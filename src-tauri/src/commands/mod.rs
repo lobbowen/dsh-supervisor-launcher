@@ -53,6 +53,13 @@ pub async fn node_status(app: tauri::AppHandle) -> serde_json::Value {
         }
         o
     };
+    // 契约落盘：只要探测到可用 Node 就写运行期契约（**不论是否由壳安装**）——
+    //   否则「用户本机已有 Node」的机器永远没有 runtime.json，拉起守卫时无从绑定 node。
+    if let (Some(p), Some(v)) = (out.path.as_ref(), out.version.as_ref()) {
+        if let Some(rt) = crate::runtime_contract::derive(p, v) {
+            crate::runtime_contract::write(&rt);
+        }
+    }
     o["probing"] = serde_json::json!(!out.finished);
     // 明确失败原因（到硬上限 / worker 异常）。前端据此立即给出可操作结论，
     // 而非等自己的预算耗尽后只报一句「超时」。
@@ -240,6 +247,8 @@ pub async fn core_plan(app: tauri::AppHandle) -> ShellResult<serde_json::Value> 
 ///   - 如实回传成败（含退出码/stderr），绝不吞错。
 #[tauri::command]
 pub async fn core_apply(app: tauri::AppHandle) -> ShellResult<serde_json::Value> {
+    // 契约先行：安装内核需要 npm，而 npm 的单一来源是运行期契约（缺失则解析并落盘）。
+    let _ = crate::runtime_contract::ensure();
     let pkg = crate::core::package_name()?;
     let prefix = crate::domain::coreloc::locate_core(&app).and_then(|b| crate::core::global_prefix_for(&b));
     let origins = crate::core::registry_origins();
@@ -314,7 +323,7 @@ pub async fn guard_start(app: tauri::AppHandle) -> ShellResult<serde_json::Value
 #[tauri::command]
 pub async fn guard_ready() -> serde_json::Value {
     tauri::async_runtime::spawn_blocking(|| {
-        let port = crate::env::api_port();
+        let port = crate::env::current_api_port();
         if !crate::domain::guardctl::is_alive(port) { return serde_json::json!({"ready": false, "reason": "tcp", "port": port}); }
         match crate::domain::localhttp::http_get_local(port, "/healthz", std::time::Duration::from_secs(3)) {
             Some((code, _)) if (200..300).contains(&code) => serde_json::json!({"ready": true, "port": port}),
@@ -471,6 +480,26 @@ pub fn mirror_set(kind: String, urls: Vec<String>) -> ShellResult<serde_json::Va
 /// 检查是否有壳更新。
 /// 返回 { ok, available, current, latest, notes, skipped?, reason? }
 /// 语义：跳过的原因一律**不阻断启动**（有界失败即放行）。
+/// 桌面自更新的统一决策形状（与内核 core_plan 同一组键：artifact/current/latest/available/channel/source/error）。
+///
+/// 问题 1 的机制层统一：两侧用同一形状，前端不再是"两套流程"。执行器按产物分派
+/// （壳=Tauri updater，内核=npm），但**决策模型是一套**。
+fn shell_plan(
+    cur: &str,
+    latest: Option<String>,
+    available: bool,
+    err: Option<String>,
+    notes: String,
+    date: String,
+) -> serde_json::Value {
+    let mut extra = serde_json::Map::new();
+    extra.insert("ok".into(), serde_json::json!(err.is_none()));
+    extra.insert("current".into(), serde_json::json!(cur));
+    extra.insert("notes".into(), serde_json::json!(notes));
+    extra.insert("date".into(), serde_json::json!(date));
+    crate::update_plan::unified("shell", Some(cur.to_string()), latest, available, None, err, extra)
+}
+
 #[tauri::command]
 pub async fn shell_update_check(app: tauri::AppHandle) -> ShellResult<serde_json::Value> {
     let cur = app.package_info().version.to_string();
@@ -479,7 +508,7 @@ pub async fn shell_update_check(app: tauri::AppHandle) -> ShellResult<serde_json
         Ok(u) => u,
         Err(msg) => {
             crate::update::log(&format!("桌面更新检查失败：{}", msg));
-            return Ok(serde_json::json!({ "ok": false, "available": false, "error": msg, "current": cur }));
+            return Ok(shell_plan(&cur, None, false, Some(msg), String::new(), String::new()));
         }
     };
     // 双保险：reqwest 的 request timeout 不保证覆盖所有阶段（如 DNS），外层再包一层 tokio 超时。
@@ -492,29 +521,29 @@ pub async fn shell_update_check(app: tauri::AppHandle) -> ShellResult<serde_json
         Err(_) => {
             let msg = format!("检查超时（{} 秒无响应，可能网络不可达）", SHELL_CHECK_TIMEOUT.as_secs());
             crate::update::log("桌面更新检查超时（网络不可达？）");
-            Ok(serde_json::json!({ "ok": false, "available": false, "error": msg, "current": cur }))
+            Ok(shell_plan(&cur, None, false, Some(msg), String::new(), String::new()))
         }
         Ok(Ok(Some(u))) => {
             let latest = u.version.clone();
             crate::update::log(&format!("桌面更新发现新版本 {}（当前 {}）", latest, cur));
-            Ok(serde_json::json!({
-                "ok": true,
-                "available": true,
-                "current": cur,
-                "latest": latest,
-                "notes": u.body.clone().unwrap_or_default(),
-                "date": u.date.map(|d| d.to_string()).unwrap_or_default(),
-            }))
+            Ok(shell_plan(
+                &cur,
+                Some(latest),
+                true,
+                None,
+                u.body.clone().unwrap_or_default(),
+                u.date.map(|d| d.to_string()).unwrap_or_default(),
+            ))
         }
         Ok(Ok(None)) => {
             crate::update::log(&format!("桌面更新已是最新（{}）", cur));
-            Ok(serde_json::json!({ "ok": true, "available": false, "current": cur }))
+            Ok(shell_plan(&cur, None, false, None, String::new(), String::new()))
         }
         Ok(Err(e)) => {
             // 网络失败/清单不可达/验签失败 → 一律「失败放行」，由引导页决定是否重试
             let msg = format!("{}", e);
             crate::update::log(&format!("桌面更新检查失败：{}", msg));
-            Ok(serde_json::json!({ "ok": false, "available": false, "error": msg, "current": cur }))
+            Ok(shell_plan(&cur, None, false, Some(msg), String::new(), String::new()))
         }
     }
 }
