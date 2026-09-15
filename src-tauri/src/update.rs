@@ -14,15 +14,12 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-/// 壳状态目录（与内核状态目录物理隔离：内核用 ~/.dsh/supervisor）。
+/// 壳状态目录（独立于 DSH，与内核状态同根不同子目录）：<状态根>/shell。
 pub fn state_dir() -> PathBuf {
     if let Some(p) = test_state_dir_override() {
         return p;
     }
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .unwrap_or_else(|_| "/tmp".into());
-    PathBuf::from(home).join(".dsh").join("shell")
+    crate::env::shell_dir()
 }
 
 /// 状态目录的测试注入点（行为级测试必须能改写到临时目录）。

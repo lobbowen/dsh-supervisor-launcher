@@ -235,6 +235,16 @@ impl Platform for Impl {
         v
     }
 
+    /// Windows 状态根惯例：%LOCALAPPDATA%\dsh-supervisor。
+    fn state_root_default(&self) -> PathBuf {
+        let base = std::env::var("LOCALAPPDATA")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home_dir().join("AppData").join("Local"));
+        base.join("dsh-supervisor")
+    }
+
     fn is_local_fixed_dir(&self, dir: &Path) -> bool {
         use std::os::windows::ffi::OsStrExt;
 // 先做本地固定盘判定（不触网），再访问文件系统；按盘符缓存，每盘只查一次。
@@ -280,7 +290,7 @@ impl Impl {
     }
 
     fn ensure_watchdog(&self, spec: &LaunchSpec) -> Result<String, String> {
-        let dir = home_dir().join(".dsh").join("supervisor");
+        let dir = crate::env::supervisor_dir();
         std::fs::create_dir_all(&dir).map_err(|e| format!("创建状态目录失败: {}", e))?;
         let ps1 = dir.join("watchdog.ps1");
         let body = watchdog_script(spec);
@@ -350,10 +360,7 @@ impl ServiceControl for Impl {
         );
         // 计划任务的 /TR 引号转义极易出错（尤其是路径含空格与 .cmd 垫片）。
         // 改为写一个**包装脚本**再指向它 —— 与内核 watchdog.ps1 同一思路，规避转义地狱。
-        let wrapper = home_dir()
-            .join(".dsh")
-            .join("supervisor")
-            .join("guard-task.cmd");
+        let wrapper = crate::env::supervisor_dir().join("guard-task.cmd");
         if let Some(dir) = wrapper.parent() {
             std::fs::create_dir_all(dir).map_err(|e| format!("创建状态目录失败: {}", e))?;
         }

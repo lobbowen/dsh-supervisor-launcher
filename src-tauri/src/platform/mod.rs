@@ -173,6 +173,20 @@ pub trait Platform: Send + Sync {
     /// 其它平台只判存在性。
     fn is_usable_executable(&self, cand: &std::path::Path) -> bool;
 
+    /// 产品状态根的**平台默认**（不含 `DSH_SUPERVISOR_HOME` 覆盖；env.rs 负责覆盖）。
+    ///   Linux/Unix：`$XDG_STATE_HOME/dsh-supervisor` 或 `~/.local/state/dsh-supervisor`
+    ///   macOS：`~/Library/Application Support/dsh-supervisor`
+    ///   Windows：`%LOCALAPPDATA%\dsh-supervisor`
+    /// **独立于 DSH 的 ~/.dsh** —— 我们是管控 DSH 的产品，状态不得寄在其目录下。
+    fn state_root_default(&self) -> std::path::PathBuf {
+        if let Some(x) = std::env::var_os("XDG_STATE_HOME") {
+            if !x.is_empty() {
+                return std::path::Path::new(&x).join("dsh-supervisor");
+            }
+        }
+        home_dir().join(".local").join("state").join("dsh-supervisor")
+    }
+
     /// **安装 Node**（含平台提权通道）。
     ///
     /// · Linux   `pkexec sh -c "tar -xJf … -C /usr/local"`

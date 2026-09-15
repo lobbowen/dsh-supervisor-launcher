@@ -6,6 +6,16 @@
 
 （下一版本待记）
 
+### 产品状态根独立于 DSH（XDG，2026-09-15）
+
+本产品**管控 DSH**，状态不得寄在被管控对象的 `~/.dsh` 下。状态根改为自有目录：
+
+- 覆盖 `DSH_SUPERVISOR_HOME`；默认 Linux `$XDG_STATE_HOME/dsh-supervisor`（`~/.local/state/dsh-supervisor`）、macOS `~/Library/Application Support/dsh-supervisor`、Windows `%LOCALAPPDATA%\dsh-supervisor`；
+- `env.rs`：`state_root()/supervisor_dir()/shell_dir()` + `STATE_ROOT_SCHEMA=1`；`update.rs`/`mirror.rs`/`platform/{macos,windows}.rs` 全部经此；
+- 平台默认值下沉 `platform::state_root_default`（G1）；新增诊断命令 `shell_state_root`；
+- 启动早期 `env::migrate_legacy()`：旧 `~/.dsh/{supervisor,shell}` **按条目**前向迁移（不覆盖新文件）；
+- 门禁：`kernel_launch_standard_test` K-8（含反向）。
+
 ### Windows 看护任务收归壳（2026-09-15）
 
 按 KERNEL-LAUNCH-STANDARD H5 / KERNEL-DAEMON-CONTRACT D6：

@@ -381,6 +381,18 @@ pub fn shell_bridge_contract() -> serde_json::Value {
     })
 }
 
+/// 产品状态根（诊断/支持用）：schema + 实际路径。**独立于 DSH 的 ~/.dsh**。
+/// 同时使 \`STATE_ROOT_SCHEMA\` 成为可观测契约（与内核 state-root.js 的 SCHEMA 握手）。
+#[tauri::command]
+pub fn shell_state_root() -> serde_json::Value {
+    serde_json::json!({
+        "schema": crate::env::STATE_ROOT_SCHEMA,
+        "root": crate::env::state_root().display().to_string(),
+        "supervisor": crate::env::supervisor_dir().display().to_string(),
+        "shell": crate::env::shell_dir().display().to_string(),
+    })
+}
+
 /// 引导页驱动：申请所有者启动守卫（唯一启停权威，见 crate::platform::service::start）。阻塞放线程池。
 #[tauri::command]
 pub async fn guard_start(app: tauri::AppHandle) -> ShellResult<serde_json::Value> {

@@ -324,15 +324,18 @@ fn main() {
         // app.restart()：更新安装后重启进入新版本（旧进程装、新进程跑）。
         .plugin(tauri_plugin_process::init())
         .manage(Mutex::new(RunState::default()))
-        .invoke_handler(tauri::generate_handler![commands::node_status, commands::core_status, commands::core_plan, commands::core_apply, commands::kernel_update_apply, commands::shell_bridge_contract, commands::guard_start, commands::guard_ready, commands::start_node_install, commands::finish_boot, commands::win_ctl, commands::shell_identity, commands::shell_update_check, commands::shell_update_apply, commands::shell_restart, commands::shell_set_phase, commands::mirror_status, commands::mirror_set, commands::node_latest, commands::mirror_warmup, commands::mirror_cached, commands::shell_panel_url])
+        .invoke_handler(tauri::generate_handler![commands::node_status, commands::core_status, commands::core_plan, commands::core_apply, commands::kernel_update_apply, commands::shell_bridge_contract, commands::shell_state_root, commands::guard_start, commands::guard_ready, commands::start_node_install, commands::finish_boot, commands::win_ctl, commands::shell_identity, commands::shell_update_check, commands::shell_update_apply, commands::shell_restart, commands::shell_set_phase, commands::mirror_status, commands::mirror_set, commands::node_latest, commands::mirror_warmup, commands::mirror_cached, commands::shell_panel_url])
         .setup(|app| {
             bt!("setup enter");
+            // 状态根迁移（前向自愈）：旧位置 ~/.dsh/{supervisor,shell} → 产品状态根。
+            // 必须在任何读写状态之前执行；失败不阻断。
+            env::migrate_legacy();
             // 托盘直发本地 API 的端口：显式 DSH_SUPERVISOR_TRAY_PORT 优先，否则从用户 config.apiPort 解析
             let port: u16 = std::env::var("DSH_SUPERVISOR_TRAY_PORT")
                 .ok().and_then(|p| p.parse().ok()).unwrap_or_else(env::api_port);
             let handle = app.handle().clone();
 
-            // 壳身份初始化（2026-09-11）：写 ~/.dsh/shell/identity.json + shell.log，
+            // 壳身份初始化（2026-09-11）：写 <状态根>/shell/identity.json + shell.log（独立于 DSH），
             // 必须尽量早执行：即使后续任一环节失败，也留下可诊断的落盘痕迹。
             bt!("init_identity...");
             let _ = update::init_identity(&app.package_info().version.to_string());

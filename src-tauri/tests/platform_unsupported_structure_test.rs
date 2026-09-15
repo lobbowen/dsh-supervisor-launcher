@@ -138,7 +138,7 @@ fn strip_comments(src: &str) -> String {
 const PLATFORM_METHODS: &[&str] = &[
     "name", "service", "capabilities", "core_platform_tag",
     "node_artifact", "node_candidate_paths", "node_bin_after_install",
-    "is_usable_executable", "core_extra_candidates", "core_bin_candidates_in_prefix", "is_local_fixed_dir",
+    "is_usable_executable", "core_extra_candidates", "core_bin_candidates_in_prefix", "state_root_default", "is_local_fixed_dir",
     "install_node", "has_privilege_channel",
     "node_exe_name", "npm_exe_name", "core_exe_names",
 ];

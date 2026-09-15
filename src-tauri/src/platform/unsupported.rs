@@ -144,6 +144,16 @@ impl Platform for Impl {
         names.iter().map(|n| prefix.join("bin").join(n)).collect()
     }
 
+    /// 未知平台按 XDG 兜底。
+    fn state_root_default(&self) -> PathBuf {
+        if let Some(x) = std::env::var_os("XDG_STATE_HOME") {
+            if !x.is_empty() {
+                return Path::new(&x).join("dsh-supervisor");
+            }
+        }
+        super::home_dir().join(".local").join("state").join("dsh-supervisor")
+    }
+
     fn is_local_fixed_dir(&self, _dir: &Path) -> bool {
         // Unix：无「网络盘 / 可移动盘」概念上的 is_file() 触网风险，
         // 本地文件系统调用不会因路径本身而阻塞数十秒。

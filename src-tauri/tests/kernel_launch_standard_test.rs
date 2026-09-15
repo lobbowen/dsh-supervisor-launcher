@@ -158,3 +158,42 @@ fn k7_reverse_not_vacuous() {
     assert!(!shell_creates_watchdog(old), "K-7 反向失败：只停不建的形态被判为合格");
     assert!(shell_creates_watchdog(&read("src/platform/windows.rs")), "K-7 反向失败：当前实现未判合格");
 }
+
+// ── K-8：产品状态根独立于 DSH（XDG；与内核 state-root.js 握手）──
+#[test]
+fn k8_state_root_independent_of_dsh() {
+    let env = read("src/env.rs");
+    let missing = has_all(&env, &[
+        "STATE_ROOT_SCHEMA: u32 = 1",
+        "DSH_SUPERVISOR_HOME",
+        "pub fn state_root",
+        "pub fn supervisor_dir",
+        "pub fn shell_dir",
+        "pub fn migrate_legacy",
+    ]);
+    assert!(missing.is_empty(), "K-8 失败：env.rs 状态根契约缺失 {:?}", missing);
+    // 负向：supervisor_dir 不得再拼 .dsh
+    assert!(state_root_is_independent(&env), "K-8 失败：env.rs 仍拼 ~/.dsh");
+    // 平台默认值在 platform/（G1），三平台同构
+    let m = read("src/platform/mod.rs");
+    assert!(m.contains("fn state_root_default"), "K-8 失败：trait 缺 state_root_default");
+    assert!(read("src/platform/macos.rs").contains("fn state_root_default"), "K-8 失败：macOS 未覆写状态根");
+    assert!(read("src/platform/windows.rs").contains("fn state_root_default"), "K-8 失败：Windows 未覆写状态根");
+    // 可观测：诊断命令已注册
+    assert!(read("src/commands/mod.rs").contains("pub fn shell_state_root"), "K-8 失败：缺 shell_state_root 命令");
+    assert!(read("src/main.rs").contains("commands::shell_state_root"), "K-8 失败：命令未注册");
+}
+
+fn state_root_is_independent(src: &str) -> bool {
+    // 允许 migrate_legacy 出现旧路径；只要求 supervisor_dir 的**函数体**不拼 .dsh。
+    let f = match src.find("pub fn supervisor_dir") { Some(i) => &src[i..], None => return false };
+    let body = match f.find("\n}") { Some(i) => &f[..i], None => f };
+    !body.contains(".dsh")
+}
+
+#[test]
+fn k8_reverse_not_vacuous() {
+    let old = "pub fn supervisor_dir() -> PathBuf { PathBuf::from(home).join(\".dsh\").join(\"supervisor\") }";
+    assert!(!state_root_is_independent(old), "K-8 反向失败：旧 ~/.dsh 形态被判为独立");
+    assert!(state_root_is_independent(&read("src/env.rs")), "K-8 反向失败：当前实现未判合格");
+}

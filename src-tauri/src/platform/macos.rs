@@ -145,6 +145,11 @@ impl Platform for Impl {
         v
     }
 
+    /// macOS 状态根惯例：~/Library/Application Support/dsh-supervisor。
+    fn state_root_default(&self) -> PathBuf {
+        home_dir().join("Library").join("Application Support").join("dsh-supervisor")
+    }
+
     fn is_local_fixed_dir(&self, _dir: &Path) -> bool {
         // Unix：无「网络盘 / 可移动盘」概念上的 is_file() 触网风险，
         // 本地文件系统调用不会因路径本身而阻塞数十秒。
@@ -181,11 +186,8 @@ impl ServiceControl for Impl {
     ///   现：算期望内容 → 比对 → 一致不动、不同则重写（并重新 bootstrap）。
     fn ensure_defined(&self, spec: &LaunchSpec) -> Result<String, String> {
         let path = self.definition_path();
-        let log = home_dir()
-            .join(".dsh")
-            .join("supervisor")
-            .join("log")
-            .join("guard-stdio.log");
+        // 日志落在**产品状态根**（独立于 DSH 的 ~/.dsh）。
+        let log = crate::env::supervisor_dir().join("log").join("guard-stdio.log");
         // 2026-09-12（P3）：路径嵌入 plist 前**必须做 XML 转义**。
         //   plist 是 XML —— 家目录/用户名含 `&`、`<`、`>` 时（如 `/Users/a&b/...`），
         //   未转义会写出**非法 XML** → `launchctl bootstrap` 失败，
