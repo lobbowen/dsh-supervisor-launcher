@@ -181,6 +181,27 @@ impl Platform for Impl {
         v
     }
 
+    /// Windows：npm 全局垫片直接在 prefix 下（`<name>.cmd`），真实脚本在
+    ///   `<prefix>\node_modules\<pkg>\bin\<name>`（后者可被 package_dir_of 正确解析版本）。
+    fn core_bin_candidates_in_prefix(
+        &self,
+        prefix: &std::path::Path,
+        names: &[&str],
+        pkg: Option<&str>,
+    ) -> Vec<std::path::PathBuf> {
+        let mut v: Vec<std::path::PathBuf> = Vec::new();
+        for name in names {
+            v.push(prefix.join(format!("{}.cmd", name)));
+            v.push(prefix.join(name));
+        }
+        if let Some(p) = pkg {
+            for name in names {
+                v.push(prefix.join("node_modules").join(p).join("bin").join(name));
+            }
+        }
+        v
+    }
+
     fn is_local_fixed_dir(&self, dir: &Path) -> bool {
         use std::os::windows::ffi::OsStrExt;
 // 先做本地固定盘判定（不触网），再访问文件系统；按盘符缓存，每盘只查一次。

@@ -281,6 +281,21 @@ pub fn parse_version_output(s: &str) -> Option<String> {
     None
 }
 
+/// 读 **npm 自己**的全局 prefix（`<contract npm> prefix -g`）。
+///
+/// 用途**仅限**「安装刚完成后回读 npm 把包装到了哪」——用于 P2 记录 core.json。
+/// **不得**用它来选择安装前缀（选择仍用 global_prefix_for，理由见文件头注释：
+///   既有内核位置与 npm prefix -g 可能不一致，用它选前缀会把新内核装到别处）。
+pub fn npm_global_prefix() -> Option<PathBuf> {
+    let rt = crate::runtime_contract::read_node()?;
+    let mut cmd = std::process::Command::new(&rt.npm);
+    cmd.args(["prefix", "-g"]);
+    let o = run_command_bounded(cmd, VERSION_PROBE_TIMEOUT).ok()?;
+    if !o.success { return None; }
+    let p = o.stdout.trim();
+    if p.is_empty() { None } else { Some(PathBuf::from(p)) }
+}
+
 /// 从内核真实路径反推 npm 全局前缀（跨平台布局差异见下）。
 ///   Unix    : <prefix>/lib/node_modules/@scope/pkg/bin/exe  → <prefix>
 ///   Windows : <prefix>/node_modules/@scope/pkg/bin/exe      → <prefix>

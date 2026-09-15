@@ -144,6 +144,24 @@ pub trait Platform: Send + Sync {
     /// `pkg` 为内核包名（如 `@dsh-sup/dsh-core-linux-x64`），用于 Windows 包内路径。
     fn core_extra_candidates(&self, names: &[&str], pkg: Option<&str>) -> Vec<std::path::PathBuf>;
 
+    /// 给定 npm 全局 prefix，返回内核在该 prefix 下的候选 bin 路径（P2「安装后记录位置」用）。
+    ///
+    /// 默认（Unix）：`<prefix>/bin/<name>`。
+    /// Windows 覆写：npm 垫片直接在 prefix 下（`<prefix>\<name>.cmd`），
+    ///   以及包内真实脚本 `<prefix>\node_modules\<pkg>\bin\<name>`。
+    ///
+    /// 为什么需要：内核由 npm 装进 **npm 全局 prefix**（nvm/volta/fnm/自定义），
+    ///   「装完立刻回读确切位置并写入 core.json」必须有跨平台的路径推导，
+    ///   不能在业务层写平台分支（门禁 G1）。
+    fn core_bin_candidates_in_prefix(
+        &self,
+        prefix: &std::path::Path,
+        names: &[&str],
+        _pkg: Option<&str>,
+    ) -> Vec<std::path::PathBuf> {
+        names.iter().map(|n| prefix.join("bin").join(n)).collect()
+    }
+
     /// **安装后** Node 可执行文件应出现的位置（用于校验安装成功）。
     fn node_bin_after_install(&self) -> std::path::PathBuf;
 

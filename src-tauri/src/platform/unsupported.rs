@@ -134,6 +134,16 @@ impl Platform for Impl {
         Vec::new()
     }
 
+    /// 未知平台按 POSIX 形态给出（保守）：<prefix>/bin/<name>。
+    fn core_bin_candidates_in_prefix(
+        &self,
+        prefix: &Path,
+        names: &[&str],
+        _pkg: Option<&str>,
+    ) -> Vec<PathBuf> {
+        names.iter().map(|n| prefix.join("bin").join(n)).collect()
+    }
+
     fn is_local_fixed_dir(&self, _dir: &Path) -> bool {
         // Unix：无「网络盘 / 可移动盘」概念上的 is_file() 触网风险，
         // 本地文件系统调用不会因路径本身而阻塞数十秒。

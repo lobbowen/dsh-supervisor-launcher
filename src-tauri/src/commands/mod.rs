@@ -285,10 +285,33 @@ async fn core_apply_inner(app: tauri::AppHandle) -> ShellResult<serde_json::Valu
         Err(last)
     }).await.map_err(|e| ShellError::ipc(e.to_string()))?;
     Ok(match res {
-        Ok((origin, out)) => serde_json::json!({
-            "ok": true, "version": target, "origin": origin, "output": out,
-            "prefix": prefix.map(|p| p.display().to_string()),
-        }),
+        // P2（安装成功后）：回读**确切位置**并写 core.json —— 位置单一事实源。
+        //   必须先回读再报成功：否则「装上了却定位不到」（nvm/自定义 prefix）会被静默跳过，
+        //   后续 guard_start 的对齐门会以 KERNEL_NOT_ALIGNED 拒绝，用户只看到「起不来」。
+        Ok((origin, out)) => {
+            let prefix_used = prefix.clone().or_else(crate::core::npm_global_prefix);
+            match crate::domain::coreloc::locate_core_at_version(&app, &target, prefix_used.as_deref()) {
+                Some(bin) => {
+                    crate::core_contract::write(&crate::core_contract::InstalledCore {
+                        bin: bin.clone(),
+                        prefix: prefix_used.clone(),
+                        version: target.clone(),
+                        source: origin.clone(),
+                    });
+                    serde_json::json!({
+                        "ok": true, "version": target, "origin": origin, "output": out,
+                        "coreBin": bin.display().to_string(),
+                        "prefix": prefix_used.map(|p| p.display().to_string()),
+                    })
+                }
+                None => serde_json::json!({
+                    "ok": false, "stage": "record",
+                    "version": target, "origin": origin,
+                    "error": "内核已安装但定位不到目标版本（安装前缀不一致）——已拒绝继续，请反馈此诊断",
+                    "prefix": prefix_used.as_ref().map(|p| p.display().to_string()),
+                }),
+            }
+        }
         // 失败分支必须回传 prefix 与尝试过的源（否则现场无法定位）。
         Err(e) => serde_json::json!({
             "ok": false, "version": target, "error": e,
@@ -316,7 +339,7 @@ pub async fn kernel_update_apply(app: tauri::AppHandle) -> ShellResult<serde_jso
     }
     // ②+③ 停守卫 → 等端口释放 → 重新拉起，**全部放线程池**（含阻塞 sleep，绝不占 async 运行时）。
     //    等端口释放是必须的：否则 ensure_guard 会误判「守卫已在运行」而直接返回，重启被静默跳过。
-    let restart = tauri::async_runtime::spawn_blocking(move || -> Result<(bool, Option<String>), String> {
+    let restart = tauri::async_runtime::spawn_blocking(move || -> Result<(bool, Option<String>), crate::domain::guardctl::LaunchError> {
         let port = crate::env::current_api_port();
         let stop_error = crate::platform::service().stop().err();
         let mut stopped = false;
@@ -324,7 +347,7 @@ pub async fn kernel_update_apply(app: tauri::AppHandle) -> ShellResult<serde_jso
             if !crate::domain::guardctl::is_alive(port) { stopped = true; break; }
             std::thread::sleep(std::time::Duration::from_millis(250));
         }
-        // ensure_guard：建定义 + 请求所有者启动（不可用则 spawn 兜底），以端口就绪为唯一成功判据。
+        // ensure_guard：P1 对齐 → 建定义 → 请求所有者启动（不可用则 spawn 兜底）。
         crate::domain::guardctl::ensure_guard(&app)?;
         Ok((stopped, stop_error))
     }).await;
@@ -338,7 +361,7 @@ pub async fn kernel_update_apply(app: tauri::AppHandle) -> ShellResult<serde_jso
             "restartUncertain": !stopped,
             "stopError": stop_error,
         })),
-        Ok(Err(e)) => Ok(serde_json::json!({ "ok": false, "stage": "restart", "error": e, "detail": install })),
+        Ok(Err(e)) => Ok(serde_json::json!({ "ok": false, "stage": "restart", "code": e.code, "error": e.message, "detail": install })),
         Err(e) => Ok(serde_json::json!({ "ok": false, "stage": "restart", "error": e.to_string(), "detail": install })),
     }
 }
@@ -368,17 +391,22 @@ pub async fn guard_start(app: tauri::AppHandle) -> ShellResult<serde_json::Value
     let task = tauri::async_runtime::spawn_blocking(move || crate::domain::guardctl::ensure_guard(&a));
     let r = match tokio::time::timeout(GUARD_TOTAL_BUDGET, task).await {
         Ok(Ok(inner)) => inner,
-        Ok(Err(e)) => Err(format!("守卫启动任务异常: {}", e)),
-        Err(_) => Err(format!(
-            "守卫启动超时（{} 秒未完成）。可能原因：服务管理器无响应，或守卫进程无法启动。请用 dsh-supervisor-gui --service-plan 查看服务定义状态。",
-            GUARD_TOTAL_BUDGET.as_secs()
+        Ok(Err(e)) => Err(crate::domain::guardctl::LaunchError::new(
+            "JOIN_ERROR",
+            format!("守卫启动任务异常: {}", e),
+        )),
+        Err(_) => Err(crate::domain::guardctl::LaunchError::new(
+            "READY_TIMEOUT",
+            format!(
+                "守卫启动超时（{} 秒未完成）。可能原因：服务管理器无响应，或守卫进程无法启动。请用 dsh-supervisor-gui --service-plan 查看服务定义状态。",
+                GUARD_TOTAL_BUDGET.as_secs()
+            ),
         )),
     };
     Ok(match r {
         Ok(()) => serde_json::json!({"ok": true}),
-        // 响应体里的 `error` 保持**字符串**：前端多处做 `'...' + e` 拼接，
-        //   若此处塞入结构化对象会显示成 [object Object]。
-        Err(e) => serde_json::json!({"ok": false, "error": e.to_string()}),
+        // code：结构化阶段（规范 §4）；error 保持**字符串**——前端多处做 `'...' + e` 拼接。
+        Err(e) => serde_json::json!({"ok": false, "code": e.code, "error": e.message}),
     })
 }
 
