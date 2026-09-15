@@ -209,3 +209,17 @@ fn k9_state_root_injected_into_launch() {
         assert!(s.contains("spec.state_root"), "K-9 失败：{} 未使用壳解析的状态根", f);
     }
 }
+// ── K-10：Windows 启动可诊断 + 按命令行杀守卫（G3/C2 收尾）──
+#[test]
+fn k10_windows_launch_diagnosable_and_kill_correct() {
+    let src = read("src/platform/windows.rs");
+    let missing = has_all(&src, &[
+        "fn win_path_expr",   // 正文 ASCII（非 ASCII 用户名不被 cmd 码页误解码）
+        "guard-task.log",     // 包装脚本落日志（wrapper 是否执行、node 报了什么）
+        "%ERRORLEVEL%",       // 退出码可见
+        "guard-spawn.log",    // 兜底 spawn 落日志
+        "Stop-Process",       // 按命令行杀守卫 node
+    ]);
+    assert!(missing.is_empty(), "K-10 失败：Windows 启动诊断/杀进程缺失 {:?}", missing);
+    assert!(!src.contains("\"/IM\", \"dsh-supervisor.exe\""), "K-10 失败：仍按 dsh-supervisor.exe 杀进程（守卫是 node.exe，杀不掉）");
+}
