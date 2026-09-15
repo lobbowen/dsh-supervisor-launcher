@@ -130,3 +130,31 @@ fn k2_reverse_not_vacuous() {
     assert!(!covers_contract(old), "K-2 反向失败：旧「只按 PATH 猜」形态被判为合格（门禁空转）");
     assert!(covers_contract(&read("src/domain/coreloc.rs")), "K-2 反向失败：当前实现未被判为合格");
 }
+
+// ── K-7：Windows 看护任务的所有者 = 壳（G3/C2）──
+#[test]
+fn k7_windows_watchdog_owned_by_shell() {
+    let src = read("src/platform/windows.rs");
+    let missing = has_all(&src, &[
+        "fn ensure_watchdog",
+        "WATCHDOG_TASK",
+        "fn watchdog_script",
+        "\"/TN\", WATCHDOG_TASK",
+        "\"MINUTE\"",
+    ]);
+    assert!(missing.is_empty(), "K-7 失败：壳未建立 Windows 看护，缺 {:?}", missing);
+    assert!(shell_creates_watchdog(&src), "K-7 失败：判据不完整");
+}
+
+/// 判据谓词（K-7 反向自检用）。
+fn shell_creates_watchdog(src: &str) -> bool {
+    has_all(src, &["fn ensure_watchdog", "WATCHDOG_TASK", "\"MINUTE\""]).is_empty()
+}
+
+#[test]
+fn k7_reverse_not_vacuous() {
+    // 旧形态：只 stop（/End）不 create（/Create）→ 必须判为未落实。
+    let old = "schtasks /End /TN DSH-Supervisor-Watchdog";
+    assert!(!shell_creates_watchdog(old), "K-7 反向失败：只停不建的形态被判为合格");
+    assert!(shell_creates_watchdog(&read("src/platform/windows.rs")), "K-7 反向失败：当前实现未判合格");
+}

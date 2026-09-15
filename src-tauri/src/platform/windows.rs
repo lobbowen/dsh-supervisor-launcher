@@ -9,10 +9,43 @@ use super::service::ServiceControl;
 use super::{home_dir, Capabilities, LaunchSpec, Platform, SVC_NORMAL, SVC_QUICK};
 
 pub const NAME: &str = "windows";
-/// 计划任务名（**定义由本文件建立**；内核只做 /ENABLE /DISABLE）。
+/// 计划任务名（**定义由本文件建立**；内核不再管理，见 D6）。
 pub const GUARD_TASK: &str = "DSH-Supervisor";
-/// 崩溃自拉的保活任务（内核 `autostart.js` 建立；停止守卫时须先停它）。
+/// 崩溃自拉的保活任务（**由壳建立**；停止守卫时须先停它）。
+/// 2026-09-15：所有者从内核 `autostart.js` 收归壳（KERNEL-DAEMON-CONTRACT D6）。
 pub const WATCHDOG_TASK: &str = "DSH-Supervisor-Watchdog";
+
+/// Windows 看护脚本（PowerShell，纯文本免 cmd 转义）。
+/// 语义与内核旧实现一致：API 不可达且无 dsh-supervisor 进程 → 拉起 daemon；
+/// GUI 壳缺失则**独立**拉起（两个判断必须相互独立，否则「壳崩、守卫活」时壳永远不回来）。
+fn watchdog_script(spec: &LaunchSpec) -> String {
+    let port = crate::env::api_port();
+    let node = ps_quote(&spec.node.display().to_string());
+    let guard = ps_quote(&spec.guard.display().to_string());
+    let gui = std::env::current_exe()
+        .map(|p| ps_quote(&p.display().to_string()))
+        .unwrap_or_else(|_| "''".into());
+    [
+        "$ErrorActionPreference = \"SilentlyContinue\"".to_string(),
+        format!("$port = {};", port),
+        format!("$node = {};", node),
+        format!("$guard = {};", guard),
+        format!("$gui = {};", gui),
+        "$up = Test-NetConnection -ComputerName 127.0.0.1 -Port $port -InformationLevel Quiet -WarningAction SilentlyContinue".to_string(),
+        "if (-not $up) {".to_string(),
+        "  $p = @(Get-Process -Name dsh-supervisor -ErrorAction SilentlyContinue)".to_string(),
+        "  if (-not $p) { Start-Process -FilePath $node -ArgumentList $guard, 'daemon' -WindowStyle Hidden }".to_string(),
+        "}".to_string(),
+        "$g = @(Get-Process -Name dsh-supervisor-gui -ErrorAction SilentlyContinue)".to_string(),
+        "if (-not $g -and (Test-Path $gui)) { Start-Process -FilePath $gui -WindowStyle Hidden }".to_string(),
+        "exit 0".to_string(),
+    ].join("\r\n")
+}
+
+/// PowerShell 单引号字符串（内部单引号翻倍；反斜杠为字面量，无需转义）。
+fn ps_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "''"))
+}
 
 /// 安装命令超时（15 分钟：下载 + msiexec + UAC 授权）。
 const INSTALL_CMD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
@@ -233,6 +266,46 @@ impl Platform for Impl {
     }
 }
 
+/// Windows 看护任务的固有实现（**不属于** ServiceControl 契约：它是壳的私有辅助，
+/// 由 `ensure_defined` 调用；放进 trait impl 内会触发 E0407）。
+impl Impl {
+    /// 壳拥有的 Windows 看护任务（D6/H5）：写 watchdog.ps1 + schtasks MINUTE。
+    /// 幂等：每次 ensure_defined 都重写脚本并 `/Create /F`（覆盖语义），
+    ///   故不会因守卫任务「已是最新」而被跳过。
+    fn watchdog_status(&self, spec: &LaunchSpec) -> String {
+        match self.ensure_watchdog(spec) {
+            Ok(s) => format!("；{}", s),
+            Err(e) => format!("；看护未建立（{}）", e),
+        }
+    }
+
+    fn ensure_watchdog(&self, spec: &LaunchSpec) -> Result<String, String> {
+        let dir = home_dir().join(".dsh").join("supervisor");
+        std::fs::create_dir_all(&dir).map_err(|e| format!("创建状态目录失败: {}", e))?;
+        let ps1 = dir.join("watchdog.ps1");
+        let body = watchdog_script(spec);
+        let tmp = ps1.with_extension("ps1.tmp");
+        std::fs::write(&tmp, body).map_err(|e| format!("写看护脚本失败: {}", e))?;
+        std::fs::rename(&tmp, &ps1).map_err(|e| format!("落盘看护脚本失败: {}", e))?;
+        let tr = format!(
+            "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{}\"",
+            ps1.display()
+        );
+        let r = crate::bounded::run(
+            Command::new("schtasks").args([
+                "/Create", "/TN", WATCHDOG_TASK, "/SC", "MINUTE", "/MO", "5", "/RL", "HIGHEST", "/F", "/TR", &tr,
+            ]),
+            SVC_NORMAL,
+        )?;
+        if r.success {
+            Ok(format!("看护任务 {} 已建立", WATCHDOG_TASK))
+        } else {
+            Err(format!("schtasks 看护任务创建失败: {}", r.stderr.trim()))
+        }
+    }
+
+}
+
 impl ServiceControl for Impl {
     fn kind(&self) -> &'static str {
         "schtasks"
@@ -293,10 +366,14 @@ impl ServiceControl for Impl {
         //    否则继续往下走 `/Create /F` 重建（覆盖语义）。
         let wrapper_current = std::fs::read_to_string(&wrapper).ok().as_deref() == Some(shim.as_str());
         if task_exists && wrapper_current {
-            return Ok(format!("已存在且为最新 计划任务 {}", GUARD_TASK));
+            // 即使守卫任务已是最新，也必须确保**壳拥有的看护任务**存在（幂等）。
+            let wd = self.watchdog_status(spec);
+            return Ok(format!("已存在且为最新 计划任务 {}{}", GUARD_TASK, wd));
         }
         let is_update = task_exists;
         std::fs::write(&wrapper, &shim).map_err(|e| format!("写入包装脚本失败: {}", e))?;
+        // 看护任务（DSH-Supervisor-Watchdog）的所有者 = 壳（D6/H5）：随服务定义一并（重）建立。
+        let wd_note = self.watchdog_status(spec);
 // 创建「最高权限」任务可能被拒：权限不足时降级为普通权限任务（不彻底失败）。
         // `/TR` 的值**必须自带引号**（P1-D 修复，2026-09-12）：
         //   schtasks 对 `/TR` 接收的都是**纯字符串**（此处经 args 传参，不经过 cmd），
@@ -325,20 +402,22 @@ impl ServiceControl for Impl {
         let first = crate::bounded::run(&mut base(Some("HIGHEST")), SVC_NORMAL)?;
         if first.success {
             return Ok(format!(
-                "{} 计划任务 {}（最高权限）-> {}",
+                "{} 计划任务 {}（最高权限）-> {}{}",
                 verb,
                 GUARD_TASK,
-                wrapper.display()
+                wrapper.display(),
+                wd_note
             ));
         }
         // 降级重试（去掉 /RL HIGHEST）
         let second = crate::bounded::run(&mut base(None), SVC_NORMAL)?;
         if second.success {
             return Ok(format!(
-                "{} 计划任务 {}（普通权限，HIGHEST 被拒）-> {}",
+                "{} 计划任务 {}（普通权限，HIGHEST 被拒）-> {}{}",
                 verb,
                 GUARD_TASK,
-                wrapper.display()
+                wrapper.display(),
+                wd_note
             ));
         }
         Err(format!(

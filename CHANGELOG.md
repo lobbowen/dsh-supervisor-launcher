@@ -6,6 +6,16 @@
 
 （下一版本待记）
 
+### Windows 看护任务收归壳（2026-09-15）
+
+按 KERNEL-LAUNCH-STANDARD H5 / KERNEL-DAEMON-CONTRACT D6：
+
+- `platform/windows.rs::ensure_defined` 同时建立 `DSH-Supervisor-Watchdog`
+  （写 `watchdog.ps1` + `schtasks /SC MINUTE /MO 5`）；保活语义与内核旧实现一致
+  （守卫与 GUI 壳两个判断**相互独立**，否则「壳崩、守卫活」时壳永不回来）；
+- 幂等：即使守卫任务已是最新，也确保看护任务存在；
+- 门禁：`kernel_launch_standard_test` 增 K-7（含反向）。
+
 ### 内核启动规范落地：位置契约 + 对齐前置（2026-09-15）
 
 按 `docs/KERNEL-LAUNCH-STANDARD.md`（跨平台 P0–P6）落地：
