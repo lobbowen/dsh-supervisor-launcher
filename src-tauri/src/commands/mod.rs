@@ -51,6 +51,14 @@ pub async fn node_status(app: tauri::AppHandle) -> serde_json::Value {
         if let Some(latest) = &st.latest {
             o["outdated"] = serde_json::json!(crate::node::outdated(installed.as_deref(), latest));
         }
+        // 工具链契约（2026-09-16）：npm 与 node **同等必需**。干净 Windows 上「node 在、npm 缺」时
+        //   旧实现仍判「环境就绪」，随后用不存在的 npm 去安装内核，必失败。前端据 npmOk 决定修复。
+        let npm = out
+            .path
+            .as_ref()
+            .and_then(|p| p.parent().and_then(|b| crate::runtime_contract::probe_npm(p, b)));
+        o["npmOk"] = serde_json::json!(npm.is_some());
+        o["npmPath"] = serde_json::json!(npm.as_ref().map(|(prog, _)| prog.display().to_string()));
         o
     };
     // 契约落盘：只要探测到可用 Node 就写运行期契约（**不论是否由壳安装**）——

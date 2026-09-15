@@ -95,6 +95,16 @@
         return NS.core.invoke('start_node_install').then(function () { return NS.stepNodeWait(); });
       });
     }
+    // 工具链契约（2026-09-16）：npm 与 node **同等必需**。干净 Windows 上常见「node 在、npm 缺」，
+    //   旧前端只看 installed/minOk → 判「环境就绪」，随后用不存在的 npm 去装内核，必失败。
+    //   修复 = 重跑官方 Node 安装（官方分发包自带 npm）；npmOk 由 node_status 回传。
+    if (st.npmOk === false) {
+      NS.setStep(0);
+      return NS.probeMirrorThen(function () {
+        NS.status('检测到 Node 缺少 npm · 正在补全工具链（重装官方 Node 分发包）…');
+        return NS.core.invoke('start_node_install').then(function () { return NS.stepNodeWait(); });
+      });
+    }
     NS.nodeVer = st.installed;
     return NS.stepNodeDone();
   }
@@ -108,7 +118,8 @@
         NS.withTimeout(NS.core.invoke('node_status'), 15000, '环境查询无响应').then(function (st) {
           st = st || {};
           if (st.__timeout) return;   // 下次 tick 重试
-          if (!st.busy && st.installed) { if (!done) { done = true; clearInterval(t); NS.nodeVer = st.installed; resolve(NS.stepNodeDone()); } }
+          // 就绪 = node **且** npm **且**达门槛（npm 缺失时安装器可能先出 node，必须继续等）。
+          if (!st.busy && st.installed && st.minOk !== false && st.npmOk !== false) { if (!done) { done = true; clearInterval(t); NS.nodeVer = st.installed; resolve(NS.stepNodeDone()); } }
         }).catch(function () {});
       }, 700);
       // 兜底：Node 安装可能长达数分钟；超时不当作成功（交给后续步骤如实报错）

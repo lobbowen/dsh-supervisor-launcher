@@ -289,6 +289,7 @@ pub fn parse_version_output(s: &str) -> Option<String> {
 pub fn npm_global_prefix() -> Option<PathBuf> {
     let rt = crate::runtime_contract::read_node()?;
     let mut cmd = std::process::Command::new(&rt.npm);
+    cmd.args(&rt.npm_prefix);
     cmd.args(["prefix", "-g"]);
     let o = run_command_bounded(cmd, VERSION_PROBE_TIMEOUT).ok()?;
     if !o.success { return None; }
@@ -448,17 +449,20 @@ fn run_npm_install(
 ) -> Result<crate::bounded::Output, String> {
     // 单一事实源：优先用运行期契约里的**绝对 npm** 与 PATH（不再依赖 ambient PATH 的裸名）。
     //   根因同守卫拉起：GUI/服务环境的 PATH 常不含 nvm/fnm 的 npm。
-    let (npm_bin, env_path) = match crate::runtime_contract::read_node() {
+    let (npm_bin, npm_prefix, env_path) = match crate::runtime_contract::read_node() {
         Some(rt) if rt.npm.is_file() => (
             rt.npm,
+            rt.npm_prefix,
             Some(crate::runtime_contract::env_path(&rt.node_bin_dir)),
         ),
-        _ => (std::path::PathBuf::from(npm_exe()), None),
+        _ => (std::path::PathBuf::from(npm_exe()), Vec::new(), None),
     };
     let mut cmd = std::process::Command::new(&npm_bin);
     if let Some(p) = &env_path {
         cmd.env("PATH", p);
     }
+    // npm 仅有包内 JS 时：npmBin=node、npmPrefix=[npm-cli.js]（带上才能调用）。
+    cmd.args(&npm_prefix);
     cmd.args(["install", "-g", "--no-audit", "--no-fund"]).arg(spec);
     if let Some(p) = prefix { cmd.arg("--prefix").arg(simplify(p.to_path_buf())); }
     if let Some(r) = registry { if !r.is_empty() { cmd.env("npm_config_registry", r); } }
