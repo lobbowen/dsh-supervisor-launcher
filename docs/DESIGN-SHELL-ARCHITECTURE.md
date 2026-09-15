@@ -195,7 +195,47 @@ ExecStart 以 127 失败 → **内核装上了却永远拉不起来**。
 - spawn 兜底：spawn_daemon 用 node + guard + env PATH；
 - 端口发现：壳读 ports.json 的 supervisor-api **实际**端口，等待循环**每 tick 重读**。
 
-**门禁**：src-tauri/tests/platform_launch_contract_test.rs（L-1..L-4，含反向判据）。
+**门禁**：src-tauri/tests/platform_launch_contract_test.rs（L-1..L-5，含反向判据）。
+
+### 3.2c 内核更新单写入者契约（Single-Writer Kernel Update，2026-09-15）
+
+**问题（实证）**：内核 npm 包有两个写入者 —— 内核自更新（`POST /self-update/apply` → `runNpmInstall`）与壳
+（启动门 2 的 `core_apply`）；两套版本判定、两种源策略（内核强制官方 registry，壳走镜像）。
+同一个全局 npm 包被两个进程写，是「更新逻辑分裂」的根。
+
+**契约（不可协商）**：内核 npm 包的安装/升级**只有一个写入者 = 桌面壳**。
+内核（守卫）只提供**只读**状态；任何「装内核 / 重启守卫生效」的动作都由壳执行。
+
+| 面 | 归属 |
+|---|---|
+| 内核包安装/升级 | **壳**（`core_apply`；启动门 2 与面板请求共用同一实现）|
+| 守卫服务重启（应用新版本）| **壳**经服务管理器（所有者动作；守卫从不重启自己）|
+| 内核更新状态（只读）| 内核 `GET /self-update/status` |
+| 内核自更新写端点 | **已下架** → `410 Gone` + `code=KERNEL_UPDATE_SINGLE_WRITER` |
+
+**面板→壳请求通道**：面板由内核托管、运行在壳的内容 iframe 内，**不能用 Tauri IPC**（见 3.3 的
+「仅主帧」根因）。故经 `postMessage` 转交壳主帧，再由壳调用 Tauri 命令：
+
+```
+面板 iframe                        壳主帧 shell.html                     Rust
+  │ postMessage({v:1,type:'dsh:kernel-update-request',requestId})
+  ├───────────────────────────────►│ 校验 ev.source===内容 iframe
+  │                                 │      且 origin 为回环
+  │                                 │ invoke('kernel_update_apply')
+  │                                 ├────────────────────────────────►│ 安装→停守卫→等端口落→重启
+  │ postMessage({v:1,type:'dsh:kernel-update-result',...}, ev.origin)  │
+  │◄───────────────────────────────┤
+```
+
+| 不变量 | 内容 |
+|---|---|
+| **K1** | 消息带 `v`（协议版本；两侧各持常量并在门禁中锁定）|
+| **K2** | 壳只接受 `ev.source === frame.contentWindow` **且** origin 为 http(s) 回环；否则忽略 |
+| **K3** | 回复 `targetOrigin = ev.origin`（**不回 `*`**）|
+| **K4** | 无壳宿主（`window.parent === window`）时面板**禁用**内核更新入口并说明 |
+| **K5** | 重启成功后壳重载面板 iframe（守卫已换新二进制）|
+
+**门禁**：src-tauri/tests/kernel_update_single_writer_test.rs（SW-1..SW-6，含反向判据）。
 
 ### 3.3 前端隔离（消除「静默死亡」）
 

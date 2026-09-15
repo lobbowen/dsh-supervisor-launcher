@@ -247,6 +247,13 @@ pub async fn core_plan(app: tauri::AppHandle) -> ShellResult<serde_json::Value> 
 ///   - 如实回传成败（含退出码/stderr），绝不吞错。
 #[tauri::command]
 pub async fn core_apply(app: tauri::AppHandle) -> ShellResult<serde_json::Value> {
+    core_apply_inner(app).await
+}
+
+/// `core_apply` 的实现体（安装/升级到最新版，强制更新，只升不降）。
+/// 抽成独立函数：启动门 2（`core_apply`）与面板请求（`kernel_update_apply`）**共用同一实现** ——
+/// 内核包只能经这一处写入，符合「单写入者」契约（docs/DESIGN-SHELL-ARCHITECTURE.md §3.2c）。
+async fn core_apply_inner(app: tauri::AppHandle) -> ShellResult<serde_json::Value> {
     // 契约先行：安装内核需要 npm，而 npm 的单一来源是运行期契约（缺失则解析并落盘）。
     let _ = crate::runtime_contract::ensure();
     let pkg = crate::core::package_name()?;
@@ -290,6 +297,64 @@ pub async fn core_apply(app: tauri::AppHandle) -> ShellResult<serde_json::Value>
             "originsTried": origins_for_report,
             "prefixIsNodeDir": prefix.as_ref().map(|p| crate::core::is_node_install_prefix(p)),
         }),
+    })
+}
+
+/// 内核更新（**唯一写入者 = 壳**）：安装最新内核 → 由所有者停守卫 → 等端口释放 → 重新拉起。
+///
+/// 面板由内核托管、运行在壳主帧的内容 iframe 内，**没有 Tauri IPC**（IPC 仅主帧）；
+/// 它经 postMessage 请求本命令（见 crate::bridge）。启动门 2 走 \`core_apply\`。
+/// 两者共用同一个安装实现 \`core_apply_inner\` —— 内核包只有这一处写入。
+///
+/// 重启必须由**所有者（服务管理器）**完成：守卫从不重启自己（所有权契约 §2.2 V2/V3）。
+#[tauri::command]
+pub async fn kernel_update_apply(app: tauri::AppHandle) -> ShellResult<serde_json::Value> {
+    // ① 安装/升级到最新（与启动门 2 完全同一实现）
+    let install = core_apply_inner(app.clone()).await?;
+    if install.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+        return Ok(serde_json::json!({ "ok": false, "stage": "install", "detail": install }));
+    }
+    // ②+③ 停守卫 → 等端口释放 → 重新拉起，**全部放线程池**（含阻塞 sleep，绝不占 async 运行时）。
+    //    等端口释放是必须的：否则 ensure_guard 会误判「守卫已在运行」而直接返回，重启被静默跳过。
+    let restart = tauri::async_runtime::spawn_blocking(move || -> Result<(bool, Option<String>), String> {
+        let port = crate::env::current_api_port();
+        let stop_error = crate::platform::service().stop().err();
+        let mut stopped = false;
+        for _ in 0..60 {
+            if !crate::domain::guardctl::is_alive(port) { stopped = true; break; }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+        // ensure_guard：建定义 + 请求所有者启动（不可用则 spawn 兜底），以端口就绪为唯一成功判据。
+        crate::domain::guardctl::ensure_guard(&app)?;
+        Ok((stopped, stop_error))
+    }).await;
+    match restart {
+        Ok(Ok((stopped, stop_error))) => Ok(serde_json::json!({
+            "ok": true, "stage": "done",
+            "version": install.get("version").cloned().unwrap_or(serde_json::Value::Null),
+            "origin": install.get("origin").cloned().unwrap_or(serde_json::Value::Null),
+            "stopped": stopped,
+            // 服务管理器不可用（spawn 兜底）时端口可能未由我们释放：如实标注，不假装已重启。
+            "restartUncertain": !stopped,
+            "stopError": stop_error,
+        })),
+        Ok(Err(e)) => Ok(serde_json::json!({ "ok": false, "stage": "restart", "error": e, "detail": install })),
+        Err(e) => Ok(serde_json::json!({ "ok": false, "stage": "restart", "error": e.to_string(), "detail": install })),
+    }
+}
+
+/// 面板→壳 消息桥契约（单一事实源在 crate::bridge）：把协议版本、命令名与消息类型下发给 shell.html，
+/// 使 shell.html **不硬编码**这些字面量（门禁 SW-3 锁定接线）。
+#[tauri::command]
+pub fn shell_bridge_contract() -> serde_json::Value {
+    serde_json::json!({
+        "v": crate::bridge::KERNEL_UPDATE_PROTOCOL_VERSION,
+        "cmd": crate::bridge::CMD_KERNEL_UPDATE_APPLY,
+        "types": {
+            "request": crate::bridge::MSG_KERNEL_UPDATE_REQUEST,
+            "result": crate::bridge::MSG_KERNEL_UPDATE_RESULT,
+            "progress": crate::bridge::MSG_KERNEL_UPDATE_PROGRESS,
+        }
     })
 }
 

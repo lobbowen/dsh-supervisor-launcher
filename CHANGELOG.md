@@ -29,6 +29,20 @@
 - 内核 `platform/runtime-contract.js` 的 `SUPPORTED_SCHEMA` 恒为 2，门禁 R-6 锁定；
 - 门禁：`platform_launch_contract_test`（L-1..L-5，共 9 断言）。
 
+### 内核更新收敛为单写入者 = 壳（2026-09-15）
+
+问题 1 的根：内核 npm 包有**两个写入者**（内核自更新 `POST /self-update/apply` 与壳 `core_apply`），
+两套版本判定、两种源策略（内核官方 registry vs 壳镜像）。现收敛为**唯一写入者 = 壳**。
+
+- 新增 `src/bridge.rs`：面板→壳 消息桥契约（协议 v1、请求/结果/进度、代执行命令名）—— 唯一事实源；
+- 新增命令 `kernel_update_apply`：安装复用 `core_apply_inner`（与启动门 2 同一实现）→
+  经服务管理器停守卫 → 等端口释放 → `ensure_guard` 重拉（守卫从不重启自己）；
+- `shell.html` 增加受校验的消息桥：只接受 `ev.source === 内容 iframe` 且 origin 回环，
+  回复 `targetOrigin = ev.origin`（不回 `*`），重启成功后重载面板；
+- `commands/mod.rs` 抽出 `core_apply_inner`，`core_apply` 与新命令共用；
+- 门禁：`src-tauri/tests/kernel_update_single_writer_test.rs`（SW-1..SW-6，含反向判据）；
+- SSOT：`docs/DESIGN-SHELL-ARCHITECTURE.md` §3.2c。
+
 ## [1.1.0]（2026-09-14）
 
 ### 内核零回退（产品硬规则落地）
@@ -1248,7 +1262,7 @@ DSH-Supervisor-Watchdog -> 每 5 分钟保活（崩溃自拉）
 
 **修复（四层防护）**：
 - `probe_system_node` **遍历全部候选**而非取第一个（PATH 靠前的坏候选不再掩盖后面可用的 Node）；
-- 过滤 Windows 别名存根（`\WindowsApps\`）与 0 字节文件；
+- 过滤 Windows 别名存根（`\WindowsApps`）与 0 字节文件；
 - 有界执行：单候选 5 秒、整个 PATH 扫描 20 秒硬上限（超时即 kill，视为不可用）；
 - `node_status` 改为 async + `spawn_blocking`，不再占主线程；
 - 前端 `stepEnv` 补 `withTimeout`（45 秒）——此前只给桌面/内核步骤加了超时，**漏了第一步**，
