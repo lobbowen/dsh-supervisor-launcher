@@ -6,6 +6,19 @@
 
 （下一版本待记）
 
+## [1.1.3]（2026-09-15）
+
+### 修复：Windows 上守卫从未被执行 —— 内核永远拉不起来
+
+根因：守卫是 npm 包内**无扩展名的 Node 脚本**，而壳的包装脚本与 spawn_daemon 都是
+`"<guard>" daemon` —— Windows `cmd` 不能执行无扩展名文件、也不认 shebang。
+`schtasks /Run` 只报「任务已触发」，因此表现为「服务管理器错误：无 但守卫永不就绪」。
+
+- `platform/windows.rs`：新增 `guard_argv()` —— 无扩展名守卫**显式用契约 node 执行**（仅 `.cmd`/`.bat` 直接执行）；
+- `platform/mod.rs`：`LaunchSpec` 增加 `state_root`（壳解析的单一事实源）；
+- 三平台服务定义与 spawn 均注入 `DSH_SUPERVISOR_HOME`，杜绝壳/内核各自推导状态根分叉；
+- 门禁：L-1 Windows 执行器（含反向）、K-9 状态根注入。
+
 ## [1.1.2]（2026-09-15）
 
 ### 产品状态根独立于 DSH（XDG，2026-09-15）
