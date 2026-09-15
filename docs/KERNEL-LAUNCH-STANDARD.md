@@ -97,6 +97,10 @@ P3 定位顺序（**先契约，后启发式**）：
 
 ## 5. 现状与缺口登记（2026-09-15 审计，逐条可复核）
 
+> **2026-09-15 收口**：G1–G6 均已落地（`core.json` 位置契约、locate 先读契约、`guard_start` 对齐门、
+> 端口登记实际值、`install` 不建服务定义、Windows 看护收归壳、proxy 日志经 `stateDir`），
+> 且各有门禁（K-1..K-7 / D-1..D-8）。下表保留为**审计记录**（写的是修复前状态）。
+
 | # | 缺口 | 现状证据 | 规范要求 |
 |---|---|---|---|
 | G1 | **位置未落契约**（H3） | `domain/coreloc.rs` 全仓 0 处引用 `runtime_contract`；Linux `core_extra_candidates` 返回空（`platform/linux.rs:154`） | P2 写 core.json；P3 先读契约 |
