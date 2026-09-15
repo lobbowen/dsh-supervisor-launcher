@@ -85,15 +85,8 @@
     // 显式拖动（Linux WebKit drag-region 常不生效的可靠替代）
     document.getElementById('dragRegion').addEventListener('mousedown', function () { wctl('drag'); });
     var panelUrl = null;
-    // 主动取面板 URL（2026-09-11）：本页是引导完成后的**主帧**（引导页已导航到这里），
-    // 而 Rust 的 shell:goto-panel 事件在首帧可能早于 listener 注册而被丢弃 ——
-    // 故此处直接向 Rust 要地址，不依赖事件竞态。
-    if (core) {
-      core.invoke('shell_panel_url').then(function (r) {
-        if (r && r.url) { panelUrl = r.url; frame.src = r.url; }
-      }).catch(function () {});
-    }
     var retried = 0;
+    var loadPanel = function (u) { panelUrl = u; frame.src = u; };
 
     // 引导完成 → 内容区切到面板
     if (evt) {
@@ -116,6 +109,71 @@
       retried++;
       var sep = panelUrl.indexOf('?') >= 0 ? '&' : '?';
       frame.src = panelUrl + sep + 'dsh_retry=' + Date.now();
+    });
+
+    // ── 内核更新消息桥（单写入者契约；docs/DESIGN-SHELL-ARCHITECTURE.md §3.2c）──
+    // 面板由**内核**托管、运行在内容 iframe 内，没有 Tauri IPC（IPC 仅主帧）。
+    // 故面板经 postMessage 请求本主帧代执行「更新内核」—— 内核包唯一写入者是壳。
+    // 版本/消息类型/命令名由 Rust 的 shell_bridge_contract 下发（不在此硬编码）。
+    var BRIDGE = null;
+    var isLoopbackOrigin = function (origin) {
+      try {
+        var u = new URL(origin);
+        if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+        var h = String(u.hostname || '').toLowerCase();
+        return h === '127.0.0.1' || h === 'localhost' || h === '::1' || h === '[::1]';
+      } catch (e) { return false; }
+    };
+    var replyToPanel = function (src, origin, msg) {
+      try { src.postMessage(msg, origin); } catch (e) {}
+    };
+    if (core) {
+      // 取桥契约（拿到后才加载面板，保证面板首次请求就能被识别，消除竞态）。
+      // ⚠ 可用性优先：即使契约拉取失败，也必须照常加载面板（否则白屏），只是更新桥不可用。
+      core.invoke('shell_bridge_contract').then(function (c) {
+        BRIDGE = c || null;
+      }).catch(function () {}).then(function () {
+        if (panelUrl === null) {
+          core.invoke('shell_panel_url').then(function (r) {
+            if (r && r.url) loadPanel(r.url);
+          }).catch(function () {});
+        }
+      });
+    }
+    window.addEventListener('message', function (ev) {
+      if (!BRIDGE || !BRIDGE.types || !ev || !ev.data || typeof ev.data !== 'object') return;
+      if (ev.data.v !== BRIDGE.v) return;                       // K1：协议版本必须一致
+      if (ev.data.type !== BRIDGE.types.request) return;
+      // K2：只接受「内容 iframe」且 origin 为回环 —— 其他窗口/页面一律忽略。
+      if (!frame.contentWindow || ev.source !== frame.contentWindow) return;
+      if (!isLoopbackOrigin(ev.origin)) return;
+      var rid = String(ev.data.requestId || '');
+      if (!rid) return;
+      var origin = ev.origin, src = ev.source;
+      if (!core || !BRIDGE.cmd) {                               // K3：回复 targetOrigin = ev.origin，绝不回 '*'
+        replyToPanel(src, origin, { v: BRIDGE.v, type: BRIDGE.types.result, requestId: rid, ok: false, error: 'Tauri IPC 不可用' });
+        return;
+      }
+      replyToPanel(src, origin, { v: BRIDGE.v, type: BRIDGE.types.progress, requestId: rid, stage: 'start' });
+      core.invoke(BRIDGE.cmd).then(function (r) {
+        var ok = !!(r && r.ok !== false);
+        replyToPanel(src, origin, {
+          v: BRIDGE.v, type: BRIDGE.types.result, requestId: rid, ok: ok,
+          stage: (r && r.stage) || null,
+          version: (r && r.version) || null,
+          restartUncertain: !!(r && r.restartUncertain),
+          error: (r && r.error) || null,
+        });
+        // K5：重启成功后重载面板 iframe（守卫已换新二进制）；延后以便结果先送达面板。
+        if (ok && panelUrl) {
+          setTimeout(function () {
+            var sep = panelUrl.indexOf('?') >= 0 ? '&' : '?';
+            frame.src = panelUrl + sep + 'dsh_retry=' + Date.now();
+          }, 900);
+        }
+      }).catch(function (e) {
+        replyToPanel(src, origin, { v: BRIDGE.v, type: BRIDGE.types.result, requestId: rid, ok: false, error: String(e) });
+      });
     });
   })();
   </script>
