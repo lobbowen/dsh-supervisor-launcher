@@ -214,12 +214,21 @@ fn k9_state_root_injected_into_launch() {
 fn k10_windows_launch_diagnosable_and_kill_correct() {
     let src = read("src/platform/windows.rs");
     let missing = has_all(&src, &[
-        "fn win_path_expr",   // 正文 ASCII（非 ASCII 用户名不被 cmd 码页误解码）
-        "guard-task.log",     // 包装脚本落日志（wrapper 是否执行、node 报了什么）
-        "%ERRORLEVEL%",       // 退出码可见
-        "guard-spawn.log",    // 兜底 spawn 落日志
-        "Stop-Process",       // 按命令行杀守卫 node
+        "guard-task.ps1",             // PowerShell 包装脚本（弃用 .cmd：码页/任务 env 两类根因）
+        "\\u{feff}",                 // 写 UTF-8 BOM：PS 5.1 无 BOM 按 ANSI 解码 → 非 ASCII 路径乱码
+        "Add-Content",                // 包装脚本全程落日志
+        "guard-task.log",             // 日志文件名
+        "[guard-task] NODE MISSING",  // node 缺失也可诊断（不再「什么都看不到」）
+        "[guard-task] GUARD MISSING", // 守卫缺失也可诊断
+        "$LASTEXITCODE",              // 退出码可见（PowerShell 语义）
+        "guard-spawn.log",            // 兜底 spawn 落日志
+        "Stop-Process",               // 按命令行杀守卫 node
     ]);
     assert!(missing.is_empty(), "K-10 失败：Windows 启动诊断/杀进程缺失 {:?}", missing);
+    // 包装脚本必须是 PowerShell（.cmd 正文受码页/任务 env 双重影响，已定为根因）
+    assert!(
+        src.contains("join(\"guard-task.ps1\")"),
+        "K-10 失败：包装脚本未改用 PowerShell guard-task.ps1"
+    );
     assert!(!src.contains("\"/IM\", \"dsh-supervisor.exe\""), "K-10 失败：仍按 dsh-supervisor.exe 杀进程（守卫是 node.exe，杀不掉）");
 }
