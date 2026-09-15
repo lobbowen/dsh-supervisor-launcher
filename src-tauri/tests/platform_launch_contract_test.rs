@@ -53,7 +53,7 @@ fn l1_macos_plist_binds_node() {
 #[test]
 fn l1_windows_wrapper_binds_node() {
     let src = read("src/platform/windows.rs");
-    let missing = has_all(&src, &["%PATH%", "node_dir", "spec.node", "spec.guard"]);
+    let missing = has_all(&src, &["$env:PATH", "node_dir", "spec.node", "spec.guard"]);
     assert!(missing.is_empty(), "L-1 失败：Windows 包装脚本未注入 Node PATH，缺 {:?}", missing);
 }
 

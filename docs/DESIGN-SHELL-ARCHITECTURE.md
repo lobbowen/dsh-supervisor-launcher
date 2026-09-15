@@ -191,7 +191,7 @@ ExecStart 以 127 失败 → **内核装上了却永远拉不起来**。
 
 **消费面（缺一不可）**：
 - 内核安装：core.rs 用契约里的**绝对 npm** + PATH（不再裸 npm）；
-- 服务定义：三平台 ensure_defined 显式绑定 node（systemd ExecStart=node+guard+daemon 且 Environment=PATH=…；launchd ProgramArguments=[node,guard,daemon] 且 EnvironmentVariables.PATH；Windows 包装脚本注入 PATH）；
+- 服务定义：三平台 ensure_defined 显式绑定 node（systemd ExecStart=node+guard+daemon 且 Environment=PATH=…；launchd ProgramArguments=[node,guard,daemon] 且 EnvironmentVariables.PATH；Windows PowerShell 包装脚本注入 `$env:PATH`，路径以字面量写入并以 UTF-8 BOM 落盘）；
 - spawn 兜底：spawn_daemon 用 node + guard + env PATH；
 - 端口发现：壳读 ports.json 的 supervisor-api **实际**端口，等待循环**每 tick 重读**。
 

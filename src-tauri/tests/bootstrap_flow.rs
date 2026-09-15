@@ -1016,7 +1016,7 @@ fn b43_windows_cmd_quoting_handles_spaces() {
 ///
 /// `schtasks /Create ... /TR <wrapper>` 的 `/TR` 值是**纯字符串**，schtasks 内部按
 /// 命令行规则解析 —— 路径含空格时若不自带引号，动作会被**截断到第一个空格**。
-/// 而 wrapper = `%USERPROFILE%\.dsh\supervisor\guard-task.cmd`，含用户名；
+/// 而 `/TR` 指向状态目录下的包装脚本（1.1.5 起为 `guard-task.ps1`），路径含 Windows 用户名；
 /// Windows 用户名**可以含空格**（如 "John Smith"）。
 ///
 /// 症状：任务创建**成功**（schtasks 不报错）但执行时找不到目标 → **登录自启静默失效**。
@@ -1030,15 +1030,16 @@ fn b43_windows_cmd_quoting_handles_spaces() {
 fn b56_windows_schtasks_tr_value_is_quoted() {
     let s = fs::read_to_string(manifest_dir().join("src").join("platform").join("windows.rs"))
         .expect("platform/windows.rs");
-    // 必须存在「把路径包进引号」的构造
+    // /TR 现为 `powershell ... -File "<ps1>"`：脚本路径经 -File 自带引号，
+    //   用户名含空格时任务动作不会被截断（与看护脚本同一形态）。
     assert!(
-        s.contains("format!(\"\\\"{}\\\"\", wrapper.display())"),
-        "B56 FAIL /TR 值未自带引号 —— 用户名含空格时任务动作会被截断"
+        s.contains("Bypass -File") && s.contains("wrapper.display()"),
+        "B56 FAIL /TR 未把脚本路径经 powershell -File 引号包裹 —— 用户名含空格时会被截断"
     );
-    // 且不得再用未加引号的裸 display() 直接当 /TR 值
+    // 且不得再用「裸脚本路径」直接当 /TR 值
     assert!(
-        !s.contains("\"/TR\", &wrapper.display().to_string()"),
-        "B56 FAIL 仍在用未加引号的 wrapper 作 /TR 值"
+        !s.contains("format!(\"\\\"{}\\\"\", wrapper.display())"),
+        "B56 FAIL 仍在用裸脚本路径作 /TR 值"
     );
     eprintln!("B56 PASS schtasks /TR value is quoted");
 }

@@ -48,7 +48,9 @@ fn watchdog_script(spec: &LaunchSpec) -> String {
 ///   故必须显式用契约里的 node：`"<node>" "<guard>" daemon`。
 ///   仅当守卫**确是** .cmd/.bat 垫片时才直接执行它（node 无法解析 cmd 脚本）。
 fn guard_argv(spec: &LaunchSpec) -> String {
-    let g = win_path_expr(&spec.guard);
+    // 用**原始字面量路径**：本函数只用于 `cmd /C <line>`（下方 spawn_daemon）——创建进程时命令行
+    //   是 **Unicode**，cmd 不按码页解码命令行，故含空格/非 ASCII 的路径也安全。
+    //   原先的 %ENV% 改写只为 `.cmd` **正文**服务（正文才受码页影响）；包装脚本已改 PowerShell BOM，不再需要。
     let is_cmd = spec
         .guard
         .extension()
@@ -56,30 +58,10 @@ fn guard_argv(spec: &LaunchSpec) -> String {
         .map(|e| { let e = e.to_ascii_lowercase(); e == "cmd" || e == "bat" })
         .unwrap_or(false);
     if is_cmd {
-        format!("\"{}\" daemon", g)
+        format!("\"{}\" daemon", spec.guard.display())
     } else {
-        format!("\"{}\" \"{}\" daemon", win_path_expr(&spec.node), g)
+        format!("\"{}\" \"{}\" daemon", spec.node.display(), spec.guard.display())
     }
-}
-
-/// 把绝对路径的已知前缀替换为 cmd 环境变量引用（%LOCALAPPDATA% 等），使 **.cmd 正文保持 ASCII**。
-///
-/// 为什么必须：用户名/路径可含非 ASCII（中文用户名常见），而 cmd 读 .cmd **正文**时按 OEM 码页解码，
-///   Rust 写出的是 UTF-8 → 路径乱码 → node/guard 找不到 → 守卫从未执行（表现：状态文件一个都没建）。
-///   用 %ENV% 引用后正文全 ASCII；cmd 在**命令行**（Unicode）展开，非 ASCII 用户名也能正确传参。
-fn win_path_expr(p: &std::path::Path) -> String {
-    let ps = p.display().to_string();
-    for var in ["LOCALAPPDATA", "APPDATA", "ProgramFiles", "ProgramFiles(x86)", "USERPROFILE"] {
-        if let Some(v) = std::env::var_os(var) {
-            let prefix = v.to_string_lossy().to_string();
-            if !prefix.is_empty() {
-                if let Some(rest) = ps.strip_prefix(&prefix) {
-                    return format!("%{}%{}", var, rest);
-                }
-            }
-        }
-    }
-    ps
 }
 
 /// PowerShell 单引号字符串（内部单引号翻倍；反斜杠为字面量，无需转义）。
@@ -398,30 +380,45 @@ impl ServiceControl for Impl {
             ),
             Ok(o) if o.success
         );
-        // 计划任务的 /TR 引号转义极易出错（尤其是路径含空格与 .cmd 垫片）。
-        // 改为写一个**包装脚本**再指向它 —— 与内核 watchdog.ps1 同一思路，规避转义地狱。
-        let wrapper = crate::env::supervisor_dir().join("guard-task.cmd");
+        // 计划任务的 /TR 引号转义极易出错（尤其是路径含空格与 npm 垫片）。
+        // 改为写一个 **PowerShell 包装脚本**（UTF-8 BOM）再指向它 —— 与内核 watchdog.ps1 同一思路。
+        //
+        // 硬规则（2026-09-15 二次修复）：**彻底弃用 `.cmd`**。
+        //   真机证据：`.cmd` 包装脚本确实被执行（日志有 start/exit），但命令行为
+        //   「系统找不到指定的路径。」且 ERRORLEVEL=3 —— cmd 只在「命令行里某**目录**不存在」时给 3
+        //   （找不到命令是 9009）。两个可能根因：
+        //     ① `.cmd` 正文被 cmd 按 OEM 码页解码 → 含非 ASCII 用户名的路径乱码；
+        //     ② 正文里 `%APPDATA%` 等**在计划任务环境未展开**（写脚本的壳进程 env ≠ 任务 env）。
+        //   两者同源：用 cmd 读文件 + 依赖任务 env。PowerShell 脚本按 **UTF-8 BOM** 解码，
+        //   路径以**字面量**写入（ps_quote 单引号，不插值、不依赖 env）→ 从根上消除两类根因。
+        //   看护脚本（watchdog.ps1）早已如此且稳定，此处对齐同一形态。
+        let wrapper = crate::env::supervisor_dir().join("guard-task.ps1");
         if let Some(dir) = wrapper.parent() {
             std::fs::create_dir_all(dir).map_err(|e| format!("创建状态目录失败: {}", e))?;
         }
-        // 硬规则（2026-09-15）：包装脚本先注入 PATH（nodeBinDir 首位），再**经 node 显式执行守卫**。
-        //   关键：Windows 上守卫是 npm 包内**无扩展名的 Node 脚本**（bin/dsh-supervisor），
-        //   cmd **不能执行无扩展名文件、也不认 shebang** —— 旧写法 "<guard>" daemon 必然失败，
-        //   而 schtasks /Run 只报「任务已触发」→ 表现为「服务管理器错误：无 但守卫永不就绪」。
+        // 清理 1.1.4 及以前遗留的 .cmd 包装脚本，避免残留误导排查。
+        let _ = std::fs::remove_file(crate::env::supervisor_dir().join("guard-task.cmd"));
         let node_dir = spec.node.parent().map(|p| p.to_path_buf()).unwrap_or_default();
         let shim = {
-            // 正文保持 **ASCII**（路径经 %ENV% 引用）+ 全程落日志：
-            //   即使 node/guard 启动失败，guard-task.log 也会留下「wrapper 是否执行、node 报了什么」。
-            let log = win_path_expr(&crate::env::supervisor_dir().join("guard-task.log"));
-            format!(
-                "@echo off\r\nset \"DSH_SUPERVISOR_HOME={}\"\r\nset \"PATH={};%PATH%\"\r\necho [guard-task] start %DATE% %TIME% >> \"{}\"\r\n{} >> \"{}\" 2>&1\r\necho [guard-task] exit %ERRORLEVEL% >> \"{}\"\r\n",
-                win_path_expr(&spec.state_root),
-                win_path_expr(&node_dir),
-                log,
-                guard_argv(spec),
-                log,
-                log
-            )
+            // 全程落日志：即使 node/guard 启动失败，guard-task.log 也留下「脚本是否执行、node 报了什么」。
+            let log = crate::env::supervisor_dir().join("guard-task.log");
+            let lines = [
+                format!("$env:DSH_SUPERVISOR_HOME = {}", ps_quote(&spec.state_root.display().to_string())),
+                format!("$env:PATH = {} + ';' + $env:PATH", ps_quote(&node_dir.display().to_string())),
+                format!("$log = {}", ps_quote(&log.display().to_string())),
+                "function Write-GLog([string]$m) { Add-Content -LiteralPath $log -Value $m -Encoding UTF8 }".to_string(),
+                "Write-GLog \"[guard-task] start $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')\"".to_string(),
+                format!("$node = {}", ps_quote(&spec.node.display().to_string())),
+                format!("$guard = {}", ps_quote(&spec.guard.display().to_string())),
+                "Write-GLog \"[guard-task] node=$node guard=$guard\"".to_string(),
+                "if (-not (Test-Path -LiteralPath $node)) { Write-GLog '[guard-task] NODE MISSING' }".to_string(),
+                "if (-not (Test-Path -LiteralPath $guard)) { Write-GLog '[guard-task] GUARD MISSING' }".to_string(),
+                "& $node $guard daemon *>> $log".to_string(),
+                "Write-GLog \"[guard-task] exit $LASTEXITCODE\"".to_string(),
+            ];
+            let body = lines.join("\r\n") + "\r\n";
+            // UTF-8 BOM：Windows PowerShell 5.1 对**无 BOM** 的脚本按 ANSI 解码 → 中文路径再次乱码。
+            format!("\u{feff}{}", body)
         };
         // ── 内容比对（P2 自愈）：任务在 + 包装脚本内容一致 → 才算「已是最新」。
         //    否则继续往下走 `/Create /F` 重建（覆盖语义）。
@@ -436,19 +433,13 @@ impl ServiceControl for Impl {
         // 看护任务（DSH-Supervisor-Watchdog）的所有者 = 壳（D6/H5）：随服务定义一并（重）建立。
         let wd_note = self.watchdog_status(spec);
 // 创建「最高权限」任务可能被拒：权限不足时降级为普通权限任务（不彻底失败）。
-        // `/TR` 的值**必须自带引号**（P1-D 修复，2026-09-12）：
-        //   schtasks 对 `/TR` 接收的都是**纯字符串**（此处经 args 传参，不经过 cmd），
-        //   它内部按命令行规则解析 —— 路径含空格时，若不自带引号，
-        //   任务动作会被**截断到第一个空格**。
-        //   而 `%USERPROFILE%\.dsh\supervisor\guard-task.cmd` 里含 Windows 用户名，
-        //   用户名**可以含空格**（如 "John Smith"）。
-        //   症状：任务创建**成功**（schtasks 不报错）但执行时找不到目标 → 登录自启静默失效。
-        //
-        //   对照证据：内核侧同类调用**已经**自带引号
-        //   （plus/src/platform/os/autostart.js 的 `'/TR', '"' + guiCommand() + '"'`）；
-        //   壳侧 spawn_daemon 的 cmd 引号也已修（本文件下方 + B43 测试）—— 唯独此处漏网。
-        //   注意引号写在**值内部**，而不是给 Rust args 加引号（后者会被原样传递）。
-        let tr_action = format!("\"{}\"", wrapper.display());
+        // `/TR` 现为**完整命令行**（powershell + -File "<ps1>"），而非单一脚本路径。
+        //   引号仍写在**值内部**（`-File` 的参数自带引号），不给 Rust args 加引号；
+        //   脚本路径含空格/用户名（如 "John Smith"）时不会被截断。与看护脚本同一形态。
+        let tr_action = format!(
+            "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{}\"",
+            wrapper.display()
+        );
         let base = |rl: Option<&str>| {
             let mut c = Command::new("schtasks");
             c.args(["/Create", "/TN", GUARD_TASK, "/SC", "ONLOGON"]);

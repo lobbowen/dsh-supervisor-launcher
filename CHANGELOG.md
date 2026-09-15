@@ -6,6 +6,32 @@
 
 （下一版本待记）
 
+## [1.1.5]（2026-09-15）
+
+### 修复：Windows 守卫包装脚本弃用 `.cmd`，改用 PowerShell（UTF-8 BOM）
+
+真机证据（1.1.4）：包装脚本**确实被执行**（`guard-task.log` 有 `start`），但紧接着
+`系统找不到指定的路径。` 且 `exit 3` —— `cmd` 只在「命令行里某个**目录**不存在」时给 3
+（找不到命令是 9009）。也就是说：日志能写，但 node/guard 命令行的路径被判为不存在。
+
+两类根因同源（用 `cmd` 读文件 + 依赖任务环境变量）：
+
+1. **码页**：`.cmd` **正文**由 `cmd` 按 OEM 码页解码，Rust 写出的 UTF-8 中若含非 ASCII
+   用户名（中文），路径即乱码；
+2. **任务环境**：正文里的 `%APPDATA%`/`%LOCALAPPDATA%` 在计划任务环境可能未展开，留下
+   `%APPDATA%\...` 字面量 → 目录不存在。
+
+修法（对照内核看护脚本 `watchdog.ps1`，同一稳定形态）：
+
+- 包装脚本改为 **`guard-task.ps1`**，`schtasks /TR` = `powershell -NoProfile -NonInteractive
+  -ExecutionPolicy Bypass -File "<ps1>"`（`-File` 参数自带引号，用户名含空格也不截断）；
+- 脚本以 **UTF-8 BOM** 落盘：Windows PowerShell 5.1 对无 BOM 的脚本按 ANSI 解码，中文路径会再次乱码；
+- 所有路径经 `ps_quote` 以**单引号字面量**写入，不插值、不依赖任何环境变量；
+- 脚本内 `Test-Path` 分别记录 `NODE MISSING` / `GUARD MISSING`，并回显实际 node/guard 路径与
+  `$LASTEXITCODE` —— 再失败也能一眼定位到是哪条路径；
+- 自动清理 1.1.4 遗留的 `guard-task.cmd`；
+- 门禁：K-10（PS/BOM/可诊断）、L-1（`$env:PATH` 绑定）、B56（`-File` 引号）同步。
+
 ## [1.1.4]（2026-09-15）
 
 ### 修复：Windows 守卫「从未被执行」的三处加固
