@@ -42,3 +42,18 @@ fn spawn_daemon_is_uniform_not_per_platform() {
         assert!(!src.contains("fn spawn_daemon"), "{} 仍有平台专属 spawn_daemon（应统一）", f);
     }
 }
+
+/// 工具链契约（2026-09-16）：环境就绪 = node **且** npm。
+/// 干净 Windows 上「node 在、npm 缺」必须被检出并触发修复，而不是判「就绪」后用不存在的 npm 去装内核。
+#[test]
+fn toolchain_gate_requires_npm() {
+    let rt = read("src/runtime_contract.rs");
+    assert!(rt.contains("fn probe_npm"), "工具链契约缺 probe_npm（npm 与 node 同等必需）");
+    assert!(rt.contains("npm_prefix"), "npm 仅包内 JS 时缺前缀参数承载（跨平台）");
+    let cmd = read("src/commands/mod.rs");
+    assert!(cmd.contains("npmOk"), "node_status 未回传 npmOk");
+    let env_js = read("bootstrap/js/20-env.js");
+    assert!(env_js.contains("npmOk"), "前端环境门未消费 npmOk（npm 缺失不会被修复）");
+    let core = read("src/core.rs");
+    assert!(core.contains("npm_prefix"), "npm 调用未带前缀参数（包内 JS 会 ENOENT）");
+}

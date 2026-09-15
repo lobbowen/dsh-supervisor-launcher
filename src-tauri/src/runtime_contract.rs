@@ -35,8 +35,11 @@ pub struct NodeRuntime {
     pub node: PathBuf,
     /// Node 所在 bin 目录（服务/子进程 PATH 首位）。
     pub node_bin_dir: PathBuf,
-    /// 与该 Node 配套的 npm 绝对路径。
+    /// 与该 Node 配套的 npm **可执行程序**（可直接 spawn）。
     pub npm: PathBuf,
+    /// npm 的前置参数：npm 仅有包内 JS（`node_modules/npm/bin/npm-cli.js`）时，
+    ///   `npm`=node、`npm_prefix`=[npm-cli.js]；常规 npm 垫片时为空。
+    pub npm_prefix: Vec<String>,
     /// Node 版本（形如 `v22.12.0`）。
     pub version: String,
 }
@@ -46,14 +49,42 @@ pub fn path() -> PathBuf {
     crate::env::supervisor_dir().join("runtime.json")
 }
 
+/// 解析 npm 可执行（**工具链契约的一部分**）。
+///
+/// 返回 `(program, prefix_args)`：program 可直接 spawn；npm 仅有包内 JS 时
+///   program=node、prefix=[npm-cli.js]。**找不到返回 None** —— 绝不伪造一个不存在的路径
+///   （旧实现恒拼 `bin_dir/npm[.cmd]`，于是「环境就绪」可以指向一个不存在的 npm）。
+pub fn probe_npm(node: &Path, bin_dir: &Path) -> Option<(PathBuf, Vec<String>)> {
+    let mut names: Vec<PathBuf> = vec![
+        bin_dir.join(crate::platform::current().npm_exe_name()),
+        bin_dir.join("npm"),
+        bin_dir.join("npm.cmd"),
+        bin_dir.join("npm.exe"),
+    ];
+    names.dedup();
+    for p in &names {
+        if p.is_file() {
+            return Some((p.clone(), vec![]));
+        }
+    }
+    // Node 官方分发包同款：npm 只以包内 JS 存在 → 用同一 node 承载。
+    let cli = bin_dir.join("node_modules").join("npm").join("bin").join("npm-cli.js");
+    if cli.is_file() {
+        return Some((node.to_path_buf(), vec![cli.display().to_string()]));
+    }
+    None
+}
+
 /// 由 Node 路径 + 版本推导 npm 路径与 bin 目录（npm 与 node 同目录）。
+/// npm 缺失 → None（环境不就绪，由壳安装/修复，绝不伪造）。
 pub fn derive(node: &Path, version: &str) -> Option<NodeRuntime> {
     let node_bin_dir = node.parent()?.to_path_buf();
-    let npm = node_bin_dir.join(crate::platform::current().npm_exe_name());
+    let (npm, npm_prefix) = probe_npm(node, &node_bin_dir)?;
     Some(NodeRuntime {
         node: node.to_path_buf(),
         node_bin_dir,
         npm,
+        npm_prefix,
         version: version.to_string(),
     })
 }
@@ -71,8 +102,10 @@ pub fn write(rt: &NodeRuntime) {
         // ── 新键（本契约消费面）──
         "nodeBinDir": bin_s,
         "npmPath": npm_s,
+        // 当 npm 只有包内 JS 时，npmPath=node、npmArgs=[npm-cli.js]（消费者必须带上 args）。
+        "npmArgs": rt.npm_prefix,
         "node": { "path": node_s, "binDir": bin_s, "version": rt.version },
-        "npm": { "path": npm_s },
+        "npm": { "path": npm_s, "args": rt.npm_prefix },
         // ── 旧键（内核 env-catalog 已在读；不得删除）──
         "nodePath": node_s,
         "nodeVersion": rt.version,
@@ -108,8 +141,13 @@ pub fn read_node() -> Option<NodeRuntime> {
         .and_then(|x| x.as_str())
         .map(PathBuf::from)
         .unwrap_or_else(|| bin.join(crate::platform::current().npm_exe_name()));
+    let npm_prefix: Vec<String> = v
+        .get("npmArgs")
+        .and_then(|x| x.as_array())
+        .map(|a| a.iter().filter_map(|s| s.as_str().map(|s| s.to_string())).collect())
+        .unwrap_or_default();
     let version = v.get("nodeVersion").and_then(|x| x.as_str()).unwrap_or("").to_string();
-    Some(NodeRuntime { node, node_bin_dir: bin, npm, version })
+    Some(NodeRuntime { node, node_bin_dir: bin, npm, npm_prefix, version })
 }
 
 /// 确保契约存在且指向**可执行**的 Node：先读；缺失/失效则经 nodeprobe 解析并写入。
@@ -117,7 +155,8 @@ pub fn read_node() -> Option<NodeRuntime> {
 /// 返回 `None` = 本机 Node 未就绪 —— 调用方如实报错，绝不猜路径（契约的意义就在于此）。
 pub fn ensure() -> Option<NodeRuntime> {
     if let Some(rt) = read_node() {
-        if rt.node.is_file() {
+        // 工具链契约：node **与** npm 都必须真实存在（旧实现只查 node → 「就绪」可指向不存在的 npm）。
+        if rt.node.is_file() && rt.npm.is_file() {
             return Some(rt);
         }
     }
@@ -149,4 +188,58 @@ pub fn env_path(node_bin_dir: &Path) -> String {
     std::env::join_paths(&dirs)
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod toolchain_tests {
+    //! 工具链契约行为门禁（2026-09-16）：环境就绪 = node **且** npm 真实存在；
+    //!   缺失必须如实为 None，绝不伪造路径（旧实现恒拼 `bin_dir/npm[.cmd]`）。
+    use super::*;
+
+    fn tmp(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("dsh-npmprobe-{}-{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn probe_npm_reports_missing_instead_of_fabricating() {
+        let d = tmp("missing");
+        let node = d.join("node");
+        std::fs::write(&node, b"").unwrap();
+        assert!(probe_npm(&node, &d).is_none(), "npm 缺失时必须返回 None，绝不伪造路径");
+        // 只加包内 npm-cli.js → 用同一 node 承载。
+        let cli = d.join("node_modules").join("npm").join("bin").join("npm-cli.js");
+        std::fs::create_dir_all(cli.parent().unwrap()).unwrap();
+        std::fs::write(&cli, b"").unwrap();
+        let got = probe_npm(&node, &d).expect("npm-cli.js 存在时应命中");
+        assert_eq!(got.0, node);
+        assert_eq!(got.1, vec![cli.display().to_string()]);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn probe_npm_prefers_executable_shim() {
+        let d = tmp("shim");
+        let node = d.join("node");
+        let npm = d.join("npm");
+        std::fs::write(&node, b"").unwrap();
+        std::fs::write(&npm, b"").unwrap();
+        let got = probe_npm(&node, &d).expect("npm 垫片存在时应命中");
+        assert_eq!(got.0, npm);
+        assert!(got.1.is_empty());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn derive_requires_npm() {
+        let d = tmp("derive");
+        let node = d.join("node");
+        std::fs::write(&node, b"").unwrap();
+        assert!(derive(&node, "v22.12.0").is_none(), "无 npm → 环境不就绪");
+        std::fs::write(d.join("npm"), b"").unwrap();
+        assert!(derive(&node, "v22.12.0").is_some(), "有 npm → 就绪");
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }

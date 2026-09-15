@@ -6,6 +6,28 @@
 
 （下一版本待记）
 
+## [1.1.7]（2026-09-16）
+
+### 修复：工具链契约补齐 npm（干净 Windows 上「node 在、npm 缺」）
+
+真机：干净 Windows 上壳判「环境就绪」，却用**不存在的 npm** 去安装内核，必失败。
+
+根因：环境契约是**单工具且可伪造**的 —— `runtime_contract::derive()` 恒拼
+`nodeBinDir/npm[.cmd]`（不查存在性），`ensure()` 只校验 `node.is_file()`。
+「环境就绪」＝「node.exe 存在」，npm 完全不在判据内。
+
+修法（**工具链契约**：必需工具集必须逐项真实存在，缺则修复）：
+
+- `derive()` → `probe_npm()`：按 `npm`/`npm.cmd`/`npm.exe` → 包内
+  `node_modules/npm/bin/npm-cli.js` 顺序解析；找不到返回 None（**绝不伪造**）；
+- npm 仅包内 JS 时以 `(node, [npm-cli.js])` 表达：契约新增 `npmArgs`，`core.rs` 调用带前缀；
+- `ensure()` 要求 **node 与 npm 都存在**才算就绪；
+- `node_status` 回传 `npmOk`/`npmPath`；引导页（`20-env.js`）在 `npmOk === false` 时
+  自动重跑官方 Node 安装（官方分发包自带 npm）补全工具链；
+- 内核侧 `env-catalog` 的 npm 探测改为**契约优先**（Windows 裸 `npm` 是 ENOENT）。
+- 门禁：`runtime_contract::toolchain_tests`（缺失即 None / 包内 JS / 垫片优先）+
+  `guard_resolution_test::toolchain_gate_requires_npm`。
+
 ## [1.1.6]（2026-09-15）
 
 ### 架构修正：服务定义只指向**稳定入口** `<壳> --run-guard`，node/守卫改为运行时检测
