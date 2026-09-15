@@ -42,6 +42,20 @@ pub(crate) fn locate_core_candidates(resource_dir: Option<PathBuf>) -> Vec<PathB
         let real = std::fs::canonicalize(&p).unwrap_or(p); // 解析 ~/.local/bin 软链到包内真实路径
         if !out.contains(&real) { out.push(real); }
     };
+    // ① 位置契约优先（core.json.bin）—— 安装成功后壳写入的**确切位置**。
+    //    为什么必须最先：npm 全局 prefix 可能是 nvm/volta/fnm 的 node 目录或任何自定义目录，
+    //    PATH 与下面两个硬编码目录都不含它；契约是唯一可靠的事实源。
+    let names_owned: Vec<&str> = crate::domain::coreloc::core_exe_names().to_vec();
+    if let Some(c) = crate::core_contract::read() {
+        add(c.bin.clone(), &mut out);
+    }
+    // ② 运行期契约派生：内核由 npm 装到 node 所在 prefix，其 bin 就在 nodeBinDir。
+    if let Some(rt) = crate::runtime_contract::read_node() {
+        for name in &names_owned {
+            add(rt.node_bin_dir.join(name), &mut out);
+        }
+    }
+    // ③ 启发式：壳进程 PATH。
     for name in crate::domain::coreloc::core_exe_names().iter().copied() {
         if let Some(p) = crate::env::find_in_path(name) { add(p, &mut out); }
     }
@@ -62,6 +76,28 @@ pub(crate) fn locate_core_candidates(resource_dir: Option<PathBuf>) -> Vec<PathB
         for name in crate::domain::coreloc::core_exe_names().iter().copied() { add(res.join("bin").join(name), &mut out); }
     }
     out
+}
+
+/// 在候选集（含指定 prefix 的平台候选）中找**恰好等于 `version`** 的内核。
+///
+/// 用途：P2「安装成功后回读确切位置并记录 core.json」。找不到 → None：
+///   调用方必须**如实报**「已安装但定位不到目标版本（安装前缀不一致）」，绝不假装成功。
+pub(crate) fn locate_core_at_version(
+    app: &tauri::AppHandle,
+    version: &str,
+    prefix: Option<&std::path::Path>,
+) -> Option<PathBuf> {
+    let mut cands = locate_core_candidates(app.path().resource_dir().ok());
+    if let Some(p) = prefix {
+        let names: Vec<&str> = core_exe_names().to_vec();
+        let pkg = crate::core::package_name().ok();
+        for c in crate::platform::current().core_bin_candidates_in_prefix(p, &names, pkg.as_deref()) {
+            cands.push(c);
+        }
+    }
+    cands
+        .into_iter()
+        .find(|c| crate::core::installed_version(c).as_deref() == Some(version))
 }
 
 /// 定位已安装内核：多候选**按版本最高**仲裁（K5 修复）——旧内核不得遮蔽新内核。

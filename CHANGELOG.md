@@ -6,6 +6,17 @@
 
 （下一版本待记）
 
+### 内核启动规范落地：位置契约 + 对齐前置（2026-09-15）
+
+按 `docs/KERNEL-LAUNCH-STANDARD.md`（跨平台 P0–P6）落地：
+
+- 新增 **core.json 位置契约**（`src-tauri/src/core_contract.rs`，schema 1，壳唯一写入）：安装成功后记录 `bin/prefix/version/source`；
+- `locate_core` 候选顺序改为 **core.json → runtime.json 的 nodeBinDir → PATH/固定目录**（nvm/volta/fnm/自定义 prefix 不再「装了找不到」）；
+- `guard_start` 增加**对齐前置**：磁盘内核必须等于线上最新，否则返回 `KERNEL_NOT_ALIGNED` 且**不触服务管理器**；引导页收到后自动对齐一次再重试（`60-guard.js`）；
+- `core_apply` 成功后**回读确切位置**并写 `core.json`；回读不到 → `stage=record` 如实失败（不假装成功）；
+- 平台层新增 `core_bin_candidates_in_prefix`（Windows 覆写 `.cmd` + 包内真实脚本）；
+- 门禁：`src-tauri/tests/kernel_launch_standard_test.rs`（K-1..K-6，含反向）。
+
 ## [1.1.1]（2026-09-15）
 
 ### 运行期启动契约：修「内核装上却永远拉不起来」（Phase 1）

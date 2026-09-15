@@ -10,7 +10,16 @@
     return NS.withTimeout(NS.core.invoke('guard_start'), NS.GUARD_START_BUDGET_MS, '守卫启动超时').then(function (r) {
       if (r && r.__timeout) return NS.guardFailed('守卫启动超时：' + (r.error || '服务管理器无响应'));
       if (r && r.__error) return NS.guardFailed('守卫启动异常：' + r.__error);
-      if (!r || r.ok !== true) return NS.guardFailed('守卫启动失败：' + ((r && r.error) || '未知'));
+      if (!r || r.ok !== true) {
+        // 规范 P1 前置（KERNEL-LAUNCH-STANDARD §1/§4）：磁盘内核未与线上最新对齐 → 先对齐一次再重试。
+        // 只自动对齐一次，避免与内核源不可达形成死循环（第二次仍失败则如实报错）。
+        if (r && r.code === 'KERNEL_NOT_ALIGNED' && !NS._alignRetried) {
+          NS._alignRetried = true;
+          NS.status('内核未与线上对齐 · 正在对齐…');
+          return NS.coreApply(null);
+        }
+        return NS.guardFailed('守卫启动失败：' + ((r && r.error) || '未知'));
+      }
       return NS.stepGuardReady(0);
     }).catch(function (e) { return NS.guardFailed('守卫启动异常：' + NS.errText(e)); });
   }

@@ -16,6 +16,7 @@
 |---|---|---|
 | `RELEASE-STANDARD.md` | **规范（现行）** | **发布/构建流程的唯一事实源**（阶段/矩阵/CI/验证/回滚红线）|
 | `RELEASE-AND-BUILD-DECISION.md` | 决策依据（现行）| 为什么这样发布/构建（背景与理由）|
+| `KERNEL-LAUNCH-STANDARD.md` | **规范（现行）** | **内核启动的唯一事实源**（跨平台 P0–P6 流水线 / 对齐前置 / 平台矩阵 / core.json）|
 | `DESIGN-SHELL-ARCHITECTURE.md` | 设计（现行）| 壳的工程架构与门禁 |
 | `DESIGN-BOUNDARY.md` | 设计（现行）| 壳与内核的边界契约 |
 | `DESIGN-COMPLETE.md` | 设计（现行，**汇总**）| 完整设计（体量最大）|
