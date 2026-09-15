@@ -3,7 +3,7 @@
 //! 本文件是 Windows 的**全部**平台知识（门禁 G1）。
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 use super::service::ServiceControl;
 use super::{home_dir, Capabilities, LaunchSpec, Platform, SVC_NORMAL, SVC_QUICK};
@@ -16,52 +16,28 @@ pub const GUARD_TASK: &str = "DSH-Supervisor";
 pub const WATCHDOG_TASK: &str = "DSH-Supervisor-Watchdog";
 
 /// Windows 看护脚本（PowerShell，纯文本免 cmd 转义）。
-/// 语义与内核旧实现一致：API 不可达且无 dsh-supervisor 进程 → 拉起 daemon；
+/// 语义：API 不可达且无守卫 node 进程 → 启动稳定入口 `<壳> --run-guard`；
 /// GUI 壳缺失则**独立**拉起（两个判断必须相互独立，否则「壳崩、守卫活」时壳永远不回来）。
-fn watchdog_script(spec: &LaunchSpec) -> String {
+///
+/// 看护脚本本身**不含** node/guard 路径 —— 检测在 `--run-guard` 内完成。
+fn watchdog_script(_spec: &LaunchSpec) -> String {
     let port = crate::env::api_port();
-    let node = ps_quote(&spec.node.display().to_string());
-    let guard = ps_quote(&spec.guard.display().to_string());
-    let gui = std::env::current_exe()
+    let shell = std::env::current_exe()
         .map(|p| ps_quote(&p.display().to_string()))
         .unwrap_or_else(|_| "''".into());
     [
         "$ErrorActionPreference = \"SilentlyContinue\"".to_string(),
         format!("$port = {};", port),
-        format!("$node = {};", node),
-        format!("$guard = {};", guard),
-        format!("$gui = {};", gui),
+        format!("$shell = {};", shell),
         "$up = Test-NetConnection -ComputerName 127.0.0.1 -Port $port -InformationLevel Quiet -WarningAction SilentlyContinue".to_string(),
         "if (-not $up) {".to_string(),
-        "  $p = @(Get-Process -Name dsh-supervisor -ErrorAction SilentlyContinue)".to_string(),
-        "  if (-not $p) { Start-Process -FilePath $node -ArgumentList $guard, 'daemon' -WindowStyle Hidden }".to_string(),
+        "  $p = @(Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'node.exe' -and $_.CommandLine -like '*dsh-supervisor*' })".to_string(),
+        "  if (-not $p) { Start-Process -FilePath $shell -ArgumentList '--run-guard' -WindowStyle Hidden }".to_string(),
         "}".to_string(),
-        "$g = @(Get-Process -Name dsh-supervisor-gui -ErrorAction SilentlyContinue)".to_string(),
-        "if (-not $g -and (Test-Path $gui)) { Start-Process -FilePath $gui -WindowStyle Hidden }".to_string(),
+        "$g = @(Get-CimInstance Win32_Process | Where-Object { $_.Name -like 'dsh-supervisor*' -and $_.CommandLine -notlike '*--run-guard*' })".to_string(),
+        "if (-not $g -and (Test-Path $shell)) { Start-Process -FilePath $shell -WindowStyle Hidden }".to_string(),
         "exit 0".to_string(),
     ].join("\r\n")
-}
-
-/// 守卫进程的可执行命令行（**不含** cmd /C 外层引号）。
-///
-/// Windows 上守卫是 npm 包内**无扩展名的 Node 脚本**；cmd 不能执行无扩展名文件、也不认 shebang，
-///   故必须显式用契约里的 node：`"<node>" "<guard>" daemon`。
-///   仅当守卫**确是** .cmd/.bat 垫片时才直接执行它（node 无法解析 cmd 脚本）。
-fn guard_argv(spec: &LaunchSpec) -> String {
-    // 用**原始字面量路径**：本函数只用于 `cmd /C <line>`（下方 spawn_daemon）——创建进程时命令行
-    //   是 **Unicode**，cmd 不按码页解码命令行，故含空格/非 ASCII 的路径也安全。
-    //   原先的 %ENV% 改写只为 `.cmd` **正文**服务（正文才受码页影响）；包装脚本已改 PowerShell BOM，不再需要。
-    let is_cmd = spec
-        .guard
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|e| { let e = e.to_ascii_lowercase(); e == "cmd" || e == "bat" })
-        .unwrap_or(false);
-    if is_cmd {
-        format!("\"{}\" daemon", spec.guard.display())
-    } else {
-        format!("\"{}\" \"{}\" daemon", spec.node.display(), spec.guard.display())
-    }
 }
 
 /// PowerShell 单引号字符串（内部单引号翻倍；反斜杠为字面量，无需转义）。
@@ -380,66 +356,28 @@ impl ServiceControl for Impl {
             ),
             Ok(o) if o.success
         );
-        // 计划任务的 /TR 引号转义极易出错（尤其是路径含空格与 npm 垫片）。
-        // 改为写一个 **PowerShell 包装脚本**（UTF-8 BOM）再指向它 —— 与内核 watchdog.ps1 同一思路。
-        //
-        // 硬规则（2026-09-15 二次修复）：**彻底弃用 `.cmd`**。
-        //   真机证据：`.cmd` 包装脚本确实被执行（日志有 start/exit），但命令行为
-        //   「系统找不到指定的路径。」且 ERRORLEVEL=3 —— cmd 只在「命令行里某**目录**不存在」时给 3
-        //   （找不到命令是 9009）。两个可能根因：
-        //     ① `.cmd` 正文被 cmd 按 OEM 码页解码 → 含非 ASCII 用户名的路径乱码；
-        //     ② 正文里 `%APPDATA%` 等**在计划任务环境未展开**（写脚本的壳进程 env ≠ 任务 env）。
-        //   两者同源：用 cmd 读文件 + 依赖任务 env。PowerShell 脚本按 **UTF-8 BOM** 解码，
-        //   路径以**字面量**写入（ps_quote 单引号，不插值、不依赖 env）→ 从根上消除两类根因。
-        //   看护脚本（watchdog.ps1）早已如此且稳定，此处对齐同一形态。
-        let wrapper = crate::env::supervisor_dir().join("guard-task.ps1");
-        if let Some(dir) = wrapper.parent() {
+        // 稳定入口（2026-09-15 架构修正）：计划任务只指向 `<壳> --run-guard`。
+        //   定义中**不含** node/guard 路径 —— 检测由 --run-guard 在每次启动时完成。
+        //   旧实现把 node/guard 写进现场生成的 .cmd/.ps1（编码/前缀/垫片轮番咬），已整体删除。
+        let (shell, args) = spec.service_command();
+        let action = super::service_exec_line(shell, args);
+        // 动作内容记录（P2 自愈）：计划任务无法回读动作串，故本地留一份用于比对。
+        let record = crate::env::supervisor_dir().join("guard-task.action");
+        if let Some(dir) = record.parent() {
             std::fs::create_dir_all(dir).map_err(|e| format!("创建状态目录失败: {}", e))?;
         }
-        // 清理 1.1.4 及以前遗留的 .cmd 包装脚本，避免残留误导排查。
-        let _ = std::fs::remove_file(crate::env::supervisor_dir().join("guard-task.cmd"));
-        let node_dir = spec.node.parent().map(|p| p.to_path_buf()).unwrap_or_default();
-        let shim = {
-            // 全程落日志：即使 node/guard 启动失败，guard-task.log 也留下「脚本是否执行、node 报了什么」。
-            let log = crate::env::supervisor_dir().join("guard-task.log");
-            let lines = [
-                format!("$env:DSH_SUPERVISOR_HOME = {}", ps_quote(&spec.state_root.display().to_string())),
-                format!("$env:PATH = {} + ';' + $env:PATH", ps_quote(&node_dir.display().to_string())),
-                format!("$log = {}", ps_quote(&log.display().to_string())),
-                "function Write-GLog([string]$m) { Add-Content -LiteralPath $log -Value $m -Encoding UTF8 }".to_string(),
-                "Write-GLog \"[guard-task] start $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')\"".to_string(),
-                format!("$node = {}", ps_quote(&spec.node.display().to_string())),
-                format!("$guard = {}", ps_quote(&spec.guard.display().to_string())),
-                "Write-GLog \"[guard-task] node=$node guard=$guard\"".to_string(),
-                "if (-not (Test-Path -LiteralPath $node)) { Write-GLog '[guard-task] NODE MISSING' }".to_string(),
-                "if (-not (Test-Path -LiteralPath $guard)) { Write-GLog '[guard-task] GUARD MISSING' }".to_string(),
-                "& $node $guard daemon *>> $log".to_string(),
-                "Write-GLog \"[guard-task] exit $LASTEXITCODE\"".to_string(),
-            ];
-            let body = lines.join("\r\n") + "\r\n";
-            // UTF-8 BOM：Windows PowerShell 5.1 对**无 BOM** 的脚本按 ANSI 解码 → 中文路径再次乱码。
-            format!("\u{feff}{}", body)
-        };
-        // ── 内容比对（P2 自愈）：任务在 + 包装脚本内容一致 → 才算「已是最新」。
-        //    否则继续往下走 `/Create /F` 重建（覆盖语义）。
-        let wrapper_current = std::fs::read_to_string(&wrapper).ok().as_deref() == Some(shim.as_str());
-        if task_exists && wrapper_current {
+        let record_current = std::fs::read_to_string(&record).ok().as_deref() == Some(action.as_str());
+        if task_exists && record_current {
             // 即使守卫任务已是最新，也必须确保**壳拥有的看护任务**存在（幂等）。
             let wd = self.watchdog_status(spec);
             return Ok(format!("已存在且为最新 计划任务 {}{}", GUARD_TASK, wd));
         }
         let is_update = task_exists;
-        std::fs::write(&wrapper, &shim).map_err(|e| format!("写入包装脚本失败: {}", e))?;
+        std::fs::write(&record, &action).map_err(|e| format!("写入动作记录失败: {}", e))?;
         // 看护任务（DSH-Supervisor-Watchdog）的所有者 = 壳（D6/H5）：随服务定义一并（重）建立。
         let wd_note = self.watchdog_status(spec);
-// 创建「最高权限」任务可能被拒：权限不足时降级为普通权限任务（不彻底失败）。
-        // `/TR` 现为**完整命令行**（powershell + -File "<ps1>"），而非单一脚本路径。
-        //   引号仍写在**值内部**（`-File` 的参数自带引号），不给 Rust args 加引号；
-        //   脚本路径含空格/用户名（如 "John Smith"）时不会被截断。与看护脚本同一形态。
-        let tr_action = format!(
-            "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{}\"",
-            wrapper.display()
-        );
+        // `/TR` 值**自带引号**（写在值内部，非给 Rust args 加引号）：路径含空格时不被截断。
+        let tr_action = action;
         let base = |rl: Option<&str>| {
             let mut c = Command::new("schtasks");
             c.args(["/Create", "/TN", GUARD_TASK, "/SC", "ONLOGON"]);
@@ -449,16 +387,12 @@ impl ServiceControl for Impl {
             c.args(["/F", "/TR", &tr_action]);
             c
         };
-
         let verb = if is_update { "已更新" } else { "已建立" };
         let first = crate::bounded::run(&mut base(Some("HIGHEST")), SVC_NORMAL)?;
         if first.success {
             return Ok(format!(
                 "{} 计划任务 {}（最高权限）-> {}{}",
-                verb,
-                GUARD_TASK,
-                wrapper.display(),
-                wd_note
+                verb, GUARD_TASK, tr_action, wd_note
             ));
         }
         // 降级重试（去掉 /RL HIGHEST）
@@ -466,10 +400,7 @@ impl ServiceControl for Impl {
         if second.success {
             return Ok(format!(
                 "{} 计划任务 {}（普通权限，HIGHEST 被拒）-> {}{}",
-                verb,
-                GUARD_TASK,
-                wrapper.display(),
-                wd_note
+                verb, GUARD_TASK, tr_action, wd_note
             ));
         }
         Err(format!(
@@ -516,48 +447,6 @@ impl ServiceControl for Impl {
         Ok(())
     }
 
-    fn spawn_daemon(&self, spec: &LaunchSpec) -> Result<u32, String> {
-        use std::os::windows::process::CommandExt;
-        // 引号处理必须正确（2026-09-11 修复）：
-        //   npm 全局安装的守卫是 `dsh-supervisor.cmd` 垫片，须经 `cmd /C` 启动。
-        //   而旧写法 `.args(["/C", path, "daemon"])` 在**路径含空格**时会被 cmd 拆错 ——
-        //   而 `%APPDATA%` 形如 `C:\Users\<用户名>\AppData\Roaming`，
-        //   Windows 用户名**可以含空格**（如 "John Smith"），故此风险真实存在。
-        //   症状是「守卫启动失败」，且错误信息难以解读（cmd 报路径语法错误）。
-        //
-        //   正确形态（cmd 的经典引号规则）：整个命令用**外层引号**包住，
-        //   各参数自身再包一层 —— 即 `cmd /C ""<node>" "<guard>" daemon"`。
-        //   用 raw_arg 直接给出该形式，避免 Rust 再次转义。
-        // 2026-09-15 修复：guard_argv 对无扩展名的 Node 脚本**显式用 node 执行**（见其说明）。
-        let line = format!("\"{}\"", guard_argv(spec));
-        let dir = crate::env::supervisor_dir();
-        let _ = std::fs::create_dir_all(&dir);
-        // 兜底 spawn 的输出落 guard-spawn.log：失败时能看到 node/cmd 到底报了什么。
-        let log_path = dir.join("guard-spawn.log");
-        let mut cmd = Command::new("cmd");
-        cmd.arg("/C")
-            .raw_arg(line)
-            .env("PATH", &spec.env_path)
-            .env("DSH_SUPERVISOR_HOME", &spec.state_root)
-            .stdin(Stdio::null());
-        match std::fs::File::create(&log_path) {
-            Ok(f) => {
-                let err = f.try_clone();
-                cmd.stdout(Stdio::from(f));
-                match err {
-                    Ok(e) => { cmd.stderr(Stdio::from(e)); }
-                    Err(_) => { cmd.stderr(Stdio::null()); }
-                }
-            }
-            Err(_) => {
-                cmd.stdout(Stdio::null());
-                cmd.stderr(Stdio::null());
-            }
-        }
-        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-        let child = cmd.spawn().map_err(|e| format!("直接拉起守卫失败: {}", e))?;
-        Ok(child.id())
-    }
 }
 
 /// 盘符是否为固定磁盘（结果按盘符缓存，每个盘符最多查询一次）。

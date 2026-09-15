@@ -44,14 +44,20 @@ P6 就绪         readiness            healthz 200（端口 = ports.json 的 sup
 
 | 步骤 | Linux | macOS | Windows |
 |---|---|---|---|
-| 服务管理器 | systemd --user | launchd LaunchAgent | schtasks ONLOGON + 包装 `.ps1`（UTF-8 BOM） |
-| 定义文件 | `~/.config/systemd/user/dsh-supervisor.service` | `~/Library/LaunchAgents/com.dsh.supervisor.plist` | 计划任务 `DSH-Supervisor`（+ 包装脚本） |
-| 绑定 Node | `ExecStart="<node>" "<guard>" daemon` + `Environment=PATH` | `ProgramArguments=[node,guard,daemon]` + `EnvironmentVariables.PATH` | PowerShell 包装脚本 `$env:PATH = '<nodeDir>' + ';' + $env:PATH`，路径字面量 |
+| 服务管理器 | systemd --user | launchd LaunchAgent | schtasks ONLOGON |
+| 定义文件 | `~/.config/systemd/user/dsh-supervisor.service` | `~/Library/LaunchAgents/com.dsh.supervisor.plist` | 计划任务 `DSH-Supervisor` |
+| 启动入口（四平台统一） | `ExecStart="<壳>" --run-guard` | `ProgramArguments=[<壳>, --run-guard]` | `/TR="<壳>" --run-guard` |
+| Node/守卫解析 | **运行时**：`--run-guard` 每次启动重新检测（运行期契约 + core.json + 候选扫描），结果**不写入定义** | 同左 | 同左 |
 | 启动 | `systemctl --user start` | `launchctl kickstart -k gui/<uid>/...`（失败退 bootstrap） | `schtasks /Run /TN DSH-Supervisor` |
 | 停止 | `systemctl --user stop` | `launchctl bootout gui/<uid>/...` | 停 watchdog + 停任务 + 按命令行精确杀守卫 node（`Stop-Process`） |
-| 自愈 | `Restart=always` | `KeepAlive` | 壳拥有的 watchdog 任务 |
+| 自愈 | `Restart=always` | `KeepAlive` | 壳拥有的 watchdog 任务（动作 = `--run-guard`） |
 | 定位候选 | PATH + `~/.npm-global/bin` + `~/.local/bin` + **core.json** | 同左 + Homebrew 落点 + **core.json** | PATH/PATHEXT + `%APPDATA%\npm` + **core.json** |
-| spawn 兜底 | `node <guard> daemon` | `node <guard> daemon` | `cmd /C ""<node>" "<guard>" daemon"`（CREATE_NO_WINDOW，字面量 Unicode 路径） |
+| spawn 兜底 | `<壳> --run-guard` | `<壳> --run-guard` | `<壳> --run-guard`（同一 trait 默认实现） |
+
+**为什么不把 node/guard 写进定义（2026-09-15 二次修正）**：固化检测结果后，node 一迁移
+（nvm/fnm/volta）即失效；Windows 还需现场生成 `.cmd/.ps1`，被码页/前缀/垫片细节反复咬
+（1.1.4 `exit 3`、1.1.5 `EISDIR`）。现定义只指向**稳定入口** `<壳> --run-guard`，检测在
+每次启动重新执行；定义中**不得**出现 node/guard 路径（门禁 L-1 / K-4 / K-10）。
 
 **跨平台不变量**：上表每一行，四平台都必须有实现或**显式 Unsupported**；不存在「某平台少一步」。
 

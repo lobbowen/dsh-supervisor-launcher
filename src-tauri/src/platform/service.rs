@@ -46,7 +46,7 @@ pub trait ServiceControl: Send + Sync {
     /// 请求服务管理器停止（守卫的所有者动作）。
     fn stop(&self) -> Result<(), String>;
 
-    /// 服务管理器不可用时的**直接 spawn 兜底**。
+    /// 服务管理器不可用时的**直接 spawn 兜底**：启动稳定入口 `<壳> --run-guard`。
     ///
     /// 设计取舍：项目原约束为「壳绝不直接 spawn 守卫」（避免游离于服务管理器的
     /// 第二实例），但该约束不能凌驾于**可用性**之上 —— 容器、无 user systemd
@@ -55,5 +55,21 @@ pub trait ServiceControl: Send + Sync {
     ///
     /// 第二实例风险由调用方规避：spawn 前已确认端口不存活，
     /// 且 spawn 后仍以「端口就绪」为唯一成功判据（而非进程是否存活）。
-    fn spawn_daemon(&self, spec: &crate::platform::LaunchSpec) -> Result<u32, String>;
+    ///
+    /// **统一实现（三平台一致）**：不再各自拼 node/guard —— 由 `--run-guard` 运行时检测。
+    fn spawn_daemon(&self, spec: &crate::platform::LaunchSpec) -> Result<u32, String> {
+        let mut cmd = std::process::Command::new(&spec.shell);
+        cmd.arg("--run-guard")
+            .env("DSH_SUPERVISOR_HOME", &spec.state_root)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+        }
+        let child = cmd.spawn().map_err(|e| format!("直接拉起守卫失败: {}", e))?;
+        Ok(child.id())
+    }
 }

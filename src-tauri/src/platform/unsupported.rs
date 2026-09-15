@@ -66,22 +66,7 @@ impl ServiceControl for Impl {
         Err(format!("当前平台（{}）不支持守卫服务管理", std::env::consts::OS))
     }
 
-    fn spawn_daemon(&self, spec: &LaunchSpec) -> Result<u32, String> {
-        // spawn 是**平台无关**的兜底能力（进程启动本身处处可用），
-        // 故这里不像服务管理那样直接拒绝 —— 但必须在文档与自检中如实反映
-        // 「本平台没有原生服务管理器，只有 spawn 兜底」。
-        use std::process::{Command, Stdio};
-        let child = Command::new(&spec.node)
-            .arg(&spec.guard)
-            .arg("daemon")
-            .env("PATH", &spec.env_path)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|e| format!("直接拉起守卫失败: {}", e))?;
-        Ok(child.id())
-    }
+
 
     /// 未知平台：没有服务定义 → 明确 false（默认实现即 definition_path().is_file()，
     /// 但这里显式写出，使「未知平台绝不静默成功」的纪律在方法级也可见）。

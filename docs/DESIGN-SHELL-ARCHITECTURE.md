@@ -99,11 +99,14 @@ pub trait Platform: Send + Sync {
 }
 
 pub trait ServiceControl: Send + Sync {
+    fn kind(&self) -> &'static str;
     fn definition_path(&self) -> PathBuf;
-    fn ensure_defined(&self, guard: &Path) -> Result<String, ShellError>;
-    fn start(&self) -> Result<(), ShellError>;
-    fn stop(&self) -> Result<(), ShellError>;
-    fn spawn_daemon(&self, guard: &Path) -> Result<u32, ShellError>;
+    fn is_defined(&self) -> bool;
+    fn ensure_defined(&self, spec: &LaunchSpec) -> Result<String, String>;
+    fn start(&self) -> Result<(), String>;
+    fn stop(&self) -> Result<(), String>;
+    // 默认实现：启动稳定入口 `<壳> --run-guard`（三平台不再各写一份）
+    fn spawn_daemon(&self, spec: &LaunchSpec) -> Result<u32, String>;
 }
 ```
 
@@ -191,9 +194,14 @@ ExecStart 以 127 失败 → **内核装上了却永远拉不起来**。
 
 **消费面（缺一不可）**：
 - 内核安装：core.rs 用契约里的**绝对 npm** + PATH（不再裸 npm）；
-- 服务定义：三平台 ensure_defined 显式绑定 node（systemd ExecStart=node+guard+daemon 且 Environment=PATH=…；launchd ProgramArguments=[node,guard,daemon] 且 EnvironmentVariables.PATH；Windows PowerShell 包装脚本注入 `$env:PATH`，路径以字面量写入并以 UTF-8 BOM 落盘）；
-- spawn 兜底：spawn_daemon 用 node + guard + env PATH；
+- 服务定义：三平台 `ensure_defined` 只指向**统一稳定入口** `<壳> --run-guard`（`service_command()` + `service_exec_line()` 单源组装）。定义中**不得**出现 node/guard 路径 —— `--run-guard` 在每次启动时重新检测（运行期契约 + core.json + 候选扫描）后 exec；
+- spawn 兜底：`spawn_daemon` 为**同一 trait 默认实现**（`<壳> --run-guard`），三平台不分叉；
 - 端口发现：壳读 ports.json 的 supervisor-api **实际**端口，等待循环**每 tick 重读**。
+
+**2026-09-15 二次修正（架构）**：此前把检测结果（node/guard 绝对路径）写进每台机器现场
+生成的脚本（Systemd unit / plist / `.cmd`+`.ps1`），必然过期且被编码/前缀/垫片细节反复咬
+（1.1.4 `exit 3`、1.1.5 `EISDIR`）。现**检测归运行时**、定义只留稳定入口；
+`\?\` verbatim 前缀与 `.cmd` 垫片在 `domain/coreloc.rs` 单点归一化（有行为单测）。
 
 **门禁**：src-tauri/tests/platform_launch_contract_test.rs（L-1..L-5，含反向判据）。
 

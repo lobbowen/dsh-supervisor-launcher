@@ -18,6 +18,52 @@ pub(crate) fn core_exe_names() -> &'static [&'static str] {
     crate::platform::current().core_exe_names()
 }
 
+/// 去掉 Windows `\\?\` / `\\?\UNC\` verbatim 前缀。
+///
+/// 为什么必须：`std::fs::canonicalize` 在 Windows 上返回 `\\?\C:\...`，而
+///   node / PowerShell / 多数子进程工具**不接受**该前缀（真机实测 node 报
+///   `EISDIR: lstat 'C:'`）。定位得到真实路径后必须归一化。
+pub fn strip_verbatim(p: &std::path::Path) -> PathBuf {
+    let s = p.to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{}", rest));
+    }
+    if let Some(rest) = s.strip_prefix(r"\\?\") {
+        return PathBuf::from(rest);
+    }
+    p.to_path_buf()
+}
+
+/// 把 npm 垫片规范化为**可被 node 执行的 JS 入口**。
+///
+/// Windows 的 npm 全局 bin 是 `<prefix>\<name>.cmd` 批处理垫片；`node <垫片>` 会把它
+///   当 JS 解析 → 必然失败。真实入口在 `<prefix>\node_modules\<pkg>\bin\<name>`。
+/// 找不到包内入口时原样返回（Windows 平台层会退回 `cmd /C` 执行垫片）。
+pub fn normalize_guard(bin: PathBuf, pkg: Option<&str>) -> PathBuf {
+    let bare = strip_verbatim(&bin);
+    let ext = bare.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase());
+    if matches!(ext.as_deref(), Some("cmd") | Some("bat") | Some("ps1")) {
+        if let (Some(dir), Some(pkg), Some(stem)) = (bare.parent(), pkg, bare.file_stem()) {
+            let internal = dir.join("node_modules").join(pkg).join("bin").join(stem);
+            if internal.is_file() {
+                return strip_verbatim(&internal);
+            }
+        }
+    }
+    bare
+}
+
+/// 在候选集中按**版本最高**仲裁（读 package.json，无进程开销）。
+///
+/// 单一实现：`resolve_local`（--run-guard 运行时检测）与 `locate_core_with_version` 同源。
+pub fn pick_highest(cands: Vec<PathBuf>) -> Option<PathBuf> {
+    cands
+        .into_iter()
+        .filter_map(|c| crate::core::installed_version(&c).map(|v| (c, v)))
+        .max_by(|a, b| crate::core::semver_cmp(&a.1, &b.1).cmp(&0))
+        .map(|(c, _)| c)
+}
+
 /// 收集全部内核候选（去重 + 解析符号链接），供「按版本最高仲裁」使用。
 /// 跨平台路径规范：
 ///   - PATH（crate::env::find_in_path，Windows 走 PATHEXT）
@@ -34,12 +80,19 @@ pub(crate) fn locate_core_candidates(resource_dir: Option<PathBuf>) -> Vec<PathB
     //   is_file() / canonicalize() 底层会触网 —— 在断开的映射盘或 UNC 路径上
     //   可能阻塞数十秒，而本函数在**内核定位的关键路径**上（引导页每一步都要用）。
     //   故先做「本地固定盘」判定（GetDriveTypeW 自身不触网），再访问文件系统。
+    let pkg_for_add = crate::core::package_name().ok();
     let add = |p: PathBuf, out: &mut Vec<PathBuf>| {
         if let Some(dir) = p.parent() {
             if !crate::env::is_local_fixed_dir(dir) { return; }
         }
         if !p.is_file() { return; }
-        let real = std::fs::canonicalize(&p).unwrap_or(p); // 解析 ~/.local/bin 软链到包内真实路径
+        // ① 解析 ~/.local/bin 软链到包内真实路径；
+        // ② 去掉 Windows \\?\ verbatim 前缀（node 不接受）；
+        // ③ .cmd 垫片 → 包内真实 JS 入口（node 不能执行 .cmd）。
+        let real = normalize_guard(
+            strip_verbatim(&std::fs::canonicalize(&p).unwrap_or(p)),
+            pkg_for_add.as_deref(),
+        );
         if !out.contains(&real) { out.push(real); }
     };
     // ① 位置契约优先（core.json.bin）—— 安装成功后壳写入的**确切位置**。
@@ -119,4 +172,68 @@ pub(crate) fn locate_core_with_version(app: &tauri::AppHandle) -> Option<(PathBu
         if better { best = Some((c.clone(), v)); }
     }
     best.or_else(|| cands.into_iter().next().map(|p| (p, "0.0.0".into())))
+}
+
+#[cfg(test)]
+mod tests {
+    //! 行为门禁（2026-09-15 架构修正）：直接驱动路径规范化与版本仲裁，
+    //! 而不是 `str::contains` —— 真机 1.1.4/1.1.5 的失效正是「静态断言全绿、运行时把
+    //! `.cmd` 交给 node」。
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    fn tmp(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("dsh-guardres-{}-{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn fake_pkg(dir: &Path, version: &str) {
+        let bin = dir.join("bin").join("dsh-supervisor");
+        std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        std::fs::write(&bin, b"// fake guard\n").unwrap();
+        std::fs::write(dir.join("package.json"), format!("{{\"version\":\"{}\"}}", version)).unwrap();
+    }
+
+    #[test]
+    fn strip_verbatim_removes_windows_prefix() {
+        assert_eq!(strip_verbatim(Path::new(r"\\?\C:\x\y")), PathBuf::from(r"C:\x\y"));
+        assert_eq!(strip_verbatim(Path::new(r"\\?\UNC\srv\share\x")), PathBuf::from(r"\\srv\share\x"));
+        assert_eq!(strip_verbatim(Path::new("/home/u/bin/dsh-supervisor")), PathBuf::from("/home/u/bin/dsh-supervisor"));
+    }
+
+    #[test]
+    fn normalize_guard_maps_cmd_shim_to_internal_js() {
+        let root = tmp("norm");
+        let prefix = root.join("npm");
+        std::fs::create_dir_all(&prefix).unwrap();
+        let shim = prefix.join("dsh-supervisor.cmd");
+        std::fs::write(&shim, b"@echo off\n").unwrap();
+        let internal = prefix.join("node_modules").join("@dsh-sup").join("dsh-core-x").join("bin").join("dsh-supervisor");
+        std::fs::create_dir_all(internal.parent().unwrap()).unwrap();
+        std::fs::write(&internal, b"// js\n").unwrap();
+        let got = normalize_guard(shim.clone(), Some("@dsh-sup/dsh-core-x"));
+        assert_eq!(got, internal, "1.1.5 真机缺陷：.cmd 垫片被直接交给 node（EISDIR）");
+        // 已是 JS 入口时原样返回。
+        let js = prefix.join("bin").join("dsh-supervisor");
+        std::fs::create_dir_all(js.parent().unwrap()).unwrap();
+        std::fs::write(&js, b"// js\n").unwrap();
+        assert_eq!(normalize_guard(js.clone(), None), js);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn pick_highest_takes_newest_version() {
+        let root = tmp("pick");
+        let a = root.join("pkgA");
+        let b = root.join("pkgB");
+        fake_pkg(&a, "0.1.0");
+        fake_pkg(&b, "0.2.0");
+        // pick_highest 的入参是**候选 bin 路径**（与 locate_core_candidates 同形），不是包目录。
+        let abin = a.join("bin").join("dsh-supervisor");
+        let bbin = b.join("bin").join("dsh-supervisor");
+        assert_eq!(pick_highest(vec![abin, bbin.clone()]), Some(bbin), "应按版本最高仲裁（内核只有最新版本）");
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

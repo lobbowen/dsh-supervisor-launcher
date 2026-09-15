@@ -8,7 +8,7 @@
 //! `ExecStart` 以 127 失败 → 内核「装上了却永远拉不起来」。
 //!
 //! 本门禁把 Phase 1 的修复钉死：
-//!   L-1  三平台服务定义/包装脚本**必须显式绑定 Node**（node 路径或注入 PATH）
+//!   L-1  三平台服务定义统一指向稳定入口 `<壳> --run-guard`（运行时检测 node/guard，定义内无路径）
 //!   L-2  运行期契约 runtime.json 含 schema 与 node/npm 键，且保留内核已读的旧键
 //!   L-3  端口发现读 ports.json 的 supervisor-api 实际值；等待循环每 tick 重读
 //!   L-4  反向：判据能识别「未绑定 Node」的旧形态（门禁非空转）
@@ -34,58 +34,49 @@ fn has_all(src: &str, needles: &[&str]) -> Vec<String> {
     needles.iter().filter(|n| !src.contains(**n)).map(|n| n.to_string()).collect()
 }
 
-// ── L-1：三平台服务定义必须显式绑定 Node ──
+// ── L-1：三平台服务定义统一指向**稳定入口**（运行时检测 node/guard） ──
+//
+// 架构（2026-09-15 二次修正）：服务定义**不得**再固化 node/guard 路径。
+//   三平台定义只写 `<壳> --run-guard`（由 service_command/service_exec_line 单源组装）；
+//   `--run-guard` 每次启动重新检测 node/guard 后 exec（platform::exec_guard）。
 #[test]
-fn l1_linux_unit_binds_node() {
-    let src = read("src/platform/linux.rs");
-    // 允许两种等价实现：显式 node 可执行 + Environment PATH。要求两者都在。
-    let missing = has_all(&src, &["spec.node.display()", "spec.guard.display()", "Environment=", "@PATH@", "daemon"]);
-    assert!(missing.is_empty(), "L-1 失败：Linux unit 未显式绑定 Node/PATH，缺 {:?}", missing);
-}
-
-#[test]
-fn l1_macos_plist_binds_node() {
-    let src = read("src/platform/macos.rs");
-    let missing = has_all(&src, &["@NODE@", "@BIN@", "@PATH@", "EnvironmentVariables", "ProgramArguments"]);
-    assert!(missing.is_empty(), "L-1 失败：macOS plist 未显式绑定 Node/PATH，缺 {:?}", missing);
-}
-
-#[test]
-fn l1_windows_wrapper_binds_node() {
-    let src = read("src/platform/windows.rs");
-    let missing = has_all(&src, &["$env:PATH", "node_dir", "spec.node", "spec.guard"]);
-    assert!(missing.is_empty(), "L-1 失败：Windows 包装脚本未注入 Node PATH，缺 {:?}", missing);
-}
-
-/// Windows 必须**显式用 node 执行守卫**（无扩展名 Node 脚本，cmd 不能执行）。
-#[test]
-fn l1_windows_executes_guard_via_node() {
-    let src = read("src/platform/windows.rs");
-    assert!(src.contains("fn guard_argv"), "L-1 失败：缺 guard_argv（Windows 执行器）");
-    assert!(windows_guard_argv_uses_node(&src),
-        "L-1 失败：Windows 未显式用 node 执行守卫 —— schtasks /Run 会成功但守卫永不起来");
-    // 反向：旧形态（guard_argv 只用 guard，不含 node）必须被判为不合格
-    let old = "fn guard_argv(spec: &LaunchSpec) -> String { spec.guard only }";
-    assert!(!windows_guard_argv_uses_node(old), "L-1 反向失败：裸守卫形态被判为合格（门禁空转）");
-}
-
-fn windows_guard_argv_uses_node(src: &str) -> bool {
-    let f = match src.find("fn guard_argv") { Some(i) => &src[i..], None => return false };
-    let body = match f.find("\n}") { Some(i) => &f[..i], None => f };
-    body.contains("spec.node")
-}
-
-#[test]
-fn l1_spawn_daemon_binds_node() {
-    // 三平台 spawn 兜底都必须用契约里的 node/PATH，而不是 ambient PATH。
-    for f in ["linux.rs", "macos.rs"] {
-        let src = read(&format!("src/platform/{}", f));
-        let missing = has_all(&src, &["Command::new(&spec.node)", ".env(\"PATH\", &spec.env_path)"]);
-        assert!(missing.is_empty(), "L-1 失败：{} spawn_daemon 未绑定 node/PATH，缺 {:?}", f, missing);
+fn l1_three_platforms_share_stable_entry() {
+    for f in ["src/platform/linux.rs", "src/platform/macos.rs", "src/platform/windows.rs"] {
+        let src = read(f);
+        let missing = has_all(&src, &["service_command()"]);
+        assert!(missing.is_empty(), "L-1 失败：{} 未用统一稳定入口，缺 {:?}", f, missing);
     }
-    let w = read("src/platform/windows.rs");
-    let missing = has_all(&w, &[".env(\"PATH\", &spec.env_path)"]);
-    assert!(missing.is_empty(), "L-1 失败：windows spawn_daemon 未注入 PATH，缺 {:?}", missing);
+}
+
+/// 稳定入口的定义本身：service_command = 壳自身 + --run-guard（platform/mod.rs 单源）。
+#[test]
+fn l1_service_command_is_shell_run_guard() {
+    let m = read("src/platform/mod.rs");
+    let missing = has_all(&m, &["pub shell:", "fn service_command", "\"--run-guard\"", "pub fn service_exec_line"]);
+    assert!(missing.is_empty(), "L-1 失败：稳定入口定义缺失 {:?}", missing);
+}
+
+/// 执行侧：--run-guard 解析出的 node/guard 由 platform::exec_guard 执行（唯一执行点）。
+#[test]
+fn l1_run_guard_executes_node_guard() {
+    let m = read("src/platform/mod.rs");
+    assert!(m.contains("pub fn exec_guard"), "L-1 失败：缺 exec_guard（--run-guard 执行点）");
+    let body = match m.find("pub fn exec_guard") { Some(i) => &m[i..], None => "" };
+    assert!(body.contains("spec.node") && body.contains("spec.guard"),
+        "L-1 失败：exec_guard 未用契约 node/guard 执行");
+}
+
+/// spawn 兜底统一（同一 trait 默认实现）：启动稳定入口，而非各自拼 node/guard。
+#[test]
+fn l1_spawn_daemon_is_uniform_stable_entry() {
+    let s = read("src/platform/service.rs");
+    let missing = has_all(&s, &["fn spawn_daemon", "spec.shell", "\"--run-guard\""]);
+    assert!(missing.is_empty(), "L-1 失败：spawn 兜底未统一到稳定入口，缺 {:?}", missing);
+    // 反向：平台文件不得再有各自的 spawn_daemon（统一实现的意义）。
+    for f in ["linux.rs", "macos.rs", "windows.rs"] {
+        let src = read(&format!("src/platform/{}", f));
+        assert!(!src.contains("fn spawn_daemon"), "L-1 失败：{} 仍有平台专属 spawn_daemon（应统一）", f);
+    }
 }
 
 // ── L-2：运行期契约内容 ──

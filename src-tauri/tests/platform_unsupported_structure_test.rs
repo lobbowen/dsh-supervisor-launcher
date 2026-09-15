@@ -150,12 +150,16 @@ const SERVICE_METHODS: &[&str] = &[
     //   自检无论计划任务是否存在都报「现存 = 否」。故把判定收进 trait，由各平台实现。
     "is_defined",
 ];
+/// 平台**实现**里必须出现的方法：`spawn_daemon` 已改 trait 默认实现（统一稳定入口），实现侧可省略。
+const SERVICE_IMPL_METHODS: &[&str] = &[
+    "kind", "definition_path", "ensure_defined", "start", "stop", "is_defined",
+];
 
 #[test]
 fn u_a_service_impl_has_only_service_methods() {
     let src = read("src/platform/unsupported.rs");
     let got = impl_methods(&src, "impl ServiceControl for Impl {");
-    let want: BTreeSet<String> = SERVICE_METHODS.iter().map(|s| s.to_string()).collect();
+    let want: BTreeSet<String> = SERVICE_IMPL_METHODS.iter().map(|s| s.to_string()).collect();
     let extra: Vec<_> = got.difference(&want).cloned().collect();
     let missing: Vec<_> = want.difference(&got).cloned().collect();
     assert!(
@@ -163,7 +167,7 @@ fn u_a_service_impl_has_only_service_methods() {
         "U-a FAIL ServiceControl impl 方法集不符：多出 {:?}，缺少 {:?}",
         extra, missing
     );
-    eprintln!("U-a PASS ServiceControl impl 只含 6 个应有方法");
+    eprintln!("U-a PASS ServiceControl impl 只含应有的服务方法");
 }
 
 #[test]

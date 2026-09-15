@@ -40,12 +40,13 @@ pub(crate) enum AlignOutcome {
     NotAligned { latest: Option<String>, searched: Vec<String> },
 }
 
-/// P1+P3：解析「与线上最新一致」的内核。
-///
-/// 顺序（规范 §3）：① 位置契约 core.json（版本须一致）→ ② 候选扫描中取版本一致者
-///   （命中即**前向自愈**写入契约）→ ③ 都没有 = NotAligned。
-/// **绝不**退回磁盘上的旧内核（这是「内核只有最新版本」的落地）。
+/// P1+P3：解析「与线上最新一致」的内核（GUI 路径，带 resource_dir）。
 pub(crate) fn resolve_aligned(app: &tauri::AppHandle) -> AlignOutcome {
+    resolve_aligned_with(app.path().resource_dir().ok())
+}
+
+/// 与 [`resolve_aligned`] 同逻辑，但 resource_dir 显式传入（无 AppHandle 的 CLI 路径传 None）。
+pub(crate) fn resolve_aligned_with(resource_dir: Option<std::path::PathBuf>) -> AlignOutcome {
     let pkg = match crate::core::package_name() {
         Ok(p) => p,
         Err(e) => return AlignOutcome::ResolveFailed(e),
@@ -54,14 +55,17 @@ pub(crate) fn resolve_aligned(app: &tauri::AppHandle) -> AlignOutcome {
         Ok((v, _o)) => v,
         Err(e) => return AlignOutcome::ResolveFailed(format!("{}：{}", pkg, e)),
     };
-    // ① 位置契约命中且版本一致（最快路径）
+    let pkg_opt = Some(pkg.as_str());
+    // ① 位置契约命中且版本一致（最快路径）。契约路径可能是旧版写入的 `.cmd` 垫片
+    //    或含 `\\?\` 前缀 —— 先规范化再判可用。
     if let Some(c) = crate::core_contract::read() {
-        if c.bin.is_file() && c.version == latest {
-            return AlignOutcome::Aligned { bin: c.bin, version: latest };
+        let bin = crate::domain::coreloc::normalize_guard(c.bin, pkg_opt);
+        if bin.is_file() && c.version == latest {
+            return AlignOutcome::Aligned { bin, version: latest };
         }
     }
-    // ② 候选扫描：取版本 == latest 者，并记入契约（前向自愈）
-    let cands = crate::domain::coreloc::locate_core_candidates(app.path().resource_dir().ok());
+    // ② 候选扫描：取版本 == latest 者（候选已在 coreloc 内规范化），命中即**前向自愈**写入契约。
+    let cands = crate::domain::coreloc::locate_core_candidates(resource_dir);
     for c in &cands {
         if crate::core::installed_version(c).as_deref() == Some(latest.as_str()) {
             let prefix = crate::core::global_prefix_for(c);
@@ -78,6 +82,19 @@ pub(crate) fn resolve_aligned(app: &tauri::AppHandle) -> AlignOutcome {
         latest: Some(latest),
         searched: cands.iter().map(|p| p.display().to_string()).collect(),
     }
+}
+
+/// `--run-guard` 的**本地检测**（**不触网**）：解析可运行的 node + 守卫（取本地最高版本）。
+///
+/// 为什么在每次服务启动时重新检测：服务定义只指向稳定入口 `<壳> --run-guard`，
+///   不再固化 node/guard 路径 —— node 迁移（nvm/volta/fnm）、内核升级后自动适配。
+/// 线上对齐（P1）仍由壳在**创建/启动服务前**把关；此处只做本地解析，离线也能启动。
+pub fn resolve_local(resource_dir: Option<std::path::PathBuf>) -> Option<(crate::runtime_contract::NodeRuntime, std::path::PathBuf)> {
+    let rt = crate::runtime_contract::ensure()?;
+    let guard = crate::domain::coreloc::pick_highest(
+        crate::domain::coreloc::locate_core_candidates(resource_dir),
+    )?;
+    Some((rt, guard))
 }
 
 pub(crate) fn shutdown_all(port: u16) {
