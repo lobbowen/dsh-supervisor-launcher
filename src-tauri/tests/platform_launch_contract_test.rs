@@ -117,6 +117,16 @@ fn l3_port_discovery_from_ports_json_and_reread_in_wait() {
     );
 }
 
+// ── L-5：契约版本握手（两侧各自断言 schema=2；不跨仓读源码）──
+#[test]
+fn l5_contract_schema_version_is_2() {
+    let src = read("src/runtime_contract.rs");
+    assert!(
+        src.contains("pub const SCHEMA: u32 = 2"),
+        "L-5 失败：runtime.json 契约 schema 版本不是 2（与内核 runtime-contract.js 的 SUPPORTED_SCHEMA 失配）"
+    );
+}
+
 // ── L-4：反向自检（判据必须能识别旧形态）──
 #[test]
 fn l4_reverse_judgement_is_not_vacuous() {
