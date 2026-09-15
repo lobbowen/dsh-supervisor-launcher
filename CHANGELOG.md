@@ -4,6 +4,10 @@
 
 ## [未发布]
 
+（下一版本待记）
+
+## [1.1.1]（2026-09-15）
+
 ### 运行期启动契约：修「内核装上却永远拉不起来」（Phase 1）
 
 - 新增 runtime.json（schema 2）由壳写、内核读；node/nodeBinDir/npmPath + 保留旧键（nodePath/nodeVersion/minNode）；
