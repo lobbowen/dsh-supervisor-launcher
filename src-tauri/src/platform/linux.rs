@@ -3,7 +3,7 @@
 //! 本文件是 Linux 的**全部**平台知识 —— 其它任何文件都不应出现 `target_os = "linux"`（门禁 G1）。
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 use super::service::ServiceControl;
 use super::{home_dir, user_name, Capabilities, LaunchSpec, Platform, SVC_NORMAL, SVC_QUICK};
@@ -215,13 +215,13 @@ impl ServiceControl for Impl {
         //
         //   注意：引号写在**值内部**（systemd 需要它来界定第一个参数），
         //   这与给 Rust args 加引号不同 —— 后者只会被原样作为路径的一部分。
-        // 硬规则（2026-09-15）：服务定义必须**显式绑定 Node** —— 内核 launcher 是
-        //   `#!/usr/bin/env node`，而 systemd --user 的 PATH 常不含 nvm/fnm 的 node 目录
-        //   （实测：本机 systemd PATH 无 ~/.nvm/.../bin，unit 以 127 失败、守卫永不启动）。
-        //   故 ExecStart 用契约里的绝对 node，并以 Environment 注入含 nodeBinDir 的 PATH。
-        let exec_start = format!("\"{}\" \"{}\" daemon", spec.node.display(), spec.guard.display());
-        let body = "[Unit]\nDescription=dsh-supervisor - DSH lifecycle guard\nAfter=network.target\nStartLimitIntervalSec=600\nStartLimitBurst=3\n\n[Service]\nType=simple\nEnvironment=\"PATH=@PATH@\"\nEnvironment=\"DSH_SUPERVISOR_HOME=@ROOT@\"\nExecStart=@EXEC@\nRestart=always\nRestartSec=5\nKillMode=process\n\n[Install]\nWantedBy=default.target\n"
-            .replace("@PATH@", &spec.env_path)
+        // 架构（2026-09-15 二次修正）：ExecStart 只指向**稳定入口** `<壳> --run-guard`。
+        //   node/guard **不写进 unit** —— systemd --user 的 PATH 不再影响启动：
+        //   --run-guard 在每次启动时重新检测 node（含 nvm/fnm/volta 落点与运行期契约）。
+        //   旧做法把绝对 node/guard 写进 unit，模板一演进就要「重写自愈」，node 迁移即失效。
+        let (shell, args) = spec.service_command();
+        let exec_start = crate::platform::service_exec_line(shell, args);
+        let body = "[Unit]\nDescription=dsh-supervisor - DSH lifecycle guard\nAfter=network.target\nStartLimitIntervalSec=600\nStartLimitBurst=3\n\n[Service]\nType=simple\nEnvironment=\"DSH_SUPERVISOR_HOME=@ROOT@\"\nExecStart=@EXEC@\nRestart=always\nRestartSec=5\nKillMode=process\n\n[Install]\nWantedBy=default.target\n"
             .replace("@ROOT@", &spec.state_root.display().to_string())
             .replace("@EXEC@", &exec_start);
         // ── 内容比对：决定「新写」「重写」还是「不动」──
@@ -292,20 +292,6 @@ impl ServiceControl for Impl {
         .map(|_| ())
     }
 
-    fn spawn_daemon(&self, spec: &LaunchSpec) -> Result<u32, String> {
-        // 显式用契约里的 node 执行内核 launcher（不再依赖 ambient PATH 的 env node）。
-        let child = Command::new(&spec.node)
-            .arg(&spec.guard)
-            .arg("daemon")
-            .env("PATH", &spec.env_path)
-            .env("DSH_SUPERVISOR_HOME", &spec.state_root)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|e| format!("直接拉起守卫失败: {}", e))?;
-        Ok(child.id())
-    }
 }
 
 #[cfg(test)]

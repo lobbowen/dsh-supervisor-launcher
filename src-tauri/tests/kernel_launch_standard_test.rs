@@ -80,17 +80,20 @@ fn k3_align_before_start() {
     assert!(align < define && define < start, "K-3 失败：ensure_guard 未按「对齐 → 定义 → 启动」顺序");
 }
 
-// ── K-4：四平台服务同构 + prefix 候选 trait ──
+// ── K-4：三平台服务定义同构（统一稳定入口）+ prefix 候选 trait ──
 #[test]
 fn k4_platforms_uniform() {
-    for (f, node, path) in [
-        ("src/platform/linux.rs", "spec.node", "@PATH@"),
-        ("src/platform/macos.rs", "@NODE@", "@PATH@"),
-        ("src/platform/windows.rs", "node_dir", "$env:PATH"),
-    ] {
+    // 架构（2026-09-15 二次修正）：服务定义只指向统一稳定入口 `<壳> --run-guard`；
+    //   定义中不得出现 node/guard 路径。三平台必须**同一入口**（防「只修 Windows」）。
+    for f in ["src/platform/linux.rs", "src/platform/macos.rs", "src/platform/windows.rs"] {
         let s = read(f);
-        let missing = has_all(&s, &[node, path, "daemon"]);
-        assert!(missing.is_empty(), "K-4 失败：{} 未同构绑定 node/PATH/daemon，缺 {:?}", f, missing);
+        let missing = has_all(&s, &["service_command()"]);
+        assert!(missing.is_empty(), "K-4 失败：{} 未用统一稳定入口，缺 {:?}", f, missing);
+    }
+    // systemd/schtasks 需要单行命令（service_exec_line）；launchd 用数组，天然不需要。
+    for f in ["src/platform/linux.rs", "src/platform/windows.rs"] {
+        let s = read(f);
+        assert!(s.contains("service_exec_line"), "K-4 失败：{} 未用 service_exec_line 组装命令", f);
     }
     let m = read("src/platform/mod.rs");
     assert!(m.contains("fn core_bin_candidates_in_prefix"), "K-4 失败：trait 缺 prefix 候选（P2 记录位置）");
@@ -203,32 +206,37 @@ fn k9_state_root_injected_into_launch() {
     let m = read("src/platform/mod.rs");
     assert!(m.contains("pub state_root: std::path::PathBuf"), "K-9 失败：LaunchSpec 缺 state_root");
     assert!(m.contains("state_root: crate::env::state_root()"), "K-9 失败：未从壳解析状态根");
-    for f in ["src/platform/linux.rs", "src/platform/macos.rs", "src/platform/windows.rs"] {
+    // 注入点：exec_guard（--run-guard）与 spawn_daemon（trait 默认）都必须携带 DSH_SUPERVISOR_HOME。
+    assert!(m.contains("DSH_SUPERVISOR_HOME"), "K-9 失败：exec_guard 未注入状态根");
+    let svc = read("src/platform/service.rs");
+    assert!(svc.contains("DSH_SUPERVISOR_HOME") && svc.contains("spec.state_root"), "K-9 失败：spawn 兜底未注入状态根");
+    // 服务定义侧：systemd/launchd 仍显式声明；Windows 计划任务无法设环境变量，由 --run-guard 注入。
+    for f in ["src/platform/linux.rs", "src/platform/macos.rs"] {
         let s = read(f);
         assert!(s.contains("DSH_SUPERVISOR_HOME"), "K-9 失败：{} 未注入 DSH_SUPERVISOR_HOME", f);
         assert!(s.contains("spec.state_root"), "K-9 失败：{} 未使用壳解析的状态根", f);
     }
+    assert!(read("src/platform/windows.rs").contains("service_command()"), "K-9 失败：Windows 未用稳定入口（状态根由 --run-guard 注入）");
 }
-// ── K-10：Windows 启动可诊断 + 按命令行杀守卫（G3/C2 收尾）──
+// ── K-10：Windows 稳定入口 + 按命令行杀守卫（G3/C2 收尾）──
 #[test]
-fn k10_windows_launch_diagnosable_and_kill_correct() {
+fn k10_windows_stable_entry_and_kill_correct() {
     let src = read("src/platform/windows.rs");
     let missing = has_all(&src, &[
-        "guard-task.ps1",             // PowerShell 包装脚本（弃用 .cmd：码页/任务 env 两类根因）
-        "\\u{feff}",                 // 写 UTF-8 BOM：PS 5.1 无 BOM 按 ANSI 解码 → 非 ASCII 路径乱码
-        "Add-Content",                // 包装脚本全程落日志
-        "guard-task.log",             // 日志文件名
-        "[guard-task] NODE MISSING",  // node 缺失也可诊断（不再「什么都看不到」）
-        "[guard-task] GUARD MISSING", // 守卫缺失也可诊断
-        "$LASTEXITCODE",              // 退出码可见（PowerShell 语义）
-        "guard-spawn.log",            // 兜底 spawn 落日志
-        "Stop-Process",               // 按命令行杀守卫 node
+        "service_command()",  // 定义 = 稳定入口（不再写 node/guard）
+        "service_exec_line",  // 与另两平台同一组装
+        "guard-task.action",  // 动作记录（计划任务无法回读动作串 → 本地留档自愈）
+        "Win32_Process",      // 看护/停止按命令行识别 node 守卫（进程名不是 dsh-supervisor）
+        "Stop-Process",       // 精确杀守卫 node
     ]);
-    assert!(missing.is_empty(), "K-10 失败：Windows 启动诊断/杀进程缺失 {:?}", missing);
-    // 包装脚本必须是 PowerShell（.cmd 正文受码页/任务 env 双重影响，已定为根因）
+    assert!(missing.is_empty(), "K-10 失败：Windows 稳定入口/诊断缺失 {:?}", missing);
+    // 反向：不得回归到「现场生成包装脚本 / 把 node·guard 写进定义」。
+    for bad in ["guard-task.ps1", "guard-task.cmd", "guard_argv", "win_path_expr"] {
+        assert!(!src.contains(bad), "K-10 失败：windows.rs 仍含旧包装脚本痕迹 {}", bad);
+    }
     assert!(
-        src.contains("join(\"guard-task.ps1\")"),
-        "K-10 失败：包装脚本未改用 PowerShell guard-task.ps1"
+        !src.contains("spec.node") && !src.contains("spec.guard"),
+        "K-10 失败：windows.rs 服务定义仍引用 node/guard 绝对路径"
     );
     assert!(!src.contains("\"/IM\", \"dsh-supervisor.exe\""), "K-10 失败：仍按 dsh-supervisor.exe 杀进程（守卫是 node.exe，杀不掉）");
 }

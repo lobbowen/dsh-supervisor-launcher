@@ -382,11 +382,14 @@ pub trait Platform: Send + Sync {
 }
 
 pub trait ServiceControl: Send + Sync {
+    fn kind(&self) -> &'static str;
     fn definition_path(&self) -> PathBuf;
-    fn ensure_defined(&self, guard: &Path) -> Result<String, ShellError>;
-    fn start(&self) -> Result<(), ShellError>;
-    fn stop(&self) -> Result<(), ShellError>;
-    fn spawn_daemon(&self, guard: &Path) -> Result<u32, ShellError>;
+    fn is_defined(&self) -> bool;
+    fn ensure_defined(&self, spec: &LaunchSpec) -> Result<String, String>;
+    fn start(&self) -> Result<(), String>;
+    fn stop(&self) -> Result<(), String>;
+    // 默认实现：启动稳定入口 `<壳> --run-guard`（三平台不再各写一份）
+    fn spawn_daemon(&self, spec: &LaunchSpec) -> Result<u32, String>;
 }
 ```
 

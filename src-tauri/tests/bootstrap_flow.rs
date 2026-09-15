@@ -993,55 +993,40 @@ fn b42_macos_tag_matches_pkg_artifact() {
     eprintln!("B42 PASS macOS tag matches artifact");
 }
 
-/// B43：Windows 经 `cmd /C` 启动时，引号必须能承受**含空格的路径**。
+/// B43：守卫启动必须把路径作为**独立参数**传递（含空格的用户名不再被拆错）。
 ///
-/// `%APPDATA%` 含 Windows 用户名，而用户名可以含空格（如 "John Smith"）。
-/// 旧写法 `.args(["/C", path, "daemon"])` 会让 cmd 拆错 → 守卫启动失败且错误难解读。
+/// 架构（2026-09-15）：不再有 Windows 专属 `cmd /C` 命令串 —— `platform::exec_guard`
+///   用 `Command::arg(&spec.guard)` 传参，含空格路径由 Rust 统一引号处理。
 #[test]
-fn b43_windows_cmd_quoting_handles_spaces() {
-    // 迁至平台层（2026-09-11）：Windows 的全部平台知识在 platform/windows.rs。
+fn b43_guard_launch_handles_spaces() {
+    let m = fs::read_to_string(manifest_dir().join("src").join("platform").join("mod.rs"))
+        .expect("platform/mod.rs");
+    assert!(m.contains(".arg(&spec.guard)"), "B43 FAIL exec_guard 未把守卫作为独立参数传递");
     let s = fs::read_to_string(manifest_dir().join("src").join("platform").join("windows.rs"))
         .expect("platform/windows.rs");
-    assert!(s.contains("raw_arg(line)"), "B43 FAIL Windows 未用 raw_arg 精确控制引号");
-    assert!(
-        !s.contains(".args([\"/C\", &guard.display().to_string(), \"daemon\"])"),
-        "B43 FAIL Windows 仍用会拆错的 args 形式"
-    );
-    eprintln!("B43 PASS windows cmd quoting handles spaces");
+    assert!(!s.contains("raw_arg"), "B43 FAIL 仍在手工拼 cmd 命令串（应统一走 Command 参数）");
+    eprintln!("B43 PASS guard launch passes path as separate arg");
 }
 
-/// B56：Windows 计划任务的 `/TR` 值必须**自带引号**（P1-D 回归，2026-09-12）。
+
+/// B56：Windows 计划任务动作 = 稳定入口 `"<壳>" --run-guard`（2026-09-15 重写）。
 ///
-/// ## 缺陷
-///
-/// `schtasks /Create ... /TR <wrapper>` 的 `/TR` 值是**纯字符串**，schtasks 内部按
-/// 命令行规则解析 —— 路径含空格时若不自带引号，动作会被**截断到第一个空格**。
-/// 而 `/TR` 指向状态目录下的包装脚本（1.1.5 起为 `guard-task.ps1`），路径含 Windows 用户名；
-/// Windows 用户名**可以含空格**（如 "John Smith"）。
-///
-/// 症状：任务创建**成功**（schtasks 不报错）但执行时找不到目标 → **登录自启静默失效**。
-///
-/// ## 为什么 B43 没拦住
-///
-/// B43 只断言了 `spawn_daemon` 的 `cmd /C` 引号（那条路径已修）。
-/// `/TR` 是**同一类缺陷的另一处**，而 B43 的断言范围没覆盖它 ——
-/// 「修了一处就以为同类都修了」正是本仓反复出现的失效模式。
+/// 历史（P1-D）：`/TR` 是纯字符串，路径含空格时未自带引号会被截断到第一个空格，
+///   任务创建成功却执行失败（登录自启静默失效）。
+/// 现状：`/TR` 由 `service_exec_line` 单源组装（`"<shell>" --run-guard`），壳路径始终带引号；
+///   定义中不再有任何 node/guard 路径。
 #[test]
-fn b56_windows_schtasks_tr_value_is_quoted() {
+fn b56_windows_task_action_is_stable_entry() {
     let s = fs::read_to_string(manifest_dir().join("src").join("platform").join("windows.rs"))
         .expect("platform/windows.rs");
-    // /TR 现为 `powershell ... -File "<ps1>"`：脚本路径经 -File 自带引号，
-    //   用户名含空格时任务动作不会被截断（与看护脚本同一形态）。
     assert!(
-        s.contains("Bypass -File") && s.contains("wrapper.display()"),
-        "B56 FAIL /TR 未把脚本路径经 powershell -File 引号包裹 —— 用户名含空格时会被截断"
+        s.contains("service_command()") && s.contains("service_exec_line"),
+        "B56 FAIL /TR 未经 service_exec_line 组装（引号/命令必须单源）"
     );
-    // 且不得再用「裸脚本路径」直接当 /TR 值
-    assert!(
-        !s.contains("format!(\"\\\"{}\\\"\", wrapper.display())"),
-        "B56 FAIL 仍在用裸脚本路径作 /TR 值"
-    );
-    eprintln!("B56 PASS schtasks /TR value is quoted");
+    // 反向：不得回归到脚本包装 / 未加引号的裸路径。
+    assert!(!s.contains("guard-task.ps1"), "B56 FAIL 仍在生成包装脚本");
+    assert!(!s.contains("wrapper.display()"), "B56 FAIL 仍在用裸脚本路径作 /TR 值");
+    eprintln!("B56 PASS windows task action is stable entry");
 }
 
 /// B57：**异步命令不得在 tokio worker 上做阻塞工作**（P1-H 回归，2026-09-12）。
@@ -1814,20 +1799,22 @@ fn b58_systemd_exec_start_quotes_the_binary_path() {
     let s = fs::read_to_string(manifest_dir().join("src").join("platform").join("linux.rs"))
         .expect("platform/linux.rs");
 
-    // 必须存在「把路径包进引号」的构造（format! 里带 \"{}\" daemon）
-    assert!(
-        s.contains("\\\"{}\\\" daemon") && s.contains("guard.display()"),
-        "B58 FAIL ExecStart 路径未自带引号 —— 家目录含空格时 systemd 会把命令拆断"
-    );
+    // ExecStart 经 service_exec_line 单源组装 —— 它把可执行路径包进引号，
+    //   家目录/壳路径含空格时 systemd 不会把命令拆断。
+    assert!(s.contains("service_exec_line"), "B58 FAIL ExecStart 未用单源组装（含引号）");
     // 模板里不得再有未加引号的 @BIN@ 直接进 ExecStart
     assert!(
         !s.contains("ExecStart=@BIN@ daemon"),
         "B58 FAIL 模板仍用裸 @BIN@ 作 ExecStart 首参数"
     );
     // 且必须真的把解析结果写进 unit（防「构造了但没用」）
+    assert!(s.contains("@EXEC@"), "B58 FAIL 未把带引号的路径写入 unit 模板");
+    // 引号构造本身在 platform/mod.rs::service_exec_line（唯一事实源）
+    let m = fs::read_to_string(manifest_dir().join("src").join("platform").join("mod.rs"))
+        .expect("platform/mod.rs");
     assert!(
-        s.contains("@EXEC@"),
-        "B58 FAIL 未把带引号的路径写入 unit 模板"
+        m.contains("format!(\"\\\"{}\\\"\", shell.display())"),
+        "B58 FAIL service_exec_line 未给路径加引号"
     );
     eprintln!("B58 PASS systemd ExecStart quotes the binary path");
 }
@@ -1949,13 +1936,14 @@ fn b60_service_definition_self_heals_on_content_drift() {
         "B60 FAIL macos 内容变化后未 bootout 旧定义（launchd 会继续跑旧的）"
     );
 
-    // Windows：任务存在 **且** 包装脚本一致才算最新
+    // Windows：任务存在 **且** 动作记录一致才算最新（计划任务无法回读动作串）。
     let win = fs::read_to_string(manifest_dir().join("src").join("platform").join("windows.rs"))
         .expect("platform/windows.rs");
-    assert!(win.contains("wrapper_current"), "B60 FAIL windows 未比对包装脚本内容");
+    assert!(win.contains("record_current"), "B60 FAIL windows 未比对动作记录");
+    assert!(win.contains("guard-task.action"), "B60 FAIL windows 缺动作记录文件");
     assert!(
         win.contains("已存在且为最新"),
-        "B60 FAIL windows 缺「任务+脚本均最新」的幂等分支"
+        "B60 FAIL windows 缺「任务+动作一致」的幂等分支"
     );
 
     // 反向：不得退化成「每次启动都无脑重写」（那会丢失幂等语义、每次都 reload）

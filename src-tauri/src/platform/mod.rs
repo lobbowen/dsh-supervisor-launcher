@@ -78,11 +78,18 @@ pub struct LaunchSpec {
     pub node: std::path::PathBuf,
     /// 内核守卫可执行文件。
     pub guard: std::path::PathBuf,
-    /// 服务/子进程应继承的 PATH（nodeBinDir 必在首位）。
+    /// 子进程应继承的 PATH（nodeBinDir 必在首位）。
     pub env_path: String,
     /// 产品状态根：**必须**注入服务/spawn 环境（`DSH_SUPERVISOR_HOME`），
     ///   否则壳与内核各自推导状态根（XDG 环境差异）→ 契约/端口写到两个目录 → 永远拉不起来。
     pub state_root: std::path::PathBuf,
+    /// 壳自身可执行文件 —— 服务定义**唯一**指向的稳定入口（--run-guard）。
+    ///
+    /// 架构（2026-09-15 二次修正）：服务定义**不再固化 node/guard 路径**。
+    ///   定义只写 `<壳> --run-guard`；node/guard 由 --run-guard 在**每次启动时**重新检测
+    ///   （node 迁移 / 内核升级自动适配）。旧做法把检测结果写进每台机器现生成的脚本
+    ///   （.cmd/.ps1/unit），必然过期，且被编码/前缀/垫片细节反复咬。
+    pub shell: std::path::PathBuf,
 }
 
 impl LaunchSpec {
@@ -94,8 +101,79 @@ impl LaunchSpec {
             guard,
             env_path: crate::runtime_contract::env_path(&rt.node_bin_dir),
             state_root: crate::env::state_root(),
+            shell: std::env::current_exe().unwrap_or_default(),
         }
     }
+
+    /// 服务定义应执行的**稳定入口**：壳自身 + --run-guard。
+    ///
+    /// 不变量（门禁锁定）：三平台服务定义**不得**出现 spec.node / spec.guard。
+    pub fn service_command(&self) -> (&std::path::Path, &'static [&'static str]) {
+        (self.shell.as_path(), &["--run-guard"])
+    }
+}
+
+/// 把稳定入口组装成一行**服务定义命令**（值内部自带引号）。
+///
+/// systemd 的 `ExecStart`、launchd 的 `ProgramArguments`、schtasks 的 `/TR`
+///   三处对引号/数组的要求不同，但「命令 = 壳 + --run-guard」这一事实必须单源。
+pub fn service_exec_line(shell: &std::path::Path, args: &[&str]) -> String {
+    let mut s = format!("\"{}\"", shell.display());
+    for a in args {
+        s.push(' ');
+        s.push_str(a);
+    }
+    s
+}
+
+/// 以守卫身份运行：`--run-guard` 解析出 node/guard 后调用。
+///
+/// · Unix：`execvp` **替换**当前进程 —— systemd/launchd 直接追踪真实 node；
+/// · Windows：分离启动（不等待）—— 计划任务实例即可结束，保活由看护任务按端口负责。
+///
+/// 平台分支只允许在本层（门禁 G1）。
+#[cfg(unix)]
+pub fn exec_guard(spec: &LaunchSpec) -> Result<(), String> {
+    use std::os::unix::process::CommandExt;
+    let mut cmd = std::process::Command::new(&spec.node);
+    cmd.arg(&spec.guard)
+        .arg("daemon")
+        .env("PATH", &spec.env_path)
+        .env("DSH_SUPERVISOR_HOME", &spec.state_root);
+    Err(format!("exec 守卫失败: {}", cmd.exec()))
+}
+
+#[cfg(windows)]
+pub fn exec_guard(spec: &LaunchSpec) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+    let is_shim = spec
+        .guard
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| {
+            let e = e.to_ascii_lowercase();
+            e == "cmd" || e == "bat"
+        })
+        .unwrap_or(false);
+    let mut cmd = if is_shim {
+        // 规范化后的包内 JS 入口不存在时的兜底：垫片必须由 cmd 执行。
+        let mut c = std::process::Command::new("cmd");
+        c.arg("/C").arg(&spec.guard).arg("daemon");
+        c
+    } else {
+        let mut c = std::process::Command::new(&spec.node);
+        c.arg(&spec.guard).arg("daemon");
+        c
+    };
+    cmd.env("PATH", &spec.env_path)
+        .env("DSH_SUPERVISOR_HOME", &spec.state_root)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        // DETACHED_PROCESS | CREATE_NO_WINDOW：分离运行，父进程（计划任务实例）即可退出。
+        .creation_flags(0x0000_0008 | 0x0800_0000);
+    cmd.spawn().map_err(|e| format!("启动守卫失败: {}", e))?;
+    Ok(())
 }
 
 /// 平台契约。
@@ -353,5 +431,39 @@ mod tests {
             _ => None,
         };
         assert_eq!(got, want, "core_platform_tag 必须与构建 target 一致");
+    }
+}
+
+#[cfg(test)]
+mod launch_spec_tests {
+    //! 行为门禁：服务定义只指向**稳定入口** `<壳> --run-guard`（2026-09-15 架构修正）。
+    use super::*;
+
+    fn spec_with(shell: &str) -> LaunchSpec {
+        LaunchSpec {
+            node: std::path::PathBuf::from("/NODE SENTINEL/node"),
+            guard: std::path::PathBuf::from("/GUARD SENTINEL/guard"),
+            env_path: String::new(),
+            state_root: std::path::PathBuf::from("/state"),
+            shell: std::path::PathBuf::from(shell),
+        }
+    }
+
+    #[test]
+    fn service_command_is_shell_run_guard() {
+        let s = spec_with("/opt/x/dsh-supervisor");
+        let (shell, args) = s.service_command();
+        assert_eq!(shell, std::path::Path::new("/opt/x/dsh-supervisor"));
+        assert_eq!(args, &["--run-guard"]);
+    }
+
+    #[test]
+    fn service_exec_line_quotes_shell_and_has_no_volatile_paths() {
+        let s = spec_with("/home/John Smith/dsh-supervisor");
+        let (shell, args) = s.service_command();
+        let line = service_exec_line(shell, args);
+        assert_eq!(line, "\"/home/John Smith/dsh-supervisor\" --run-guard");
+        assert!(!line.contains("NODE SENTINEL") && !line.contains("GUARD SENTINEL"),
+            "服务定义不得含 node/guard 路径：{}", line);
     }
 }

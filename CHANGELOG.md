@@ -6,6 +6,32 @@
 
 （下一版本待记）
 
+## [1.1.6]（2026-09-15）
+
+### 架构修正：服务定义只指向**稳定入口** `<壳> --run-guard`，node/守卫改为运行时检测
+
+真机证据（1.1.5）：PowerShell 包装脚本确实执行了，但 `node` 拿到的是 npm 的 `.cmd` 垫片
+（且带 `\\?\` verbatim 前缀）→ `Error: EISDIR: lstat 'C:'`。日志还混了三段编码（GBK/UTF-8/UTF-16）。
+
+根因不是「哪个路径写错」，而是**把运行时检测结果固化进每台机器现场生成的脚本**：
+node 一迁移（nvm/fnm/volta）即失效；Windows 还要现场拼 `.cmd/.ps1`，被码页/前缀/垫片轮番咬。
+门禁此前全是 `str::contains` 源码文本断言，观测不到运行时行为，故 CI 全绿而真机失败。
+
+修法（对齐内核看护脚本，但更进一步 —— 连脚本也不再需要）：
+
+- 新增无头入口 `dsh-supervisor-gui --run-guard`：每次启动重新检测 node（运行期契约/探针）
+  与守卫（core.json + 候选扫描，取本地最高版本），随即 `exec`。**不触网**，离线可启动；
+- 三平台服务定义统一为 `<壳> --run-guard`（`LaunchSpec::service_command()` +
+  `service_exec_line()` 单源组装）：Systemd `ExecStart`、launchd `ProgramArguments`、
+  schtasks `/TR`。**定义中不再出现任何 node/guard 路径**；
+- **删除** Windows 的 `guard-task.cmd/.ps1`、`win_path_expr`、`guard_argv` 及整个包装脚本机制；
+  看护任务也改为 `Start-Process <壳> --run-guard`；
+- `spawn_daemon` 收敛为 `ServiceControl` 的**同一默认实现**（三平台不再各写一份）；
+- `domain/coreloc.rs` 单点归一化：剥 `\\?\` verbatim 前缀、`.cmd` 垫片 → 包内真实 JS 入口；
+- 门禁升级为**行为/结构**：`coreloc` 内置单测直接驱动路径规范化与版本仲裁（假 npm prefix、
+  假 node/guard）；L-1/K-4/K-10/B56 改为「定义不含 node/guard 路径、只指向 --run-guard」；
+  新增 `guard_resolution_test.rs` 结构不变量。
+
 ## [1.1.5]（2026-09-15）
 
 ### 修复：Windows 守卫包装脚本弃用 `.cmd`，改用 PowerShell（UTF-8 BOM）

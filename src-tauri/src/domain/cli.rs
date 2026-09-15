@@ -94,3 +94,26 @@ pub(crate) fn cli_plan() -> i32 {
         Err(e) => { eprintln!("latest_lts_error={}", e); 1 }
     }
 }
+
+/// 运行时守卫入口（`--run-guard`）：**每次启动重新检测** node + 守卫，然后执行。
+///
+/// 这是「服务定义只指向稳定入口」的落地：systemd/launchd/schtasks 永久指向
+///   `<壳> --run-guard`，node 迁移 / 内核升级后**无需重建服务定义**。
+///
+/// **不触网**：只做本地检测（运行期契约 + 内核位置契约 + 候选扫描），离线也能启动；
+///   线上对齐（P1）由壳在创建/启动服务前把关。
+pub(crate) fn cli_run_guard() -> i32 {
+    let Some((rt, guard)) = crate::domain::guardctl::resolve_local(None) else {
+        eprintln!("[run-guard] 本地检测失败：未找到可用的 node 或内核守卫");
+        return 1;
+    };
+    eprintln!("[run-guard] node={} guard={}", rt.node.display(), guard.display());
+    let spec = crate::platform::LaunchSpec::from_runtime(&rt, guard);
+    match crate::platform::exec_guard(&spec) {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("[run-guard] {}", e);
+            1
+        }
+    }
+}

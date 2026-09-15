@@ -311,6 +311,11 @@ fn main() {
         println!("{}", shell_update_plan_text());
         std::process::exit(0);
     }
+    // 运行时守卫入口：服务定义（systemd/launchd/schtasks）只指向 `<壳> --run-guard`。
+    //   必须在 Tauri 初始化**之前**返回 —— 每次启动重新检测 node/guard 后 exec。
+    if std::env::args().any(|a| a == "--run-guard") {
+        std::process::exit(domain::cli::cli_run_guard());
+    }
     bt!("building app");
     tauri::Builder::default()
         // 单实例管控（2026-09）：同一 user 会话内只允许一个壳实例——重复启动第二实例时
