@@ -21,6 +21,8 @@
 | `DESIGN-BOUNDARY.md` | 设计（现行）| 壳与内核的边界契约 |
 | `DESIGN-COMPLETE.md` | 设计（现行，**汇总**）| 完整设计（体量最大）|
 | `SHELL-UPDATE-CHANNEL-VERIFICATION.md` | 验证记录（现行）| 更新通道验证 |
+| `UPDATER-SIGNING-KEY.md` | 运维手册（现行）| minisign 自更新签名密钥的保管/备份/验证/轮换（**不含私钥**）|
+| `DESKTOP-ACCEPTANCE.md` | 验收清单（现行）| 桌面壳真机验收（引导页/服务定义/自更新，GUI 场景）|
 
 ## 相关但不在本目录
 
