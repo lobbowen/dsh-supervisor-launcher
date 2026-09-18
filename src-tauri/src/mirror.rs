@@ -106,7 +106,8 @@ fn proxy_url() -> Option<String> {
             if !v.is_empty() { return Some(v.to_string()); }
         }
     }
-    None
+    // 环境变量没有时，退到**系统代理**（Windows WinINET / macOS SystemConfiguration）。
+    crate::platform::system_proxy()
 }
 
 pub fn now_secs() -> u64 {

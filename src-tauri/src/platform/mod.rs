@@ -46,6 +46,85 @@ pub fn user_name() -> String {
         .unwrap_or_else(|_| "user".into())
 }
 
+/// 系统代理 URL（环境变量之外的**第二来源**）。
+///
+/// 为什么需要：Windows 用户常用 Clash / v2ray 的**系统代理**（只写 WinINET 注册表，
+///   不设 HTTP_PROXY）；macOS 的「网络 → 代理」同理只写 SystemConfiguration。
+///   ureq 不读这些位置，于是出现「浏览器能上网，壳却全部镜像不可用」。
+/// 返回 http://host:port；无系统代理返回 None。
+pub fn system_proxy() -> Option<String> {
+    #[cfg(target_os = "windows")]
+    let v = windows_system_proxy();
+    #[cfg(target_os = "macos")]
+    let v = macos_system_proxy();
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let v: Option<String> = None;
+    v
+}
+
+#[cfg(target_os = "windows")]
+fn windows_system_proxy() -> Option<String> {
+    use std::process::Command;
+    let query = |name: &str| -> Option<String> {
+        let out = Command::new("reg")
+            .args([
+                "query",
+                "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings",
+                "/v",
+                name,
+            ])
+            .output()
+            .ok()?;
+        let s = String::from_utf8_lossy(&out.stdout);
+        let line = s.lines().find(|l| l.contains(name))?;
+        line.split_whitespace().last().map(|x| x.to_string())
+    };
+    let enabled = query("ProxyEnable").map(|v| v.ends_with('1')).unwrap_or(false);
+    if !enabled {
+        return None;
+    }
+    let server = query("ProxyServer")?;
+    // ProxyServer 可能是 "host:port"，也可能是 "http=host:port;https=host:port"。
+    let hostport = if server.contains('=') {
+        server
+            .split(';')
+            .find_map(|p| p.split_once('='))
+            .filter(|(k, _)| k.eq_ignore_ascii_case("https") || k.eq_ignore_ascii_case("http"))
+            .map(|(_, v)| v.to_string())?
+    } else {
+        server
+    };
+    if hostport.trim().is_empty() {
+        return None;
+    }
+    Some(if hostport.contains("://") { hostport } else { format!("http://{}", hostport) })
+}
+
+#[cfg(target_os = "macos")]
+fn macos_system_proxy() -> Option<String> {
+    use std::process::Command;
+    let out = Command::new("scutil").arg("--proxy").output().ok()?;
+    let s = String::from_utf8_lossy(&out.stdout);
+    let field = |k: &str| -> Option<String> {
+        s.lines()
+            .find(|l| l.trim_start().starts_with(k))
+            .and_then(|l| l.split(':').nth(1))
+            .map(|v| v.trim().to_string())
+    };
+    for (enable, host, port) in [
+        ("HTTPSEnable", "HTTPSProxy", "HTTPSPort"),
+        ("HTTPEnable", "HTTPProxy", "HTTPPort"),
+    ] {
+        if field(enable).as_deref() == Some("1") {
+            if let Some(h) = field(host) {
+                let p = field(port).unwrap_or_else(|| "80".into());
+                return Some(format!("http://{}:{}", h, p));
+            }
+        }
+    }
+    None
+}
+
 /// 以当前平台的**正确方式**执行版本探针（`<prog> [args...] --version`），有界返回首个非空行。
 ///
 /// 为什么必须在平台层：Windows 上的 .cmd / .bat（如官方 npm.cmd）**不能**被
