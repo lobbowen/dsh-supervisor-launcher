@@ -20,9 +20,15 @@ fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
-/// 递归收集扫描目标：scripts/（构建脚本）与 .github/（CI）+ Cargo.toml。
+/// 仓根：CARGO_MANIFEST_DIR 是 src-tauri/，而扫描面在**仓根**下的 scripts/.github/ci。
+/// ⚠ 2026-09-18 修 P0：此前以 src-tauri/ 为基准找这三目录 → 三者皆不存在 → 扫描 0 文件、门禁恒绿空转。
+fn repo_root() -> PathBuf {
+    root().parent().map(|p| p.to_path_buf()).unwrap_or_else(root)
+}
+
+/// 递归收集扫描目标：scripts/（构建脚本）、.github/（CI）、ci/。
 fn scanned_files() -> Vec<String> {
-    let base = root();
+    let base = repo_root();
     let mut out: Vec<String> = Vec::new();
     for dir in ["scripts", ".github", "ci"] {
         let d = base.join(dir);
@@ -143,7 +149,7 @@ fn r_g1_no_tmp_glob_deletion() {
     let mut hits: Vec<String> = Vec::new();
     let mut scanned = 0usize;
     for rel in scanned_files() {
-        let p = root().join(&rel);
+        let p = repo_root().join(&rel);
         let src = match fs::read_to_string(&p) {
             Ok(v) => v,
             Err(_) => continue,
@@ -153,6 +159,7 @@ fn r_g1_no_tmp_glob_deletion() {
             hits.push(format!("{} :: {}", rel, d));
         }
     }
+    assert!(scanned > 0, "R-G1 扫描面为空（门禁空转）：repo_root={:?}", repo_root());
     assert!(
         hits.is_empty(),
         "R-G1 FAIL 仓内脚本对 /tmp 使用通配或前缀删除（会打崩正在运行的 DSH）：{:?}",
@@ -164,16 +171,19 @@ fn r_g1_no_tmp_glob_deletion() {
 #[test]
 fn r_g2_no_destructive_system_path_ops() {
     let mut hits: Vec<String> = Vec::new();
+    let mut scanned = 0usize;
     for rel in scanned_files() {
-        let p = root().join(&rel);
+        let p = repo_root().join(&rel);
         let src = match fs::read_to_string(&p) {
             Ok(v) => v,
             Err(_) => continue,
         };
+        scanned += 1;
         for d in sys_hits(&strip_comments(&src)) {
             hits.push(format!("{} :: {}", rel, d));
         }
     }
+    assert!(scanned > 0, "R-G2 扫描面为空（门禁空转）：repo_root={:?}", repo_root());
     assert!(
         hits.is_empty(),
         "R-G2 FAIL 仓内脚本对系统运行时路径做破坏性操作：{:?}",

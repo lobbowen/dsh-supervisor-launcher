@@ -6,6 +6,37 @@
 
 （下一版本待记）
 
+## [1.1.8]（2026-09-18）
+
+### 新增：内核选版遵循发布通道契约（RELEASE-CHANNEL-CONTRACT §3）
+
+- 新增 `src-tauri/src/release_channel.rs`：契约 §3 冻结算法的唯一实现 ——
+  `rollback` > （灰度机）`canary` > `latest` > `versions` 兜底 > `Err`；§5 灰度名单只认
+  `schema:1 + entries[].installId`（主）/ `hostnames[]`（兜底），`note` 不参与匹配；旧 7 形状显式拒绝。
+- `core.rs` 的 `latest_pick`/`LatestPick`/`build_plan` 接入：**回退（rollback）目标低于当前版本时仍判为需动手**（RC-2），
+  升级与回退共用同一写入路径（执行体不做版本比较）。
+- **行为变更**：`.github/workflows/build.yml` 发布 tag 由 `-RC.n` 改指 `latest`（与内核选版契约一致）。
+
+### 修复：工具链 npm 与 node 同权
+
+- `node.rs`/`main.rs`：node 安装成功后**必须校验 npm**；两条通道都无则幂等重装再复探；
+  仍失败带手动安装指引，绝不静默（对齐 `docs/ENV-TOOLCHAIN-INSTALL-STANDARD.md`）。
+- 新增 `docs/ENV-TOOLCHAIN-INSTALL-STANDARD.md`、`src-tauri/tests/env_toolchain_standard_test.rs`。
+
+### 修复：门禁与稳定性（2026-09-18 审计）
+
+- `tests/dev_runtime_safety_test.rs`：修扫描根（此前以 `src-tauri/` 为基准 → 扫描 0 文件、门禁空转），
+  并加 `assert!(scanned > 0)`。
+- `bootstrap/js/40-shell-update.js`：修「不支持自更新」死分支（后端真值为 `selfUpdateCapable`，
+  deb/rpm 无提权通道时此前会强更失败）。
+- `commands/mod.rs`：`core_apply` 加 **17 分钟总预算**，耗尽即停并如实回报已尝试源数（与前端预算对齐）。
+- CI：**tag 构建缺签名密钥由 warning 升为 error**（Tauri 自动更新强制验签）。
+
+### 文档
+
+- 内核仓移交：`DESKTOP-ACCEPTANCE.md`、`UPDATER-SIGNING-KEY.md`；新增 `DEVELOPMENT-TRACK.md`。
+- 新增审计台账 `docs/audit/2026-09-18/`（5 分片报告 + 索引：P0/P1/P2 分级与本版「已修/已登记」去向）。
+
 ## [1.1.7]（2026-09-16）
 
 ### 修复：工具链契约补齐 npm（干净 Windows 上「node 在、npm 缺」）

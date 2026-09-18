@@ -161,7 +161,11 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           if [ -z "${TAURI_SIGNING_PRIVATE_KEY}" ]; then
-            echo "::warning::TAURI_SIGNING_PRIVATE_KEY 未配置 —— 不生成 .sig，产物不可用于自动更新"
+            if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+              echo "::error::TAURI_SIGNING_PRIVATE_KEY 未配置 —— tag 发布必须签名（Tauri updater 强制验签）"
+              exit 1
+            fi
+            echo "::warning::TAURI_SIGNING_PRIVATE_KEY 未配置 —— 不生成 .sig，产物不可用于自动更新（非 tag 构建不阻断）"
           fi
           npx --yes @tauri-apps/cli@2 build --bundles "${{ matrix.bundles }}"
 

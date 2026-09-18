@@ -300,8 +300,19 @@ async fn core_apply_inner(app: tauri::AppHandle) -> ShellResult<serde_json::Valu
     let target2 = target.clone();
     let pref = prefix.clone();
     let res = tauri::async_runtime::spawn_blocking(move || {
+        // 总预算（S2B-1 修）：与前端 CORE_APPLY_BUDGET_MS(17min) 对齐 —— 否则前端已报超时放弃，
+        //   后端仍按「每源 15min」串行继续，最坏 6×15min，用户重试还会并发写同一 prefix。
+        //   耗尽即停并如实回报「已尝试 N/M 个源」。
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(17 * 60);
+        let total = origins.len();
+        let mut tried = 0usize;
         let mut last = String::from("无可用镜像");
         for o in &origins {
+            if std::time::Instant::now() >= deadline {
+                last = format!("总预算耗尽：已尝试 {}/{} 个源；最后错误: {}", tried, total, last);
+                break;
+            }
+            tried += 1;
             match crate::core::install_version(&pkg2, &target2, pref.as_deref(), Some(o.as_str())) {
                 Ok(out) => return Ok::<(String, String), String>((o.clone(), out)),
                 Err(e) => last = e,

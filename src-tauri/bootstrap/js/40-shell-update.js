@@ -24,7 +24,9 @@
       if (r.__error) return showUpdRetry('桌面版本检查异常：' + r.__error);
       if (r.ok === false) return showUpdRetry('桌面版本检查失败：' + (r.error || '未知'));
       NS.updPlan = r;
-      if (r.cannotSelfUpdate === true) {
+      // ⚠ 2026-09-18 S2A-9 修：Rust 从不下发 cannotSelfUpdate，真值是 shell_identity 的 selfUpdateCapable；
+      //   不修则 deb/rpm 无提权通道时仍走强更 → 必失败。
+      if (r.cannotSelfUpdate === true || (NS.shellId && NS.shellId.selfUpdateCapable === false)) {
         NS.status('当前安装形态不支持自更新，继续');
         return NS.wait(400).then(NS.stepCorePlan);
       }
