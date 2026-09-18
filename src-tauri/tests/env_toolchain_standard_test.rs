@@ -85,10 +85,19 @@ fn g1_node_status_exposes_real_npm_probe() {
 fn g2_run_install_validates_npm_inside_body() {
     let main = read("src/main.rs");
     let body = fn_body(&main, "fn run_install");
-    let has_npm = body.contains("probe_npm") || body.contains("npmOk") || body.contains("npm_exe_name");
+    // 2026-09-18：校验逻辑下沉 node.rs::finalize_install（G3 要求 main.rs 只做组装）。
+    //   判据随之接受「run_install 委派给 finalize_install，且该函数体真的校验 npm」。
+    let node_src = read("src/node.rs");
+    let final_body = fn_body(&node_src, "fn finalize_install");
+    let delegated_ok = body.contains("finalize_install")
+        && (final_body.contains("npm_usable_at") || final_body.contains("probe_npm"));
+    let has_npm = body.contains("probe_npm")
+        || body.contains("npmOk")
+        || body.contains("npm_exe_name")
+        || delegated_ok;
     assert!(
         has_npm,
-        "run_install 函数体内未出现任何 npm 校验（probe_npm/npmOk/npm_exe_name）—— \
+        "run_install 未校验 npm（本地或经 node::finalize_install 委派）—— \
          装完 node 即报成功，npm 缺失会被误判为环境就绪"
     );
 }
@@ -137,9 +146,15 @@ fn g4_src_has_no_legacy_install_events() {
 #[test]
 fn g5_env_js_has_standalone_npm_branch() {
     let js = read("bootstrap/js/20-env.js");
+    // 2026-09-18：npmOk 改为**三态**（true/false/null=未知），只有 npmOk === true 才放行。
+    //   故独立分支判据由 "npmOk === false" 收紧为 "npmOk !== true"（覆盖「缺」与「未知」）。
     let at = js
-        .find("npmOk === false")
-        .expect("20-env.js 缺 npmOk === false 独立分支（npm 缺失不会被修复）");
+        .find("npmOk !== true")
+        .expect("20-env.js 缺 npmOk !== true 独立分支（npm 缺失/未知不会被修复）");
+    assert!(
+        js.contains("npmOk === true"),
+        "就绪判定必须要求 npmOk === true（文件存在 != 可用，不变量 T-1b）"
+    );
     // 取分支起点后的窗口：足够覆盖分支体（probeMirrorThen + status 文案 + invoke）。
     let window: String = js[at..].chars().take(700).collect();
     assert!(

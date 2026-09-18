@@ -132,7 +132,12 @@ impl Platform for Impl {
                 out.stderr.trim()
             ));
         }
-        Ok(self.node_bin_after_install())
+        // 2026-09-18：退出码 0 不等于文件就位：必须核对，否则后续以「未检测到 Node」误报。
+        let node = self.node_bin_after_install();
+        if !node.is_file() {
+            return Err(format!("installer 退出码 0 但 {} 未就位（安装未生效）", node.display()));
+        }
+        Ok(node)
     }
 
     fn core_extra_candidates(&self, names: &[&str], _pkg: Option<&str>) -> Vec<PathBuf> {

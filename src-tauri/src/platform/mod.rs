@@ -46,6 +46,156 @@ pub fn user_name() -> String {
         .unwrap_or_else(|_| "user".into())
 }
 
+/// 系统代理 URL（环境变量之外的**第二来源**）。
+///
+/// 为什么需要：Windows 用户常用 Clash / v2ray 的**系统代理**（只写 WinINET 注册表，
+///   不设 HTTP_PROXY）；macOS 的「网络 → 代理」同理只写 SystemConfiguration。
+///   ureq 不读这些位置，于是出现「浏览器能上网，壳却全部镜像不可用」。
+/// 返回 http://host:port；无系统代理返回 None。
+pub fn system_proxy() -> Option<String> {
+    #[cfg(target_os = "windows")]
+    let v = windows_system_proxy();
+    #[cfg(target_os = "macos")]
+    let v = macos_system_proxy();
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let v: Option<String> = None;
+    v
+}
+
+#[cfg(target_os = "windows")]
+fn windows_system_proxy() -> Option<String> {
+    use std::process::Command;
+    let query = |name: &str| -> Option<String> {
+        // 必须经 bounded::run（B32：任何外部命令不得裸 .output()/status() 无界阻塞）。
+        let mut cmd = Command::new("reg");
+        cmd.args([
+            "query",
+            "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings",
+            "/v",
+            name,
+        ]);
+        let out = crate::bounded::run(&mut cmd, SVC_QUICK).ok()?;
+        let line = out.stdout.lines().find(|l| l.contains(name))?;
+        line.split_whitespace().last().map(|x| x.to_string())
+    };
+    let enabled = query("ProxyEnable").map(|v| v.ends_with('1')).unwrap_or(false);
+    if !enabled {
+        return None;
+    }
+    let server = query("ProxyServer")?;
+    // ProxyServer 可能是 "host:port"，也可能是 "http=host:port;https=host:port"。
+    let hostport = if server.contains('=') {
+        server
+            .split(';')
+            .find_map(|p| p.split_once('='))
+            .filter(|(k, _)| k.eq_ignore_ascii_case("https") || k.eq_ignore_ascii_case("http"))
+            .map(|(_, v)| v.to_string())?
+    } else {
+        server
+    };
+    if hostport.trim().is_empty() {
+        return None;
+    }
+    Some(if hostport.contains("://") { hostport } else { format!("http://{}", hostport) })
+}
+
+#[cfg(target_os = "macos")]
+fn macos_system_proxy() -> Option<String> {
+    use std::process::Command;
+    let mut cmd = Command::new("scutil");
+    cmd.arg("--proxy");
+    let out = crate::bounded::run(&mut cmd, SVC_QUICK).ok()?;
+    let s = out.stdout;
+    let field = |k: &str| -> Option<String> {
+        s.lines()
+            .find(|l| l.trim_start().starts_with(k))
+            .and_then(|l| l.split(':').nth(1))
+            .map(|v| v.trim().to_string())
+    };
+    for (enable, host, port) in [
+        ("HTTPSEnable", "HTTPSProxy", "HTTPSPort"),
+        ("HTTPEnable", "HTTPProxy", "HTTPPort"),
+    ] {
+        if field(enable).as_deref() == Some("1") {
+            if let Some(h) = field(host) {
+                let p = field(port).unwrap_or_else(|| "80".into());
+                return Some(format!("http://{}:{}", h, p));
+            }
+        }
+    }
+    None
+}
+
+/// 以当前平台的**正确方式**执行版本探针（`<prog> [args...] --version`），有界返回首个非空行。
+///
+/// 为什么必须在平台层：Windows 上的 .cmd / .bat（如官方 npm.cmd）**不能**被
+///   CreateProcess 直接执行，必须经 `cmd /C`。这是平台知识，按门禁 G1 只能出现在本层。
+/// 无输出 / 非零退出 / 超时一律 None（视为不可用）—— 「文件存在」不等于「可执行」。
+pub fn run_version_probe(prog: &std::path::Path, args: &[String]) -> Option<String> {
+    use std::process::{Command, Stdio};
+    let mut cmd;
+    #[cfg(target_os = "windows")]
+    {
+        let needs_shell = prog
+            .extension()
+            .map(|e| {
+                let e = e.to_string_lossy().to_ascii_lowercase();
+                e == "cmd" || e == "bat"
+            })
+            .unwrap_or(false);
+        if needs_shell {
+            let mut c = Command::new("cmd");
+            c.arg("/C").arg(prog);
+            for a in args { c.arg(a); }
+            c.arg("--version");
+            cmd = c;
+        } else {
+            let mut c = Command::new(prog);
+            for a in args { c.arg(a); }
+            c.arg("--version");
+            cmd = c;
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let mut c = Command::new(prog);
+        for a in args { c.arg(a); }
+        c.arg("--version");
+        cmd = c;
+    }
+    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+    crate::bounded::prepare(&mut cmd);
+    let mut child = cmd.spawn().ok()?;
+    let started = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(st)) => break st,
+            Ok(None) => {
+                if started.elapsed() >= std::time::Duration::from_secs(8) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(40));
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    };
+    if !status.success() { return None; }
+    let mut out = String::new();
+    {
+        use std::io::Read;
+        if let Some(mut s) = child.stdout.take() {
+            let _ = s.read_to_string(&mut out);
+        }
+    }
+    out.lines().map(|l| l.trim().to_string()).find(|l| !l.is_empty())
+}
+
 /// 平台能力声明（供 `--platform-matrix` 自检与诊断，**不参与业务逻辑**）。
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Capabilities {
