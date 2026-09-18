@@ -89,6 +89,37 @@ pub fn derive(node: &Path, version: &str) -> Option<NodeRuntime> {
     })
 }
 
+/// npm 的**可用性**结论（路径 + 前置参数 + 真实执行得到的版本）。
+pub struct NpmUsable {
+    pub path: PathBuf,
+    pub args: Vec<String>,
+    pub version: String,
+}
+
+/// 解析并**真实执行** npm（--version）—— 「文件存在」不等于「可用」。
+///
+/// 不变量 T-1b：npmOk 只有在本函数返回 Some 时才可为 true。旧实现只 is_file()，
+///   一个 0 字节 / 损坏 / 被安全软件拦截的 npm 会让 npmOk 恒 true，随后内核 npm install 必失败，
+///   而用户看到的是「环境已就绪」。
+pub fn probe_npm_usable(node: &Path, bin_dir: &Path) -> Option<NpmUsable> {
+    let (path, args) = probe_npm(node, bin_dir)?;
+    let version = crate::platform::run_version_probe(&path, &args)?;
+    Some(NpmUsable { path, args, version })
+}
+
+/// 由 Node 路径 + 版本推导**可用**的 NodeRuntime（npm 必须真实可执行，否则 None）。
+pub fn derive_usable(node: &Path, version: &str) -> Option<NodeRuntime> {
+    let bin_dir = node.parent()?.to_path_buf();
+    let u = probe_npm_usable(node, &bin_dir)?;
+    Some(NodeRuntime {
+        node: node.to_path_buf(),
+        node_bin_dir: bin_dir,
+        npm: u.path,
+        npm_prefix: u.args,
+        version: version.to_string(),
+    })
+}
+
 /// 原子写契约（tmp + rename；Unix 0600）。保留旧键供内核兼容读取。
 pub fn write(rt: &NodeRuntime) {
     let dir = crate::env::supervisor_dir();
@@ -240,6 +271,21 @@ mod toolchain_tests {
         assert!(derive(&node, "v22.12.0").is_none(), "无 npm → 环境不就绪");
         std::fs::write(d.join("npm"), b"").unwrap();
         assert!(derive(&node, "v22.12.0").is_some(), "有 npm → 就绪");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn probe_npm_usable_rejects_non_executable() {
+        // 不变量 T-1b：文件存在 != 可用。空/不可执行的 npm 必须判为不可用。
+        let d = tmp("usable");
+        let node = d.join("node");
+        std::fs::write(&node, b"").unwrap();
+        let npm = d.join(crate::platform::current().npm_exe_name());
+        std::fs::write(&npm, b"").unwrap();
+        assert!(
+            probe_npm_usable(&node, &d).is_none(),
+            "空/不可执行的 npm 不得判为可用（T-1b）"
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 }

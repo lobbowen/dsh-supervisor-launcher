@@ -168,10 +168,14 @@ impl Platform for Impl {
 
     fn install_node(&self, file: &Path) -> Result<PathBuf, String> {
         let abs = file.canonicalize().map_err(|e| e.to_string())?;
-        let esc = abs.display().to_string().replace('"', "");
+        // 2026-09-18 修（Windows 安装假成功 + 路径含空格必失败）：
+        //   ① Start-Process 的退出码默认不被检查（PowerShell 本身恒 0），msiexec 真失败也返回 Ok；
+        //   ② -ArgumentList 数组按空格拼接，不带引号的 /i 路径含空格时被拆成多个参数 → 必失败。
+        //   两处都修：路径加引号，-PassThru 取 ExitCode 并 exit 它，失败即如实返回。
+        let path = abs.display().to_string().replace('"', "");
         let ps = format!(
-            "Start-Process -FilePath msiexec -ArgumentList '/i','{}','/qn','/norestart' -Verb RunAs -Wait",
-            esc
+            "$ErrorActionPreference='Stop'; try {{ $p = Start-Process -FilePath msiexec -ArgumentList '/i','\"{}\"','/qn','/norestart' -Verb RunAs -Wait -PassThru; exit $p.ExitCode }} catch {{ Write-Error $_; exit 1 }}",
+            path
         );
         let out = crate::bounded::run(
             Command::new("powershell").args(["-NoProfile", "-Command", &ps]),
@@ -180,11 +184,17 @@ impl Platform for Impl {
         .map_err(|e| format!("无法启动 powershell: {}", e))?;
         if !out.success {
             return Err(format!(
-                "Windows 安装失败（用户取消 UAC 或 msiexec 报错）: {}",
+                "Windows 安装失败（msiexec 退出码 {}；用户取消 UAC 或安装报错）: {}",
+                out.code.clone().unwrap_or_else(|| "?".into()),
                 out.stderr.trim()
             ));
         }
-        Ok(self.node_bin_after_install())
+        // msiexec 报 0 不等于文件就位（可能装到别处 / 被策略拦截）：必须核对结果。
+        let node = self.node_bin_after_install();
+        if !node.is_file() {
+            return Err(format!("msiexec 退出码 0 但 {} 未就位（安装未生效）", node.display()));
+        }
+        Ok(node)
     }
 
     fn core_extra_candidates(&self, names: &[&str], pkg: Option<&str>) -> Vec<PathBuf> {

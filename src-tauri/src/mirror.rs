@@ -67,8 +67,47 @@ pub const SHELL_PRESETS: [&str; 2] = [
     "https://cdn.jsdelivr.net/npm/@dsh-sup/shell-release@latest/shell-manifest.json",
 ];
 
-/// 单次探测的总超时（元数据很小，8 秒足够；避免坏源拖慢整体）。
-pub const PROBE_TIMEOUT: Duration = Duration::from_secs(8);
+/// 单次探测的总超时。
+///
+/// 为什么不是 8 秒（2026-09-18 修）：index.json 单个就有 1.5~2MB（90+ 版本），
+///   8 秒在慢网/代理下会让全部镜像一起超时 —— 用户看到「全部 Node 镜像均不可用」，
+///   而真实原因只是探针过短。20 秒仍远小于前端 node_latest 的 45 秒预算。
+pub const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// 进程级 HTTP agent（统一代理与超时）。
+///
+/// 不变量：壳自己的全部 HTTP（镜像探测 / index.json / Node 包 / SHASUMS256）都必须
+///   经本 agent —— 否则探测与下载会出现两套代理/超时行为。
+///
+/// 为什么必须显式处理代理（2026-09-18 修）：ureq 默认既不读环境变量也不读系统代理，
+///   在「只有代理、没有直连」的机器上，全部镜像直连必失败，用户只会看到一句
+///   「全部 Node 镜像均不可用」，无从得知是代理没生效。此处按
+///   ALL_PROXY / HTTPS_PROXY / HTTP_PROXY（大小写）解析；无效地址忽略并记日志。
+pub fn agent() -> &'static ureq::Agent {
+    static A: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+    A.get_or_init(|| {
+        let mut b = ureq::AgentBuilder::new().timeout(PROBE_TIMEOUT);
+        if let Some(u) = proxy_url() {
+            match ureq::Proxy::new(&u) {
+                Ok(p) => { b = b.proxy(p); }
+                Err(e) => { crate::update::log(&format!("代理地址无效，已忽略（{}）: {}", u, e)); }
+            }
+        } else {
+            b = b.try_proxy_from_env(true);
+        }
+        b.build()
+    })
+}
+
+fn proxy_url() -> Option<String> {
+    for k in ["ALL_PROXY", "all_proxy", "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"] {
+        if let Ok(v) = std::env::var(k) {
+            let v = v.trim();
+            if !v.is_empty() { return Some(v.to_string()); }
+        }
+    }
+    None
+}
 
 pub fn now_secs() -> u64 {
     SystemTime::now()
@@ -245,9 +284,9 @@ pub fn export_to_kernel_with(m: &Mirrors, latency_ms: Option<u128>) -> Result<()
             "pathTemplate": npm_probe_path(),
             // P1 修复（2026-09-12）：**必须与壳实际探测用的超时一致**。
             //
-            //   缺陷：此处硬编码 6000，而 `probe_all` 用 `PROBE_TIMEOUT` = **8s**（见上）。
+            //   缺陷：此处硬编码 6000，而 `probe_all` 用 `PROBE_TIMEOUT`（见上）。
             //     `probe` 字段的全部目的就是让两侧**选源一致**（见文件头说明与
-            //     内核 `registry-contract.js` 的注释）—— 6~8s 区间的源会被壳判可达、
+            //     内核 `registry-contract.js` 的注释）—— 介于两者之间的源会被壳判可达、
             //     内核判不可达，选源**再次分叉**。
             //
             //   修法：直接由 `PROBE_TIMEOUT` 派生（单一事实源），永不漂移。
@@ -278,6 +317,9 @@ pub struct Probe {
     pub ok: bool,
     pub latency_ms: u128,
     pub body: Option<String>,
+    /// 失败原因（HTTP / DNS / TLS / 代理 / 读体）。**必须保留**：旧实现把它丢掉，
+    ///   用户只看到「不可达」，排障时无法区分是断网、证书、代理还是镜像 404。
+    pub error: Option<String>,
 }
 
 /// npm registry 的探测探针包名（**必须是一个真实存在的包**）。
@@ -326,19 +368,27 @@ pub fn probe_all(sources: &[String], path: &str) -> Vec<Probe> {
                     ok: false,
                     latency_ms: 0,
                     body: None,
+                    error: None,
                 };
-                match ureq::get(&url).timeout(PROBE_TIMEOUT).call() {
+                match agent().get(&url).timeout(PROBE_TIMEOUT).call() {
                     Ok(resp) => {
                         let mut buf = Vec::new();
                         use std::io::Read;
-                        if resp.into_reader().read_to_end(&mut buf).is_ok() {
-                            probe.latency_ms = started.elapsed().as_millis();
-                            probe.ok = true;
-                            probe.body = Some(String::from_utf8_lossy(&buf).into_owned());
+                        match resp.into_reader().read_to_end(&mut buf) {
+                            Ok(_) => {
+                                probe.latency_ms = started.elapsed().as_millis();
+                                probe.ok = true;
+                                probe.body = Some(String::from_utf8_lossy(&buf).into_owned());
+                            }
+                            Err(e) => {
+                                probe.latency_ms = started.elapsed().as_millis();
+                                probe.error = Some(format!("读取响应失败: {}", e));
+                            }
                         }
                     }
-                    Err(_) => {
+                    Err(e) => {
                         probe.latency_ms = started.elapsed().as_millis();
+                        probe.error = Some(format!("{}", e));
                     }
                 }
                 out.lock().unwrap().push(probe);

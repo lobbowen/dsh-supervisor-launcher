@@ -46,6 +46,76 @@ pub fn user_name() -> String {
         .unwrap_or_else(|_| "user".into())
 }
 
+/// 以当前平台的**正确方式**执行版本探针（`<prog> [args...] --version`），有界返回首个非空行。
+///
+/// 为什么必须在平台层：Windows 上的 .cmd / .bat（如官方 npm.cmd）**不能**被
+///   CreateProcess 直接执行，必须经 `cmd /C`。这是平台知识，按门禁 G1 只能出现在本层。
+/// 无输出 / 非零退出 / 超时一律 None（视为不可用）—— 「文件存在」不等于「可执行」。
+pub fn run_version_probe(prog: &std::path::Path, args: &[String]) -> Option<String> {
+    use std::process::{Command, Stdio};
+    let mut cmd;
+    #[cfg(target_os = "windows")]
+    {
+        let needs_shell = prog
+            .extension()
+            .map(|e| {
+                let e = e.to_string_lossy().to_ascii_lowercase();
+                e == "cmd" || e == "bat"
+            })
+            .unwrap_or(false);
+        if needs_shell {
+            let mut c = Command::new("cmd");
+            c.arg("/C").arg(prog);
+            for a in args { c.arg(a); }
+            c.arg("--version");
+            cmd = c;
+        } else {
+            let mut c = Command::new(prog);
+            for a in args { c.arg(a); }
+            c.arg("--version");
+            cmd = c;
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let mut c = Command::new(prog);
+        for a in args { c.arg(a); }
+        c.arg("--version");
+        cmd = c;
+    }
+    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+    crate::bounded::prepare(&mut cmd);
+    let mut child = cmd.spawn().ok()?;
+    let started = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(st)) => break st,
+            Ok(None) => {
+                if started.elapsed() >= std::time::Duration::from_secs(8) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(40));
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    };
+    if !status.success() { return None; }
+    let mut out = String::new();
+    {
+        use std::io::Read;
+        if let Some(mut s) = child.stdout.take() {
+            let _ = s.read_to_string(&mut out);
+        }
+    }
+    out.lines().map(|l| l.trim().to_string()).find(|l| !l.is_empty())
+}
+
 /// 平台能力声明（供 `--platform-matrix` 自检与诊断，**不参与业务逻辑**）。
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Capabilities {

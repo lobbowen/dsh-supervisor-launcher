@@ -39,6 +39,20 @@ pub async fn node_status(app: tauri::AppHandle) -> serde_json::Value {
         Err(_) => crate::nodeprobe::partial(),
     };
 
+    // npm 可用性必须**真实执行**（不变量 T-1b），且与 node **同源**：只用本次探测到的 node 路径。
+    //   探测未给出 path 时 npm 是「未知」（null），不得伪造成 false —— 否则会触发无谓重装。
+    let node_for_npm = out.path.clone();
+    let npm = match tauri::async_runtime::spawn_blocking(move || {
+        node_for_npm
+            .as_ref()
+            .and_then(|p| p.parent().and_then(|b| crate::runtime_contract::probe_npm_usable(p, b)))
+    })
+    .await
+    {
+        Ok(v) => v,
+        Err(_) => None,
+    };
+    let npm_known = out.path.is_some();
     let mut o = {
         let state = app.state::<Mutex<RunState>>();
         let st = state.lock().unwrap_or_else(|e| e.into_inner());
@@ -51,20 +65,17 @@ pub async fn node_status(app: tauri::AppHandle) -> serde_json::Value {
         if let Some(latest) = &st.latest {
             o["outdated"] = serde_json::json!(crate::node::outdated(installed.as_deref(), latest));
         }
-        // 工具链契约（2026-09-16）：npm 与 node **同等必需**。干净 Windows 上「node 在、npm 缺」时
-        //   旧实现仍判「环境就绪」，随后用不存在的 npm 去安装内核，必失败。前端据 npmOk 决定修复。
-        let npm = out
-            .path
-            .as_ref()
-            .and_then(|p| p.parent().and_then(|b| crate::runtime_contract::probe_npm(p, b)));
-        o["npmOk"] = serde_json::json!(npm.is_some());
-        o["npmPath"] = serde_json::json!(npm.as_ref().map(|(prog, _)| prog.display().to_string()));
+        // 工具链契约（2026-09-16 / 2026-09-18 强化）：npm 与 node **同等必需**，且必须**可用**。
+        //   三态：true=真实执行通过；false=node 已知但 npm 解析/执行失败；null=本次未取到 node，未知。
+        o["npmOk"] = if npm_known { serde_json::json!(npm.is_some()) } else { serde_json::Value::Null };
+        o["npmVersion"] = serde_json::json!(npm.as_ref().map(|n| n.version.clone()));
+        o["npmPath"] = serde_json::json!(npm.as_ref().map(|n| n.path.display().to_string()));
         o
     };
-    // 契约落盘：只要探测到可用 Node 就写运行期契约（**不论是否由壳安装**）——
+    // 契约落盘：node 与 npm **都真实可用**才写（不论是否由壳安装）——
     //   否则「用户本机已有 Node」的机器永远没有 runtime.json，拉起守卫时无从绑定 node。
     if let (Some(p), Some(v)) = (out.path.as_ref(), out.version.as_ref()) {
-        if let Some(rt) = crate::runtime_contract::derive(p, v) {
+        if let Some(rt) = crate::runtime_contract::derive_usable(p, v) {
             crate::runtime_contract::write(&rt);
         }
     }
@@ -178,7 +189,6 @@ pub fn start_node_install(state: tauri::State<Mutex<RunState>>, app: tauri::AppH
                 s.progress = 1.0;
                 s.status = format!("Node.js {} 就绪，正在启动守卫…", version);
                 s.logs.push(format!("安装完成: {} @ {}", version, node_path));
-                crate::node::record_runtime_meta(&node_path, &version);
                 // 探测缓存必须失效：新装的 Node 只有重新探测才会被发现
                 // （否则引导页会在「已装好」之后仍报未检测到）。
                 crate::nodeprobe::invalidate();

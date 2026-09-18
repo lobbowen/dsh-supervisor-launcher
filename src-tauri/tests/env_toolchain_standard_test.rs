@@ -137,9 +137,15 @@ fn g4_src_has_no_legacy_install_events() {
 #[test]
 fn g5_env_js_has_standalone_npm_branch() {
     let js = read("bootstrap/js/20-env.js");
+    // 2026-09-18：npmOk 改为**三态**（true/false/null=未知），只有 npmOk === true 才放行。
+    //   故独立分支判据由 "npmOk === false" 收紧为 "npmOk !== true"（覆盖「缺」与「未知」）。
     let at = js
-        .find("npmOk === false")
-        .expect("20-env.js 缺 npmOk === false 独立分支（npm 缺失不会被修复）");
+        .find("npmOk !== true")
+        .expect("20-env.js 缺 npmOk !== true 独立分支（npm 缺失/未知不会被修复）");
+    assert!(
+        js.contains("npmOk === true"),
+        "就绪判定必须要求 npmOk === true（文件存在 != 可用，不变量 T-1b）"
+    );
     // 取分支起点后的窗口：足够覆盖分支体（probeMirrorThen + status 文案 + invoke）。
     let window: String = js[at..].chars().take(700).collect();
     assert!(

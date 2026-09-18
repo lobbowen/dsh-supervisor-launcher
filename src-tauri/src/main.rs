@@ -144,7 +144,7 @@ pub(crate) fn push_status(app: &tauri::AppHandle, kind: InstallKind, status: Str
     );
 }
 
-// npm 复探与「补齐 npm」的机制在 node.rs（probe_npm_after / reinstall_for_npm）——
+// npm 复探与「补齐 npm」的机制在 node.rs（reinstall_for_npm）与 runtime_contract::probe_npm_usable ——
 //   main.rs 只保留编排（门禁 G3 要求它「只做组装」；且那两件事与 node 安装同属一条工具链）。
 
 /// 完整工具链安装管线（SSOT §2.2）：**node 与 npm 顺序执行，缺一不可**。
@@ -173,25 +173,41 @@ fn run_install(app: &tauri::AppHandle) -> Result<(String, String), InstallFailur
     let local = node::download_verified(&version, &file, &dl_dir, Some(choice.source.as_str()))
         .map_err(InstallFailure::node)?;
     push_status(app, InstallKind::Node, "SHA256 校验通过，准备安装…".into(), 0.8);
-    let node_path = node::install(&local).map_err(InstallFailure::node)?;
-    let node_path = node_path.display().to_string();
-    let installed = match node::probe_after() {
-        Some((_p, v)) if v == version => v,
-        Some((_p, v)) => return Err(InstallFailure::node(format!("安装后版本 {} 与目标 {} 不一致", v, version))),
+    let node_bin = node::install(&local).map_err(InstallFailure::node)?;
+    // 安装后必须**作废探测缓存**：否则 probe_after() 会优先返回安装前记录在 runtime.json 的
+    //   旧 Node（若有），造成「安装后版本 vX != 目标 vY」的永不收敛失败（2026-09-18 修）。
+    crate::nodeprobe::invalidate();
+    // 直接校验**安装器返回的路径**，而不是再问 PATH —— PATH 上是另一个/更旧的 Node 时必误判。
+    let node_path = node_bin.display().to_string();
+    let installed = match crate::env::node_version(&node_bin) {
+        Some(v) if v == version => v,
+        Some(v) => return Err(InstallFailure::node(format!("安装后版本 {} 与目标 {} 不一致", v, version))),
         None => return Err(InstallFailure::node("安装后未能检测到 Node.js")),
     };
+    if !node::meets_minimum(Some(&installed)) {
+        return Err(InstallFailure::node(format!(
+            "安装到的 Node.js {} 低于最低要求 {}",
+            installed,
+            node::MIN_NODE
+        )));
+    }
 
     // ② node 安装成功后**必须校验 npm**（T-1/T-3：只认真实探测，绝不伪造）。
     //   一次探测即覆盖 SSOT §2.3 步骤 1（官方包自带 npm 垫片）与步骤 2
     //   （仅包内 npm-cli.js 时，probe_npm 以 `node <npm-cli.js>` 形态返回，契约已支持 npmArgs）。
     push_status(app, InstallKind::Npm, "正在校验 npm…".into(), 0.85);
-    if node::probe_npm_after().is_some() {
+    // npm 必须**真实执行**通过（T-1b），文件存在不算。
+    let npm_ok = node_bin
+        .parent()
+        .and_then(|b| crate::runtime_contract::probe_npm_usable(&node_bin, b))
+        .is_some();
+    if npm_ok {
         push_status(app, InstallKind::Npm, format!("npm 已就绪（{}）", version), 1.0);
         return Ok((node_path, installed));
     }
     // ③ 两条通道都没有 → 重新执行官方安装（幂等）再复探（SSOT §2.3 步骤 3）。
     // ④ 仍失败 → 带手动安装指引的 InstallFailure（步骤 4 / T-4，绝不静默）。
-    push_status(app, InstallKind::Npm, "官方分发包未提供 npm，正在重新执行官方安装（幂等）…".into(), 0.9);
+    push_status(app, InstallKind::Npm, "官方分发包未提供可用 npm，正在重新执行官方安装（幂等）…".into(), 0.9);
     node::reinstall_for_npm(&local).map_err(InstallFailure::npm)?;
     push_status(app, InstallKind::Npm, format!("npm 已就绪（{}）", version), 1.0);
     Ok((node_path, installed))

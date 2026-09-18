@@ -102,11 +102,13 @@
     //   用户必须能一眼分辨是「没有 Node」还是「有 Node 但缺 npm」；共用文案会把两个根因
     //   混成一句无从下手的话。后端 run_install 已在同一条管线里装 node 并修复 npm（SSOT §2.2），
     //   故这里触发同一次安装调用；npmOk 由 node_status 真实探测回传（不变量 T-1）。
-    if (st.npmOk === false) {
+    // 三态：null=未知（探测没取到 node 路径），此时同样**不得放行** ——
+    //   只有 npmOk === true（npm 真实执行通过）才算环境就绪（不变量 T-1b）。
+    if (st.npmOk !== true) {
       NS.setStep(0);
       return NS.probeMirrorThen(function () {
         // 文案必须自带 npm 字样（SSOT 门禁 G-5）：只说「补全环境」会让 npm 缺失再次被掩盖。
-        NS.install.begin('npm', '检测到缺少 npm · 正在补全工具链…');
+        NS.install.begin('npm', '检测到缺少/不可用的 npm · 正在补全工具链…');
         return NS.core.invoke('start_node_install').then(function () { return NS.stepNodeWait('npm'); });
       });
     }
@@ -129,7 +131,7 @@
           //   轮询到兜底超时并被当作成功、直奔内核步骤 —— 而 npm 仍缺失，装内核必失败。
           if (!st.busy && st.error) { if (!done) { done = true; clearInterval(t); resolve(failOnMissingNpm(kind, st.error)); } return; }
           // 就绪 = node **且** npm **且**达门槛（npm 缺失时安装器可能先出 node，必须继续等）。
-          if (!st.busy && st.installed && st.minOk !== false && st.npmOk !== false) { if (!done) { done = true; clearInterval(t); NS.nodeVer = st.installed; resolve(NS.stepNodeDone()); } }
+          if (!st.busy && st.installed && st.minOk !== false && st.npmOk === true) { if (!done) { done = true; clearInterval(t); NS.nodeVer = st.installed; NS.npmVer = st.npmVersion || null; resolve(NS.stepNodeDone()); } }
         }).catch(function () {});
       }, 700);
       // 兜底：Node 安装可能长达数分钟。此处**绝不**默认成功（SSOT §3.1 不变量 T-5）——
@@ -140,7 +142,7 @@
         clearInterval(t);
         NS.withTimeout(NS.core.invoke('node_status'), 15000, '环境查询无响应').then(function (st) {
           st = st || {};
-          if (!st.busy && st.installed && st.minOk !== false && st.npmOk !== false) { done = true; NS.nodeVer = st.installed; resolve(NS.stepNodeDone()); return; }
+          if (!st.busy && st.installed && st.minOk !== false && st.npmOk === true) { done = true; NS.nodeVer = st.installed; NS.npmVer = st.npmVersion || null; resolve(NS.stepNodeDone()); return; }
           if (!done) { done = true; resolve(failOnMissingNpm(kind, st.error || '安装超时未完成')); }
         }).catch(function () { if (!done) { done = true; resolve(failOnMissingNpm(kind, '安装超时未完成')); } });
       }, 600000);
@@ -158,7 +160,7 @@
 
   function stepNodeDone() {
     NS.setStep(0);
-    NS.status('Node.js ' + (NS.nodeVer || '') + ' 已就绪');
+    NS.status('Node.js ' + (NS.nodeVer || '') + (NS.npmVer ? ' · npm ' + NS.npmVer : '') + ' 已就绪');
     // 环境就绪后**才**进入桌面版本（网络步骤，带超时与跳过出口）
     return NS.wait(350).then(NS.stepShellUpdate);
   }
