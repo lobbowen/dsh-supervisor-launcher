@@ -27,7 +27,7 @@
 //!        且 Windows 覆写为真实查询；trait 默认实现仍适用于文件型平台
 //!   P-b  Linux 的 capabilities().privilege_channel 与 has_privilege_channel() 同源
 //!   P-c  前端消费 core_plan 的 error 字段（不再谎报「已是最新」）
-//!   P-d  env_status 死广播已删除；env_done 有接收方（不再是死广播）
+//!   P-d  env_status 死广播已删除；install_done/install_error 有接收方（不再是死广播）
 //!   P-e  反向：判据能识别旧形态（门禁非空转）
 
 use std::fs;
@@ -127,13 +127,15 @@ fn p_d_dead_broadcast_removed_and_env_done_consumed() {
         !main.contains("env_status"),
         "P-d FAIL env_status 死广播仍在（零监听，且与 node_status 构成第二真源）"
     );
+    // 2026-09-16（SSOT §2.4）：完成事件由 env_done 更名为 install_done，且**必须有接收方**
+    //   （本断言的原始意图就是「不许出现死广播」）—— 更名为统一事件后该意图不变。
     assert!(
-        cmds.contains("env_done"),
-        "P-d FAIL env_done 的发射点不应被删除（它是完成事件）"
+        cmds.contains("install_done") || cmds.contains("install_error"),
+        "P-d FAIL 统一安装完成/失败事件无发射点（前端将永远等不到终态）"
     );
     assert!(
-        init.contains("listen('env_done'"),
-        "P-d FAIL env_done 仍无接收方（死广播）"
+        init.contains("listen('install_done'") || init.contains("listen('install_error'"),
+        "P-d FAIL 统一安装事件无接收方（死广播）"
     );
 }
 

@@ -16,7 +16,7 @@
 | H1 | 内核包安装/升级**只有壳一个写入者**；内核从不自装 | 曾双写入者（内核自更新 + 壳），同一个全局 npm 包被两个进程写 |
 | H2 | Node/npm/PATH 的**唯一来源**是 `runtime.json`（壳写） | 曾四处独立推导，nvm/GUI PATH 下 systemd 以 127 失败 |
 | H3 | 内核**位置**的**唯一来源**是 `core.json`（壳写） | `locate_core` 只按 PATH+两个硬编码目录猜，nvm/自定义 prefix 下装了也找不到 |
-| H4 | 启动前，磁盘内核版本**必须等于线上最新**（全 tag 最高）；否则**先对齐再启动**，`guard_start` 不对齐即拒绝 | 「内核只有最新版本」是产品规则；否则会拉起磁盘上的旧内核，后半段逻辑全错 |
+| H4 | 启动前，磁盘内核版本**必须等于按发布通道契约选出的目标版本**（rollback > （名单内）canary > latest；仅 latest 缺失时兜底 versions 最高，**不是「全 tag 最高」**，见 `RELEASE-CHANNEL-CONTRACT.md` §3 / RC-1）；否则**先对齐再启动**，`guard_start` 不对齐即拒绝 | 「内核只有最新版本」是产品规则；否则会拉起磁盘上的旧内核，后半段逻辑全错 |
 | H5 | 服务定义/启停的**唯一所有者**是壳（经平台服务管理器）；内核不自启、不自停、不自重启 | 曾多个启动器（systemd + 壳 spawn + Windows watchdog）并存 |
 | H6 | 就绪判据 = `GET /healthz` 200，端口取自内核 `ports.json` 的 `supervisor-api` **实际值** | 端口可被占用后顺延；盯固定端口会永远等不到已健康的守卫 |
 | H7 | 平台分支**只**允许在 `src-tauri/src/platform/`；其余处经 trait | 门禁 G1 |
@@ -28,10 +28,10 @@
 
 ```
 P0 运行期契约   resolve runtime      ~/.dsh/supervisor/runtime.json（node/npm/nodeBinDir/PATH）   壳写
-P1 版本对齐     align to latest      resolve 线上最新(全 tag 最高) → 与磁盘比较 → 需要则安装    壳写(唯一)
+P1 版本对齐     align to latest      resolve 通道选版（rollback>canary>latest，兜底 versions 最高）→ 与磁盘比较 → 需要则安装    壳写(唯一)
 P2 位置落契约   record location      安装成功后写 core.json（bin/prefix/version/source）        壳写(唯一)
-P3 定位         resolve aligned      读 core.json → 校验 bin 可执行 且 version==线上最新       壳读
-P4 服务定义     ensure_defined       平台模板：绑定 node + PATH + `daemon`                     壳写
+P3 定位         resolve aligned      读 core.json → 校验 bin 可执行 且 version==通道选出版本     壳读
+P4 服务定义     ensure_defined       平台模板：只指向稳定入口 `<壳> --run-guard`（node/守卫每次启动重新检测）  壳写
 P5 启动         start (owner)        服务管理器启动；不可用则 spawn 兜底                         壳发起
 P6 就绪         readiness            healthz 200（端口 = ports.json 的 supervisor-api 实际值）   壳读
 ```
@@ -73,7 +73,7 @@ P6 就绪         readiness            healthz 200（端口 = ports.json 的 sup
   "writtenBy": "dsh-supervisor-gui@<ver>",
   "bin": "<内核可执行绝对路径>",
   "prefix": "<npm 安装前缀>",
-  "version": "<内核版本，== 线上最新>",
+  "version": "<内核版本，== 发布通道选出的目标版本>",
   "source": "<命中的镜像 origin>",
   "installedAt": "<ISO>"
 }
@@ -83,7 +83,7 @@ P3 定位顺序（**先契约，后启发式**）：
 1. `core.json.bin` 存在且可执行且 `--version == core.json.version` → **采用**；
 2. 否则由 `runtime.json` 派生：`nodeBinDir/<exe>`（覆盖 nvm/volta/fnm default prefix）；
 3. 否则现有启发式（PATH / 固定目录 / 平台额外项）；
-4. 仍无 → **不启动**，返回 `KERNEL_NOT_ALIGNED`（含已搜索目录 + 契约中的 bin + 线上最新版本）。
+4. 仍无 → **不启动**，返回 `KERNEL_NOT_ALIGNED`（含已搜索目录 + 契约中的 bin + 通道选出的目标版本）。
 
 ---
 
@@ -94,7 +94,7 @@ P3 定位顺序（**先契约，后启发式**）：
 | `RUNTIME_MISSING` | P0 | Node/npm 未就绪 → 回环境步骤 |
 | `ALIGN_RESOLVE_FAILED` | P1 | 线上版本查询失败（离线/源不可达）→ 停在原地、如实报因 |
 | `INSTALL_FAILED` | P1 | npm 安装失败 → 回传命令/prefix/源/输出 |
-| `KERNEL_NOT_ALIGNED` | P3 | 磁盘无「== 线上最新」的内核 → 必须先 P1 对齐 |
+| `KERNEL_NOT_ALIGNED` | P3 | 磁盘无「== 通道选出版本」的内核 → 必须先 P1 对齐 |
 | `SERVICE_DEFINE_FAILED` | P4 | 平台服务定义写入失败 → 回传平台错误 |
 | `SERVICE_START_FAILED` | P5 | 服务管理器启动失败且 spawn 兜底也失败 |
 | `READY_TIMEOUT` | P6 | healthz 超时 → 回传端口与 kernel 日志路径 |
@@ -105,12 +105,12 @@ P3 定位顺序（**先契约，后启发式**）：
 
 > **2026-09-15 收口**：G1–G6 均已落地（`core.json` 位置契约、locate 先读契约、`guard_start` 对齐门、
 > 端口登记实际值、`install` 不建服务定义、Windows 看护收归壳、proxy 日志经 `stateDir`），
-> 且各有门禁（K-1..K-7 / D-1..D-8）。下表保留为**审计记录**（写的是修复前状态）。
+> 且各有门禁（K-1..K-10 / D-1..D-8）。下表保留为**审计记录**（写的是修复前状态）。
 
 | # | 缺口 | 现状证据 | 规范要求 |
 |---|---|---|---|
 | G1 | **位置未落契约**（H3） | `domain/coreloc.rs` 全仓 0 处引用 `runtime_contract`；Linux `core_extra_candidates` 返回空（`platform/linux.rs:154`） | P2 写 core.json；P3 先读契约 |
-| G2 | **启动未做对齐门**（H4） | `guard_start`→`ensure_guard` 直接 `locate_core`（取**磁盘最高**，非线上最新）；`locate_core` 不查网络 | P1 前置；`guard_start` 未对齐即拒绝 |
+| G2 | **启动未做对齐门**（H4） | `guard_start`→`ensure_guard` 直接 `locate_core`（取**磁盘最高**，非通道选出版本）；`locate_core` 不查网络 | P1 前置；`guard_start` 未对齐即拒绝 |
 | G3 | **Windows 双启动器**（H5） | 壳建 `DSH-Supervisor` 任务，内核 `autostart.js` 另有 watchdog 任务；壳 stop 必须知道内核的任务名（跨仓耦合） | 唯一所有者 = 壳；内核不建/不启服务 |
 | G4 | **就绪端口竞态**（H6） | 壳先读 `ports.json`，缺失回落 config `apiPort`；内核占用顺延后才写 `ports.json` | 就绪只认 `ports.json` 实际值；内核须在其契约中声明 |
 | G5 | **服务定义双写者**（H5） | 壳写三平台定义；内核 `install` 也写 systemd/launchd/schtasks | 定义只由壳写；内核 install 只装 config |
@@ -126,8 +126,8 @@ P3 定位顺序（**先契约，后启发式**）：
 |---|---|
 | K-1 | `core.json` schema/字段/原子写；只有壳写 |
 | K-2 | P3 候选**包含** core.json.bin 与 `nodeBinDir/<exe>`；反向：构造无契约+非标准 prefix → 判为找不到（非空转） |
-| K-3 | `guard_start` 未对齐（磁盘 != 线上最新）时返回 `KERNEL_NOT_ALIGNED`，且**不**调用服务管理器 |
-| K-4 | 四平台 `ServiceControl` 均绑定 node + PATH + `daemon`；反向：旧「只 guard」形态被判违规 |
+| K-3 | `guard_start` 未对齐（磁盘 != 通道选出版本）时返回 `KERNEL_NOT_ALIGNED`，且**不**调用服务管理器 |
+| K-4 | 四平台 `ServiceControl` 服务定义均经统一稳定入口 `<壳> --run-guard` 组装（`service_exec_line`），平台分支经 trait 的 prefix 候选覆写；反向：旧「定义里绑定 node/guard 绝对路径」或「只 guard」形态被判违规 |
 | K-5 | 就绪端口只来自 `ports.json` 的 `supervisor-api`；反向：config 默认端口不得作为唯一判据 |
 | K-6 | 平台分支只在 `platform/`（G1 既有门禁扩展覆盖 core.json 读取） |
 

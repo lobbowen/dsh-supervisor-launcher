@@ -12,7 +12,7 @@
 - **环境引导**：探测系统 Node.js → 缺失/过旧时内嵌引导页一键安装官方最新 LTS（下载 + SHA256 校验 + 一次授权）
 - **守卫拉起**：自动定位已安装内核并启动守护进程，控制面板就绪后直达（端口由内核配置 `apiPort` 决定，动态分配）
 - **生命周期守卫**（内核提供）：进程保活、故障自动重启、崩溃退避、期望状态语义（启动/停止可控）
-- **局域网安全访问**：`0.0.0.0:3088 → 127.0.0.1:3080` 反向代理，DSH 官方生态同款回环呈现，`lanToken` 可选
+- **局域网安全访问**：`0.0.0.0:3088 → 127.0.0.1:3080` 反向代理，DSH 官方生态同款回环呈现，`remoteToken` 可选
 - **运维面板**：实时状态 / 事件时间线 / 配置中心 / 更新日志 / 一键安装 DSH
 - **托盘常驻**：关窗=隐藏；菜单直发 启动/停止/重启
 
@@ -51,15 +51,23 @@ systemd user unit → dsh-supervisor（守卫内核，闭源）→ dsh web (127.
 | 文档 | 性质 | 说明 |
 |---|---|---|
 | [docs/README.md](docs/README.md) | **索引** | 文档角色表 + 产品硬规则 |
+| [DEVELOPMENT-TRACK.md](docs/DEVELOPMENT-TRACK.md) | **规范（SSOT）** | **壳仓改代码规则**：运行时禁区（源码开发绝不触碰系统安装版）|
 | [RELEASE-STANDARD.md](docs/RELEASE-STANDARD.md) | **规范（SSOT）** | 发布/构建流程的唯一事实源 |
+| [ENV-TOOLCHAIN-INSTALL-STANDARD.md](docs/ENV-TOOLCHAIN-INSTALL-STANDARD.md) | **规范（SSOT）** | **环境工具链检测/安装/下载的唯一事实源**（node 与 npm 并行同权；统一安装事件与 UI 规范；禁进度条）|
 | [RELEASE-AND-BUILD-DECISION.md](docs/RELEASE-AND-BUILD-DECISION.md) | 决策依据 | 为什么这样发布/构建 |
 | [DESIGN-COMPLETE.md](docs/DESIGN-COMPLETE.md) | **总纲（权威）** | 完整架构理解与抽取决策 |
 | [DESIGN-SHELL-ARCHITECTURE.md](docs/DESIGN-SHELL-ARCHITECTURE.md) | **规范（权威）** | 壳工程架构：分层 / 平台适配层 / 错误模型 / 契约层 / 门禁 |
 | [DESIGN-BOUNDARY.md](docs/DESIGN-BOUNDARY.md) | **规范（权威）** | 内核↔壳职责边界与抽取审计 |
+| [KERNEL-LAUNCH-STANDARD.md](docs/KERNEL-LAUNCH-STANDARD.md) | **规范（SSOT）** | 内核启动的唯一事实源（跨平台 P0–P6 流水线 / 平台矩阵 / core.json）|
 | [SHELL-UPDATE-CHANNEL-VERIFICATION.md](docs/SHELL-UPDATE-CHANNEL-VERIFICATION.md) | 实测记录 | 壳更新通道验证（含 CDN `@latest` 缓存延迟实测） |
+| [UPDATER-SIGNING-KEY.md](docs/UPDATER-SIGNING-KEY.md) | 运维手册 | minisign 自更新签名密钥的保管/备份/验证/轮换（**不含私钥**）|
+| [DESKTOP-ACCEPTANCE.md](docs/DESKTOP-ACCEPTANCE.md) | 验收清单 | 桌面壳真机验收（引导页 / 服务定义 / 自更新，GUI 场景）|
+| 内核仓 `RELEASE-CHANNEL-CONTRACT.md` | **规范（SSOT，跨仓）** | **发布通道/选版唯一事实源**（canary/beta/rc/latest/rollback）；壳侧实现 `src-tauri/src/release_channel.rs` |
+| 内核仓 `NO-CONSOLE-WINDOW-STANDARD.md` | **规范（SSOT，两仓共遵）** | 壳启动内核全链路不得弹终端；壳侧门禁 `src-tauri/tests/no_console_window_test.rs` |
+| 内核仓 `DSH-TOKEN-CONTRACT.md` | 规范（契约，跨仓） | 令牌分类与铁律；壳不持有 DSH 令牌 |
 
-> **产品硬规则**：壳与内核同一套升级逻辑 —— 有新版本即强制更新；**不得回退、不得跳过、不得按版本拉黑、不得冷却抑制**。
-> **不变量**：壳的跨平台与引导行为由测试保障（`cargo test`，含引导流程回归 B1–B56）；文字文档不构成证据。
+> **产品硬规则**：壳与内核同一套升级逻辑 —— 有新版本即强制更新；**不得跳过、不得按版本拉黑、不得冷却抑制**。紧急回退是发布通道契约内的**显式**通道（运维打 `rollback` dist-tag，见内核 `RELEASE-CHANNEL-CONTRACT.md`），不是「按版本比较自动降级」。
+> **不变量**：壳的跨平台与引导行为由测试保障（`cargo test`，含引导流程回归 B1–B63）；文字文档不构成证据。
 ## 安装
 
 ### 内核（闭源，npm 分发）

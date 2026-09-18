@@ -24,7 +24,9 @@
       if (r.__error) return showUpdRetry('桌面版本检查异常：' + r.__error);
       if (r.ok === false) return showUpdRetry('桌面版本检查失败：' + (r.error || '未知'));
       NS.updPlan = r;
-      if (r.cannotSelfUpdate === true) {
+      // ⚠ 2026-09-18 S2A-9 修：Rust 从不下发 cannotSelfUpdate，真值是 shell_identity 的 selfUpdateCapable；
+      //   不修则 deb/rpm 无提权通道时仍走强更 → 必失败。
+      if (r.cannotSelfUpdate === true || (NS.shellId && NS.shellId.selfUpdateCapable === false)) {
         NS.status('当前安装形态不支持自更新，继续');
         return NS.wait(400).then(NS.stepCorePlan);
       }
@@ -37,17 +39,17 @@
   }
   function stepShellApply() {
     var target = (NS.updPlan && NS.updPlan.latest) || '';
-    NS.status('发现桌面新版本 ' + target + ' · 正在下载…');
-    NS.showProgress(0);
+    // 下载态一律经统一入口（SSOT §3.2/T-6）：本模块不自拼下载样式、不画进度条。
+    //   进度细节由 install_progress 事件接续刷新同一行文字（80-init.js）。
+    NS.install.begin('shell', '发现桌面新版本 ' + target + ' · 正在下载…');
     return NS.withTimeout(NS.core.invoke('shell_update_apply'), NS.SHELL_DOWNLOAD_BUDGET_MS, '下载长时间无进展')
       .then(function (r) {
-        NS.hideProgress();
         r = r || {};
         if (r.__timeout) return showUpdRetry(r.error || '下载超时');
         if (r.__error) return showUpdRetry('桌面版本调用异常：' + r.__error);
         if (r.ok !== true) return showUpdRetry('桌面版本更新失败：' + (r.error || '未知'));
         if (r.upToDate) return NS.stepCorePlan();
-        NS.status('桌面新版本已安装（' + (r.installed || target) + '） · 正在重启…');
+        NS.install.text('shell', '桌面新版本已安装（' + (r.installed || target) + '） · 正在重启…');
         return NS.wait(800).then(function () { return NS.core.invoke('shell_restart'); });
       });
   }

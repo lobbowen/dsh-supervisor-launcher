@@ -79,12 +79,9 @@
   .choice-actions button { border: 1px solid var(--line); background: var(--brand); color: #fff;
     border-radius: 8px; padding: 7px 16px; font-size: 12.5px; cursor: pointer; }
   .choice-actions button.ghost { background: transparent; color: var(--status); }
-  /* 下载进度：此前下载阶段**零反馈**（4MB+ 安装包在慢网下长时间无变化），
-     用户无法区分「正在下载」与「卡死」——真机实测的主要困惑来源之一。 */
-  .progress { width: min(360px, 100%); height: 6px; border-radius: 999px;
-    background: color-mix(in srgb, var(--brand) 14%, transparent); overflow: hidden; }
-  .progress-bar { height: 100%; width: 0%; border-radius: 999px; background: var(--brand);
-    transition: width .25s ease; }
+  /* 2026-09-16（SSOT §3.2）：进度条整体移除 —— 所有下载/安装**一律只显示文字**。
+     原进度条与真实进度常脱节（分段下载、解包阶段没有字节数可算），
+     反而让用户把「进度没动」误读成「卡死」；现在四种 kind 共用 NS.install.* 的文字形态。 */
   @keyframes spin { to { transform: rotate(360deg); } }
 
   /* ── 唯一窗口栏（壳提供：产品 WindowTitlebar 同款视觉）──
@@ -141,7 +138,6 @@
         <span class="step-arrow">›</span>
         <span class="step" id="st-panel"><span class="dot"></span>进入面板</span>
       </div>
-      <div class="progress" id="prog" style="display:none"><div class="progress-bar" id="progBar"></div></div>
       <div class="fail" id="fail" style="display:none">
         <div class="fail-msg" id="failMsg"></div>
         <div class="fail-actions">

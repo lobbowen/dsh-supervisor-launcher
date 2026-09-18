@@ -34,7 +34,7 @@ pub struct InstalledCore {
     pub source: String,
 }
 
-/// 契约文件路径（`~/.dsh/supervisor/core.json`，与内核状态同域）。
+/// 契约文件路径（`<产品状态根>/supervisor/core.json`，与内核状态同域）。
 pub fn path() -> PathBuf {
     crate::env::supervisor_dir().join("core.json")
 }

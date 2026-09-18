@@ -37,6 +37,11 @@ mod platform;
 mod update;
 // 统一更新决策模型（2026-09-15）：壳与内核**同一形状**（问题 1 的机制层统一）。
 mod update_plan;
+// 发布通道选版（2026-09-16）：**契约 §3 冻结算法**的唯一实现。
+//   为什么单独成模块：选版是"版本如何被选择"这件事的全部规则（rollback/canary/latest/
+//   versions 兜底 + §5 灰度名单），与"怎么装/怎么探测镜像"无关；
+//   独立后 §3 的每个分支都能被纯函数单元测试直接覆盖（契约 §6 门禁 RC-G1/RC-G2）。
+mod release_channel;
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -79,7 +84,53 @@ pub(crate) fn log(state: &RunState) -> serde_json::Value {
 
 
 
-pub(crate) fn push_status(app: &tauri::AppHandle, status: String, progress: f32) {
+/// 工具链安装步骤 —— 统一事件 `kind` 的取值来源（SSOT §2.4 枚举的子集）。
+///
+/// 为什么用枚举而不是裸字符串：`start_node_install` 必须把失败**如实归给**出问题的步骤
+///   （node 装不上 / npm 补不上），否则前端会拿错文案前缀，把「缺 npm」显示成
+///   「装 Node 失败」—— 那正是本次要修的根因（node 与 npm 同权，不得混为一谈）。
+#[derive(Clone, Copy)]
+pub(crate) enum InstallKind {
+    Node,
+    Npm,
+}
+
+impl InstallKind {
+    /// 事件 payload 里的 kind 字面量（SSOT §2.4 冻结：node / npm / kernel / shell）。
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            InstallKind::Node => "node",
+            InstallKind::Npm => "npm",
+        }
+    }
+}
+
+/// 安装失败：携带**归属步骤**，供 IPC 边界发 `install_error { kind, error }`（SSOT §2.4 / T-4）。
+/// 只用裸 String 会让调用方丢失「失败在 node 还是 npm」这一事实。
+pub(crate) struct InstallFailure {
+    pub(crate) kind: InstallKind,
+    pub(crate) message: String,
+}
+
+impl InstallFailure {
+    fn node(message: impl Into<String>) -> Self {
+        InstallFailure { kind: InstallKind::Node, message: message.into() }
+    }
+
+    fn npm(message: impl Into<String>) -> Self {
+        InstallFailure { kind: InstallKind::Npm, message: message.into() }
+    }
+}
+
+/// 安装进度事件（SSOT §2.4 统一形态）：`install_progress { kind, status, progress }`。
+///
+/// 为什么 kind 由调用方显式传入：node 与 npm 是同一条工具链管线里的两个必需步骤，
+///   前端据 kind 决定文案前缀；只发一句 status 会让「正在补 npm」与「正在装 node」不可区分。
+///
+/// 2026-09-16：旧 `env_*` 系列事件按 SSOT §2.4 删除（无兼容层）。旧的进度 payload 曾补
+///   `busy:true` 以绕开「前端以 if (p.busy) 为闸 → 进度恒被丢弃」（2026-09-13）——
+///   那是给消费方打的补丁；现契约冻结了事件形态，且前端只依赖 status 文字，故不再携带 busy。
+pub(crate) fn push_status(app: &tauri::AppHandle, kind: InstallKind, status: String, progress: f32) {
     {
         let state = app.state::<Mutex<RunState>>();
         let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
@@ -87,16 +138,25 @@ pub(crate) fn push_status(app: &tauri::AppHandle, status: String, progress: f32)
         s.progress = progress;
         s.logs.push(status.clone());
     }
-    // 2026-09-13：**必须带 busy:true** —— 本函数只在安装过程中被调用
-    //   （push_status 的唯一调用方是 run_install）。原 payload 不含 busy，
-    //   而前端监听器当时以 if (p.busy) 为闸 → 所有进度事件被丢弃（分支恒不可达）。
-    //   现补上 busy 使「安装中」可辨识；前端已改为只要 status 就展示（不再依赖该字段）。
-    let _ = app.emit("env_progress", serde_json::json!({ "status": status, "progress": progress, "busy": true }));
+    let _ = app.emit(
+        "install_progress",
+        serde_json::json!({ "kind": kind.as_str(), "status": status, "progress": progress }),
+    );
 }
 
-fn run_install(app: &tauri::AppHandle) -> Result<(String, String), String> {
-    push_status(app, "获取官方最新 LTS 版本…".into(), 0.1);
-    let choice = node::latest_lts()?;
+// npm 复探与「补齐 npm」的机制在 node.rs（probe_npm_after / reinstall_for_npm）——
+//   main.rs 只保留编排（门禁 G3 要求它「只做组装」；且那两件事与 node 安装同属一条工具链）。
+
+/// 完整工具链安装管线（SSOT §2.2）：**node 与 npm 顺序执行，缺一不可**。
+///
+/// 返回值 `(node_path, version)` 形状保持不变，但语义收紧：npm 补不上时**必须** Err ——
+///   原实现只校验 node 版本，于是「node 在、npm 缺」也被判成功（SSOT §1 根因①），
+///   前端随后用不存在的 npm 去装内核，必然失败。
+/// 失败经 `InstallFailure` 带上归属步骤（node/npm），供 IPC 边界发 `install_error { kind, error }`。
+fn run_install(app: &tauri::AppHandle) -> Result<(String, String), InstallFailure> {
+    push_status(app, InstallKind::Node, "获取官方最新 LTS 版本…".into(), 0.1);
+    // ① 解析并安装/修复 node（现有 latest_lts → download_verified → install 链路不变）。
+    let choice = node::latest_lts().map_err(InstallFailure::node)?;
     let version = choice.version.clone();
     let file = choice.file.clone();
     // 记录镜像选择（含延迟诊断），便于用户与排障
@@ -106,19 +166,35 @@ fn run_install(app: &tauri::AppHandle) -> Result<(String, String), String> {
         ..mirror::load()
     })
     .ok();
-    push_status(app, format!("选用镜像 {}（{}ms）", choice.source, choice.latency_ms), 0.15);
-    push_status(app, format!("官方最新 LTS: {}", version), 0.2);
+    push_status(app, InstallKind::Node, format!("选用镜像 {}（{}ms）", choice.source, choice.latency_ms), 0.15);
+    push_status(app, InstallKind::Node, format!("官方最新 LTS: {}", version), 0.2);
     let dl_dir = env::supervisor_dir().join("dl");
-    push_status(app, format!("下载 {}（约 30~50MB）…", file), 0.3);
-    let local = node::download_verified(&version, &file, &dl_dir, Some(choice.source.as_str()))?;
-    push_status(app, "SHA256 校验通过，准备安装…".into(), 0.8);
-    let node_path = node::install(&local)?;
+    push_status(app, InstallKind::Node, format!("下载 {}（约 30~50MB）…", file), 0.3);
+    let local = node::download_verified(&version, &file, &dl_dir, Some(choice.source.as_str()))
+        .map_err(InstallFailure::node)?;
+    push_status(app, InstallKind::Node, "SHA256 校验通过，准备安装…".into(), 0.8);
+    let node_path = node::install(&local).map_err(InstallFailure::node)?;
     let node_path = node_path.display().to_string();
-    match node::probe_after() {
-        Some((_p, v)) if v == version => Ok((node_path, v)),
-        Some((_p, v)) => Err(format!("安装后版本 {} 与目标 {} 不一致", v, version)),
-        None => Err("安装后未能检测到 Node.js".into()),
+    let installed = match node::probe_after() {
+        Some((_p, v)) if v == version => v,
+        Some((_p, v)) => return Err(InstallFailure::node(format!("安装后版本 {} 与目标 {} 不一致", v, version))),
+        None => return Err(InstallFailure::node("安装后未能检测到 Node.js")),
+    };
+
+    // ② node 安装成功后**必须校验 npm**（T-1/T-3：只认真实探测，绝不伪造）。
+    //   一次探测即覆盖 SSOT §2.3 步骤 1（官方包自带 npm 垫片）与步骤 2
+    //   （仅包内 npm-cli.js 时，probe_npm 以 `node <npm-cli.js>` 形态返回，契约已支持 npmArgs）。
+    push_status(app, InstallKind::Npm, "正在校验 npm…".into(), 0.85);
+    if node::probe_npm_after().is_some() {
+        push_status(app, InstallKind::Npm, format!("npm 已就绪（{}）", version), 1.0);
+        return Ok((node_path, installed));
     }
+    // ③ 两条通道都没有 → 重新执行官方安装（幂等）再复探（SSOT §2.3 步骤 3）。
+    // ④ 仍失败 → 带手动安装指引的 InstallFailure（步骤 4 / T-4，绝不静默）。
+    push_status(app, InstallKind::Npm, "官方分发包未提供 npm，正在重新执行官方安装（幂等）…".into(), 0.9);
+    node::reinstall_for_npm(&local).map_err(InstallFailure::npm)?;
+    push_status(app, InstallKind::Npm, format!("npm 已就绪（{}）", version), 1.0);
+    Ok((node_path, installed))
 }
 
 // 此处原有孤立文档注释「内核可执行名候选（跨平台）…」+ 6 行空行（2026-09-12 清理）：
@@ -375,8 +451,7 @@ fn main() {
                     drop(s);
                     // 2026-09-13（失效模式 c/f）：**删除这个死广播**。
                     //   env_status 全仓**零监听**（bootstrap 只监听 shell:goto-panel /
-                    //   shell:goto-bootstrap / guard_progress / shell_update_progress /
-                    //   env_progress / env_error / env_done）。
+                    //   shell:goto-bootstrap / guard_progress 与统一的 install_* 安装事件）。
                     //   而它携带的 latest 已由 node_status 轮询（单一事实源）提供 ——
                     //   再加监听反而制造第二真源（本仓明确反对）。故按「要么接线、要么删除」
                     //   的纪律选择删除；s.latest 仍保留（node_status 从状态读取）。

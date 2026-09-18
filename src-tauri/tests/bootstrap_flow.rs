@@ -10,7 +10,7 @@
 //!   B2 HTML 步骤条顺序与 JS stepNames 数组一致（两处不同步会导致高亮错位）
 //!   B3 引导从「检测环境」启动，不再从桌面更新启动
 //!   B4 网络步骤（检查/下载）必须有超时兜底与可跳过出口 —— 否则底层挂起即永久卡死
-//!   B5 下载必须有进度反馈（此前回调体为空，用户无法区分「在下载」与「卡死」）
+//!   B5 下载必须有反馈，且统一为 install_progress 文字形态（SSOT §3.2；不再有进度条）
 //!   B6 Rust 侧：check / download 有超时（网络调用必须有界）
 //!   B7 面向用户的文案不得再出现「门 0」这一内部概念
 
@@ -156,18 +156,28 @@ fn b4_network_steps_have_timeout_and_skip() {
 
 #[test]
 fn b5_download_progress_is_wired() {
+    // 2026-09-16（SSOT ENV-TOOLCHAIN-INSTALL-STANDARD §3.2）：下载/安装反馈统一为
+    //   **文字形态**的 install_progress，进度条（progBar/#prog）已按规范删除。
+    //   故 B5 的判据从「有进度条」改为「有统一安装事件的文字反馈」。
     let html = bootstrap_html();
     assert!(
-        html.contains("shell_update_progress"),
-        "B5 FAIL 前端未监听下载进度事件（下载阶段将零反馈）"
+        html.contains("install_progress"),
+        "B5 FAIL 前端未监听统一安装事件（下载阶段将零反馈）"
     );
-    assert!(html.contains("progBar"), "B5 FAIL 缺少进度条元素");
+    assert!(
+        !html.contains("progBar") && !html.contains("id=\"prog\""),
+        "B5 FAIL 进度条元素仍在（SSOT §3.2 要求删除，只留文字）"
+    );
     let m = crate_sources();
     assert!(
-        m.contains("shell_update_progress"),
-        "B5 FAIL Rust 侧未上报下载进度"
+        m.contains("install_progress"),
+        "B5 FAIL Rust 侧未上报统一安装进度"
     );
-    eprintln!("B5 PASS download progress wired");
+    assert!(
+        !m.contains("shell_update_progress"),
+        "B5 FAIL Rust 侧仍在上报旧事件 shell_update_progress（SSOT §2.4）"
+    );
+    eprintln!("B5 PASS install progress wired (text-only)");
 }
 
 #[test]

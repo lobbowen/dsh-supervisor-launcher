@@ -44,7 +44,7 @@ pub struct NodeRuntime {
     pub version: String,
 }
 
-/// 契约文件路径（与内核读取路径一致：~/.dsh/supervisor/runtime.json）。
+/// 契约文件路径（与内核读取路径一致：<产品状态根>/supervisor/runtime.json —— 该路径由 env::supervisor_dir() 解析）。
 pub fn path() -> PathBuf {
     crate::env::supervisor_dir().join("runtime.json")
 }
@@ -118,7 +118,7 @@ pub fn write(rt: &NodeRuntime) {
     let body = serde_json::to_string_pretty(&meta).unwrap_or_default();
     let tmp = p.with_extension("json.tmp");
     if std::fs::write(&tmp, body + "\n").is_ok() {
-        // 契约不含机密（只有路径），且目录 ~/.dsh/supervisor 已是 0700 —— 不再做平台权限分支
+        // 契约不含机密（只有路径），且目录已是 0700 —— 不再做平台权限分支
         // （顶层模块保持平台无关；G1 门禁禁止 platform/ 之外的平台分支）。
         let _ = std::fs::rename(&tmp, &p);
     } else {

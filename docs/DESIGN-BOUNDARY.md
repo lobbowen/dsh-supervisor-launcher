@@ -5,7 +5,7 @@
 > ## 本文件描述的是**改造前状态**，结论已执行
 >
 > 文中的缺陷（§2.3）**绝大部分已修复**，`文件:行号` 是**审计时快照**（行号因重构已移位）。
-> **执行状态与未修项见 `DESIGN-COMPLETE.md` 的「执行状态」节。**
+> **执行状态与未修项见 `DESIGN-COMPLETE.md` 的「§25 诚实说明」（未确认项）与「§20 执行批次」。**
 > 本文件是**决策记录**，不是愿望清单。每条判定都给出判据与证据。
 
 ---
@@ -192,7 +192,7 @@
 | 契约 | 方向 | 内容 |
 |---|---|---|
 | `~/.dsh/shell/identity.json` | 壳 → 内核 | 版本、phase、pid、**exe**（看护定位用）、lastSeenAt |
-| `~/.dsh/shell/update-journal.json` | 内核内部 | 壳更新账本（to/confirmed）；**不含回退/拉黑** |
+| `~/.dsh/shell/update-journal.json` | 内核内部 | 壳更新账本（to/confirmed）；**不含隐式回退/拉黑/冷却字段**（紧急回退走发布通道契约的 `rollback` dist-tag，不经此账本）|
 | `shell-release/version-vectors.json` | 双向（测试）| 版本比较/合法性的共享测试向量（内核侧副本为 `shared/version-vectors.json`）|
 
 ### 4.4 不变量

@@ -140,8 +140,8 @@ ManagedRegistry.heartbeat(5000)                objects.js:289-324
 | `~/.dsh/supervisor/runtime.json` | 文件 | **壳写** / 内核读 | `{nodeVersion,nodePath,installedAt,source}`（`node.rs:378`；`settings-view.js:40` 读）|
 | `~/.dsh/supervisor/registry.json` | 文件 | **壳写** / 内核读 | 镜像源 `{mode,origins,manualOrigin}`（`mirror.rs:191 export_to_kernel`；`supervisor.js:192` 读）|
 | `~/.dsh/shell/identity.json` | 文件 | **壳写** / 内核读 | `{version,platform,arch,installKind,selfUpdateCapable,phase,pid,startedAt,lastSeenAt,exe}`（`update.rs::init_identity` 写；`domains/shell/index.js` 读）|
-| `~/.dsh/shell/update-journal.json` | 文件 | 内核写 / 内核读（面板与 CLI 经 `/shell/status`）| 壳更新账本 `{from,to,confirmed}`；**不含回退/拉黑**（`domains/shell/index.js`）|
-| 守卫服务定义 | 文件 | **壳写** / 服务管理器读 | systemd unit / LaunchAgent plist / schtasks（`service.rs:72-203`）|
+| `~/.dsh/shell/update-journal.json` | 文件 | 内核写 / 内核读（面板与 CLI 经 `/shell/status`）| 壳更新账本 `{from,to,confirmed}`；**不含隐式回退/拉黑/冷却字段**（紧急回退走发布通道契约的 `rollback` dist-tag，不经此账本）（`domains/shell/index.js`）|
+| 守卫服务定义 | 文件 | **壳写** / 服务管理器读 | systemd unit / LaunchAgent plist / schtasks（`platform/service.rs`）|
 | 面板 HTTP API | HTTP | 内核提供 / 壳与浏览器消费 | **71 精确 + 14 前缀**（`api/surface.js`）；信任三层（socket 身份 → Origin 端口 → 可选 access key）|
 | 壳健康上报 | HTTP | 壳 → 内核 | `POST /shell/health`（`phase=ready` 即更新确认信号）|
 | 守卫握手 | HTTP | 壳 → 内核 | `GET /healthz`、`GET /session/status`、`POST /session/stop` |
@@ -489,8 +489,9 @@ bootstrap/
   └── js/
       ├── 00-runtime.js       #   IPC 获取 + withTimeout + **全局 onerror**
       ├── 10-ui.js            #   状态/步骤/失败页/诊断串
-      ├── 20-env.js  30-node.js  40-mirror.js
-      └── 50-shell-update.js  60-kernel.js  70-guard.js
+      ├── 20-env.js            #   环境检测 / 工具链安装
+      ├── 30-mirror.js  40-shell-update.js  50-kernel.js
+      └── 60-guard.js  70-boot.js  80-init.js
 ```
 
 | # | 不变量 |
@@ -611,7 +612,7 @@ bootstrap/
 | `DESIGN-BOUNDARY.md` | 本文件的**抽取审计**部分（判据与逐项判定的展开版）|
 | `DESIGN-SHELL-ARCHITECTURE.md` | 本文件的**壳目标架构**部分（分层/平台层/错误/契约/门禁的展开版）|
 | 内核 `PLATFORM-CAPABILITY-MATRIX.md` | §17 矩阵的内核侧权威版（14 项 × 3 平台）|
-| 内核 `AUDIT-CROSS-PLATFORM.md` | 跨平台审计历史（§五.a 含 2026-09-11 复核更正）|
+| 内核 `PLATFORM-CAPABILITY-MATRIX.md` § 缺口登记 | 跨平台审计历史（原 `AUDIT-CROSS-PLATFORM.md` 已删除，内容并入矩阵文档）|
 | 本文件 `DESIGN-COMPLETE.md` | **总纲**：系统全貌 + 双侧审计 + 抽取决策 + 目标架构 + 一次性执行方案 |
 
 ## 25. 诚实说明

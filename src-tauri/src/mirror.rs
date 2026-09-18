@@ -186,7 +186,7 @@ pub fn save(m: &Mirrors) -> Result<(), String> {
 ///   内核照做即可得到**同一答案**。
 pub const CONTRACT_SCHEMA: u64 = 2;
 
-/// 导出镜像契约给内核（`~/.dsh/supervisor/registry.json`）。
+/// 导出镜像契约给内核（`<产品状态根>/supervisor/registry.json`）。
 ///
 /// ## 为什么由**壳**写（所有权）
 ///

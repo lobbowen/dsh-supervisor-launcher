@@ -16,7 +16,7 @@
 | 四平台构建只在 CI 内发生 | `build` job 的 4 runner 矩阵，各 runner 只构建自己平台 | R-3 |
 | 本地无全平台构建脚本 | 壳仓**本就没有**本地构建/发布脚本（仅 `bump-shell.sh` + `verify-shell-versions.js`）| R-9（新增）|
 | 发布只在 CI 内 | `publish` job（tag 触发）| R-4 |
-| 无本地发布产物入口 | `package.json` 不存在本地 release/publish script | R-9 |
+| 无本地发布产物入口 | 壳仓根目录**不存在 `package.json`**，故不可能有本地 release/publish script | R-9 |
 
 **为什么**：本地构建让「产物从哪来」不可复现、不可审计；统一到 CI 后产物可追溯、四平台同构、发布单一入口。
 

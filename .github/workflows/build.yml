@@ -161,7 +161,11 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           if [ -z "${TAURI_SIGNING_PRIVATE_KEY}" ]; then
-            echo "::warning::TAURI_SIGNING_PRIVATE_KEY 未配置 —— 不生成 .sig，产物不可用于自动更新"
+            if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+              echo "::error::TAURI_SIGNING_PRIVATE_KEY 未配置 —— tag 发布必须签名（Tauri updater 强制验签）"
+              exit 1
+            fi
+            echo "::warning::TAURI_SIGNING_PRIVATE_KEY 未配置 —— 不生成 .sig，产物不可用于自动更新（非 tag 构建不阻断）"
           fi
           npx --yes @tauri-apps/cli@2 build --bundles "${{ matrix.bundles }}"
 
@@ -304,16 +308,29 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -e
+          # dist-tag 规范（与内核 publish-core.sh 及发布通道契约 §2 一致）：
+          #   -BETA.n → beta（测试版，用户须显式 @beta）
+          #   -RC.n   → latest（正式版占 latest，RC 即正式）+ 发布后补 rc 别名
+          #   ⚠ 原实现把 RC 只标 rc、从不更新 latest —— 与内核策略不一致，
+          #     且会让默认安装停留在历史版本（2026-09-16 复检修正）。
+          #   ⚠ npm publish 只接受一个 --tag，故 rc 别名在发布后经 dist-tag add 补。
           VER="${{ needs.version.outputs.ver }}"
           TAG=""
+          RC_ALIAS=0
           case "$VER" in
             *-BETA.*) TAG="--tag beta" ;;
-            *-RC.*)   TAG="--tag rc" ;;
+            *-RC.*)   TAG="--tag latest"; RC_ALIAS=1 ;;
           esac
           for d in dist/npm-shell/@dsh-sup/shell-*; do
             [ -d "$d" ] || continue
-            echo "== 发布 $(node -p "require('./$d/package.json').name") =="
+            PKG_NAME=$(node -p "require('./$d/package.json').name")
+            echo "== 发布 $PKG_NAME =="
             (cd "$d" && npm publish --access public $TAG)
+            # RC（正式版）附加 rc 别名：npm publish 只接受单个 --tag。
+            if [ "$RC_ALIAS" = "1" ]; then
+              echo "== 补打 rc 别名：$PKG_NAME@$VER =="
+              npm dist-tag add "$PKG_NAME@$VER" rc
+            fi
           done
           REL=dist/npm-shell/@dsh-sup/shell-release
           mkdir -p "$REL"

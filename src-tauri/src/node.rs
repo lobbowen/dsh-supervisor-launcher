@@ -271,6 +271,42 @@ mod tests {
     }
 }
 
+/// 安装后复探 npm，成功时把**运行期契约**落盘，返回可用的 npm 事实（SSOT §2.2 步骤 2）。
+///
+/// 为什么返回契约而不是路径：命中「包内 npm-cli.js」时，可用程序是 `node + args` 而非一个
+///   npm 可执行文件 —— 只有契约（`runtime_contract`）能表达这种二元组，消费者必须读它。
+/// 刻意不区分「命中哪条通道」（垫片 / 包内 CLI）：统一事实源就是契约本身。
+pub fn probe_npm_after() -> Option<crate::runtime_contract::NodeRuntime> {
+    let rt = probe_after().and_then(|(node, ver)| crate::runtime_contract::derive(&node, &ver))?;
+    crate::runtime_contract::write(&rt);
+    Some(rt)
+}
+
+/// npm 仍缺失时的**可操作**文案（SSOT §2.3 步骤 4 / T-4：绝不静默，必须给手动安装指引）。
+/// 经平台层取 npm 可执行名（G1：平台差异只在 platform 层）。
+pub fn npm_manual_hint(version: &str) -> String {
+    format!(
+        "Node.js {} 已安装，但配套的 npm（{}）仍不可用。请手动安装 Node 官方分发包（自带 npm）后重试：\
+         https://nodejs.org/dist/{}/ ；若本机 Node 为裁剪分发/解包不完整，请删除其安装目录后重新运行本安装。",
+        version,
+        crate::platform::current().npm_exe_name(),
+        version
+    )
+}
+
+/// 重新执行官方安装以补齐 npm（SSOT §2.3 步骤 3，幂等）。
+///
+/// 复用**已下载且 SHA256 校验通过**的同一产物，不重新下载：网络下载已在管线前段完成，
+///   再下一遍只会把「补 npm」拖成一次完整重装，并让用户多等一个 30~50MB 的下载。
+/// 失败一律归 npm 步骤（调用方据此发 `install_error { kind: "npm" }`），不报成 node 失败。
+pub fn reinstall_for_npm(local: &Path) -> Result<crate::runtime_contract::NodeRuntime, String> {
+    install(local)?;
+    probe_npm_after().ok_or_else(|| {
+        let v = probe_after().map(|(_, v)| v).unwrap_or_default();
+        npm_manual_hint(&v)
+    })
+}
+
 /// 安装后复探（PATH 优先，其次已知落点）。
 pub fn probe_after() -> Option<(PathBuf, String)> {
     if let Some((p, v)) = crate::env::probe_system_node() { return Some((p, v)); }

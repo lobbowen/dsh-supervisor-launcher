@@ -27,12 +27,41 @@
   function hideFail() { NS.$('fail').style.display = 'none'; }
 
 
-  function showProgress(pct) {
-    NS.$('prog').style.display = '';
-    NS.$('progBar').style.width = ((pct == null ? 0 : pct) > 100 ? 100 : (pct || 0)) + '%';
+  // ── 安装/下载的统一文字出口（SSOT §3.2，唯一实现）──
+  // 为什么集中在这里：历史上 node / npm / 内核 / 桌面壳各画各的（进度条与纯文字并存），
+  //   同一件事在不同阶段长得不一样；而且进度条常与真实进度脱节，反而让人误判「卡死」。
+  //   现在一律只改 status 单行文字与步骤条高亮，**不触碰任何进度条元素**（门禁 G-3/T-7）。
+  var INSTALL_TARGET = { node: 'Node.js', npm: 'npm', kernel: '内核', shell: '桌面版本' };
+  // kind 是枚举（SSOT §2.4）：它只决定文案目标与步骤条落点，**不改变任何样式**。
+  var INSTALL_STEP = { node: 0, npm: 0, shell: 1, kernel: 2 };
+  var INSTALL_FAIL_PREFIX = {
+    node: '运行环境安装失败：', npm: '运行环境安装失败：',
+    kernel: '内核安装失败：', shell: '桌面版本更新失败：'
+  };
+
+  function installTarget(kind) { return INSTALL_TARGET[kind] || '组件'; }
+
+  function installBegin(kind, text) {
+    var at = INSTALL_STEP[kind];
+    // 只前进、不回退：守卫对齐等场景会在更靠后的阶段调用，回退步骤条会误导进度。
+    if (at != null && at > NS.cur) setStep(at);
+    status(text || ('正在下载 ' + installTarget(kind) + ' …'));
   }
 
-  function hideProgress() { NS.$('prog').style.display = 'none'; NS.$('progBar').style.width = '0%'; }
+  function installText(kind, text) { if (text) status(text); }
+
+  function installDone(kind, text) {
+    var v = text ? String(text) : '';
+    // 后端各阶段回传的版本号形态不一（Node 自带 v，内核/桌面壳不带）；统一补 v，
+    //   保证不同阶段的完成文案完全同形：<目标> <版本> 已就绪（SSOT §3.2）。
+    if (/^\d/.test(v)) v = 'v' + v;
+    status(installTarget(kind) + (v ? ' ' + v : '') + ' 已就绪');
+  }
+
+  function installFail(kind, text) {
+    // 失败必须走既有 fail 面板（含镜像自助出口的自动展开），安装层不另开样式、不吞错。
+    fail((INSTALL_FAIL_PREFIX[kind] || '安装失败：') + (text || '未知'));
+  }
 
 
   function withTimeout(promise, ms, onTimeoutMsg) {
@@ -119,8 +148,7 @@
   NS.status = status;
   NS.wait = wait;
   NS.hideFail = hideFail;
-  NS.showProgress = showProgress;
-  NS.hideProgress = hideProgress;
+  NS.install = { begin: installBegin, text: installText, done: installDone, fail: installFail };
   NS.withTimeout = withTimeout;
   NS.phase = phase;
   NS.errText = errText;

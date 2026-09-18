@@ -27,9 +27,9 @@
 //!   M-a  warmup_async 把选中 npm 源**落盘**（含延迟）
 //!   M-b  export 的延迟来自**随选择落盘**的同源延迟，而非调用方传入的别源延迟
 //!   M-c  node.rs 不再把 Node 侧延迟传给 npm 语义的 selected 导出
-//!   E-a  env_progress 监听器不再以 busy 为闸（只要 status 就展示）
-//!   E-b  progress 为数字时驱动进度条
-//!   E-c  push_status 的 payload 带 busy（使「安装中」可辨识）
+//!   E-a  install_progress 监听器不再以 busy 为闸，且经统一入口展示**文字**（SSOT §2.4/§3.3）
+//!   E-b  不再使用进度条（SSOT §3.2：只留文字，删除 showProgress/progBar）
+//!   E-c  push_status 发统一 install_progress {kind,status,progress}（不再带 busy 补丁）
 //!   E-d  反向：判据能识别「以 busy 为闸」的旧形态（门禁非空转）
 
 use std::fs;
@@ -122,34 +122,38 @@ fn m_c_node_export_does_not_pass_node_latency_for_npm() {
 }
 
 #[test]
-fn e_a_env_progress_listener_not_gated_on_busy() {
-    let raw = read("bootstrap/js/80-init.js");
-    let code = strip_comments(&raw);
-    // 定位 env_progress 监听块
-    let i = code.find("listen('env_progress'").expect("E-a FAIL 未找到 env_progress 监听");
-    let block = &code[i..(i + 900).min(code.len())];
+fn e_a_install_listener_reports_status_text() {
+    // 2026-09-16（SSOT §2.4/§3.3）：事件名统一为 install_progress，且前端只消费 **status 文字**。
+    //   原断言锁定的是旧形态（env_progress + busy 闸 + 进度条），已被规范废除 ——
+    //   若继续断言旧形态，门禁会把「正确的重构」判为失败（正是本次改造中的情形）。
+    let code = strip_comments(&read("bootstrap/js/80-init.js"));
+    let i = code.find("listen('install_progress'").expect("E-a FAIL 未找到 install_progress 监听");
+    let block = &code[i..(i + 600).min(code.len())];
     assert!(
         !block.contains("if (p.busy)"),
         "E-a FAIL 监听器仍以 busy 为闸（该条件恒为假 → 安装全程零反馈）"
     );
+    // 文字必达：只要事件到达就更新文案（经统一入口，不再自行拼装）
     assert!(
-        block.contains("if (p.status)"),
-        "E-a FAIL 未改为「只要 status 就展示」"
+        block.contains("NS.install.text"),
+        "E-a FAIL 未经统一入口展示安装文字（SSOT T-6）"
     );
     assert!(
-        block.contains("p.progress"),
-        "E-b FAIL 未消费 progress（进度条不动）"
+        !code.contains("showProgress") && !code.contains("progBar"),
+        "E-b FAIL 仍在使用进度条（SSOT §3.2 要求删除，只留文字）"
     );
 }
 
 #[test]
-fn e_c_push_status_payload_carries_busy() {
+fn e_c_push_status_emits_unified_install_progress() {
+    // 2026-09-16（SSOT §2.4）：push_status 发统一 install_progress {kind,status,progress}；
+    //   旧 payload 里的 busy 补丁随契约冻结一并移除（前端已不依赖它）。
     let code = strip_comments(&read("src/main.rs"));
-    let i = code.find("env_progress").expect("E-c FAIL 未找到 env_progress 发射点");
-    let block = &code[i..(i + 300).min(code.len())];
+    let i = code.find("install_progress").expect("E-c FAIL 未找到 install_progress 发射点");
+    let block = &code[i..(i + 400).min(code.len())];
     assert!(
-        block.contains("\"busy\": true"),
-        "E-c FAIL push_status 的 payload 未带 busy（安装中不可辨识）"
+        block.contains("\"kind\"") && block.contains("\"status\""),
+        "E-c FAIL install_progress 未带 kind/status（前端无法区分 node 与 npm 步骤）"
     );
 }
 
