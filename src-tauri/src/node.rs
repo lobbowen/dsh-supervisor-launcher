@@ -310,6 +310,40 @@ pub fn reinstall_for_npm(local: &Path) -> Result<crate::runtime_contract::NodeRu
     Ok(rt)
 }
 
+/// npm 在给定 node 目录下是否**真实可用**（文件存在 != 可用，不变量 T-1b）。
+pub fn npm_usable_at(node_bin: &Path) -> bool {
+    node_bin
+        .parent()
+        .and_then(|b| crate::runtime_contract::probe_npm_usable(node_bin, b))
+        .is_some()
+}
+
+/// 安装收尾（SSOT §2.2 步骤 2/3）：校验 node（版本 + 最低门槛）→ 校验 npm →
+/// 不可用则重装补 npm（幂等）。返回 (node_path, version)；
+/// 失败以 bool 区分归属（true=npm / false=node），供调用方发对应 install_error。
+///
+/// 为什么这段必须在 node.rs 而不是 main.rs：G3 门禁要求 main.rs 只做组装
+///   （≤550 行）；工具链校验属于技术实现，不属于装配。
+pub fn finalize_install(
+    node_bin: &Path,
+    target: &str,
+    local: &Path,
+) -> Result<(String, String), (bool, String)> {
+    let v = crate::env::node_version(node_bin)
+        .ok_or_else(|| (false, "安装后未能检测到 Node.js".to_string()))?;
+    if v != target {
+        return Err((false, format!("安装后版本 {} 与目标 {} 不一致", v, target)));
+    }
+    if !meets_minimum(Some(&v)) {
+        return Err((false, format!("安装到的 Node.js {} 低于最低要求 {}", v, MIN_NODE)));
+    }
+    if !npm_usable_at(node_bin) {
+        crate::update::log("官方分发包未提供可用 npm，正在重新执行官方安装（幂等）…");
+        reinstall_for_npm(local).map_err(|e| (true, e))?;
+    }
+    Ok((node_bin.display().to_string(), v))
+}
+
 /// 安装后复探（PATH 优先，其次已知落点）。
 pub fn probe_after() -> Option<(PathBuf, String)> {
     if let Some((p, v)) = crate::env::probe_system_node() { return Some((p, v)); }

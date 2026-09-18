@@ -85,10 +85,19 @@ fn g1_node_status_exposes_real_npm_probe() {
 fn g2_run_install_validates_npm_inside_body() {
     let main = read("src/main.rs");
     let body = fn_body(&main, "fn run_install");
-    let has_npm = body.contains("probe_npm") || body.contains("npmOk") || body.contains("npm_exe_name");
+    // 2026-09-18：校验逻辑下沉 node.rs::finalize_install（G3 要求 main.rs 只做组装）。
+    //   判据随之接受「run_install 委派给 finalize_install，且该函数体真的校验 npm」。
+    let node_src = read("src/node.rs");
+    let final_body = fn_body(&node_src, "fn finalize_install");
+    let delegated_ok = body.contains("finalize_install")
+        && (final_body.contains("npm_usable_at") || final_body.contains("probe_npm"));
+    let has_npm = body.contains("probe_npm")
+        || body.contains("npmOk")
+        || body.contains("npm_exe_name")
+        || delegated_ok;
     assert!(
         has_npm,
-        "run_install 函数体内未出现任何 npm 校验（probe_npm/npmOk/npm_exe_name）—— \
+        "run_install 未校验 npm（本地或经 node::finalize_install 委派）—— \
          装完 node 即报成功，npm 缺失会被误判为环境就绪"
     );
 }
