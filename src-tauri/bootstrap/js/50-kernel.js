@@ -10,11 +10,11 @@
       if (p && p.__error) { NS.fail('内核版本检查异常：' + p.__error); return null; }
       NS.lastPlan = p || {};
       if (!p.installed) {
-        NS.status('未安装内核 · 正在安装标准产品包…' + (NS.mirrorText() ? '（源 ' + NS.mirrorText() + '）' : ''));
+        NS.install.begin('kernel', '未安装内核 · 正在安装标准产品包…' + (NS.mirrorText() ? '（源 ' + NS.mirrorText() + '）' : ''));
         return NS.coreApply(null);
       }
       if (p.action === 'upgrade' && p.latest) {
-        NS.status('发现新内核 v' + p.latest + '（当前 v' + p.installed + '）· 正在强制更新…');
+        NS.install.begin('kernel', '发现新内核 v' + p.latest + '（当前 v' + p.installed + '）· 正在强制更新…');
         return NS.coreApply(p.latest);
       }
       // 2026-09-13 修复（失效模式 f）：**远端版本查询失败时必须如实告知**。
@@ -59,7 +59,8 @@
 
   function stepCoreDone() {
     NS.setStep(2);
-    NS.status('内核 v' + (NS.coreVersion || '') + ' 已就绪');
+    // 完成文案由安装层统一生成（内核 vX 已就绪），与 install_done 事件同形。
+    NS.install.done('kernel', NS.coreVersion);
     return NS.wait(300).then(NS.stepGuardStart);
   }
 

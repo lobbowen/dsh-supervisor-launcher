@@ -60,51 +60,23 @@
       if (p.status) NS.status(p.status);
     });
   }
+  // 安装/下载事件（SSOT §2.4 / §3.3）：node / npm / kernel / shell 在**三平台同一形态**，
+  //   且本文件是**唯一**消费入口。为什么必须收敛到这里：过去环境与桌面壳各有一套旧进度事件，
+  //   各自拼文案、各自决定是否画条，导致同一件「下载安装」在不同阶段面貌不一、进度条还会与真实进度脱节。
+  //   现在一律转交 NS.install.*，本处不拼任何下载/安装文案，也不触碰进度条。
+  //   旧事件名已按规范删除，无兼容层（门禁 G-4）。
   if (NS.evt) {
-    NS.evt.listen('shell_update_progress', function (e) {
+    NS.evt.listen('install_progress', function (e) {
       var p = e.payload || {};
-      if (p.installing) { NS.status('下载完成 · 正在安装…'); NS.showProgress(100); return; }
-      var total = p.total || 0;
-      var got = p.downloaded || 0;
-      if (total > 0) {
-        var pct = Math.floor((got / total) * 100);
-        NS.showProgress(pct);
-        NS.status('正在下载桌面版本 ' + pct + '%（' + Math.round(got / 1048576 * 10) / 10 + ' / ' + Math.round(total / 1048576 * 10) / 10 + ' MB）…');
-      } else {
-        NS.showProgress(null);
-        NS.status('正在下载桌面版本（' + Math.round(got / 1048576 * 10) / 10 + ' MB）…');
-      }
+      NS.install.text(p.kind, p.status);
     });
-  }
-  if (NS.evt) {
-    NS.evt.listen('env_progress', function (e) {
+    NS.evt.listen('install_done', function (e) {
       var p = e.payload || {};
-      // 2026-09-13 修复（失效模式 e：闸门恒不可达）：
-      //   原条件 if (p.busy) **永远为假**：唯一带 busy 的 emit 是 commands/mod.rs:185
-      //   的 crate::log(&s)，而那里在前一行（:165）刚把 busy 置回 false；
-      //   安装过程的进度事件来自 main.rs:82 的 push_status，其 payload **根本不含 busy**。
-      //   后果：装 Node（30~90MB、慢网数分钟）期间引导页停在 afterEnv 的静态文案，
-      //     Rust 侧 0.1/0.2/0.3/0.8 进度与「选用镜像…/官方最新 LTS…」状态**全被丢弃**
-      //     —— 恰是本仓反复强调的「静默等待与卡死无法区分」。
-      //   修法：只要有 status 就展示；progress 为数字时驱动进度条。
-      if (p.status) { NS.setStep(0); NS.status(p.status); }
-      if (typeof p.progress === 'number' && NS.showProgress) {
-        try { NS.showProgress(p.progress >= 1 ? null : Math.round(p.progress * 100)); } catch (err) {}
-      }
+      NS.install.done(p.kind, p.version);
     });
-    NS.evt.listen('env_error', function (e) {
+    NS.evt.listen('install_error', function (e) {
       var p = (e && e.payload) || {};
-      NS.fail('运行环境安装失败：' + (p.error || '未知'));
-    });
-    // 2026-09-13：补上 env_done 的监听（失效模式 c：声明了但零消费）。
-    //   该事件由 commands/mod.rs 在 Node 安装**成功后**发射（带 {version}），
-    //   此前全仓无任何接收方，是纯粹的无效广播 —— 而 Rust 侧注释称其为
-    //   「安装完成」的信号。现消费它：给出明确的完成文案（进度条收尾），
-    //   让「装完了」与「还在装」在引导页上可区分。
-    NS.evt.listen('env_done', function (e) {
-      var p = (e && e.payload) || {};
-      if (NS.showProgress) { try { NS.showProgress(null); } catch (err) {} }
-      NS.status('运行环境已就绪' + (p.version ? '（Node.js ' + p.version + '）' : '') + ' · 正在启动管家…');
+      NS.install.fail(p.kind, p.error || '未知');
     });
   }
   NS.boot();

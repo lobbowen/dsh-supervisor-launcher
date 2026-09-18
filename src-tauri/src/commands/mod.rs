@@ -182,16 +182,23 @@ pub fn start_node_install(state: tauri::State<Mutex<RunState>>, app: tauri::AppH
                 // 探测缓存必须失效：新装的 Node 只有重新探测才会被发现
                 // （否则引导页会在「已装好」之后仍报未检测到）。
                 crate::nodeprobe::invalidate();
-                let _ = handle.emit("env_done", serde_json::json!({ "version": version }));
+                // 成功事件的 kind 固定为 npm：管线**只在 npm 校验通过后**才返回 Ok，
+                //   故走完的最后一步必是 npm（node 装好但 npm 缺时是 Err，绝不报 done）。
+                let _ = handle.emit(
+                    "install_done",
+                    serde_json::json!({ "kind": crate::InstallKind::Npm.as_str(), "version": version }),
+                );
             }
-            Err(e) => {
-                s.error = Some(e.clone());
+            Err(f) => {
+                s.error = Some(f.message.clone());
                 s.status = "环境就绪前置失败".into();
-                s.logs.push(format!("失败: {}", e));
-                let _ = handle.emit("env_error", serde_json::json!({ "error": e }));
+                s.logs.push(format!("失败({}): {}", f.kind.as_str(), f.message));
+                let _ = handle.emit(
+                    "install_error",
+                    serde_json::json!({ "kind": f.kind.as_str(), "error": f.message }),
+                );
             }
         }
-        let _ = handle.emit("env_progress", crate::log(&s));
     });
     drop(st);
     Ok(())
@@ -244,21 +251,29 @@ pub async fn core_plan(app: tauri::AppHandle) -> ShellResult<serde_json::Value> 
     .flatten();
     // ② 远端最高版本（网络，同样经线程池）
     let pkg = crate::core::package_name()?;
-    let latest = tauri::async_runtime::spawn_blocking(move || crate::core::latest_version(&pkg))
+    // 用 latest_pick（**带选版依据 via**）：build_plan 需要它判断"这是不是回退指令"
+    //   —— 回退目标低于当前版本，纯版本比较会误判为"无需动手"（契约 RC-2 端到端）。
+    let latest = tauri::async_runtime::spawn_blocking(move || crate::core::latest_pick(&pkg))
         .await.map_err(|e| ShellError::ipc(e.to_string()))?;
     Ok(crate::core::build_plan(installed, latest))
 }
 
-/// 安装/升级内核到**最新版**（强制更新，只升不降，无回退）。
+/// 安装/升级内核到**选出的目标版本**（强制更新；回退只能由 rollback tag 显式触发）。
+///   - 目标版本来自 `core::latest_version`（发布通道契约 §3：rollback > canary > latest > versions 兜底）；
 ///   - 显式 `--prefix`（从现有内核路径反推）确保装回同一前缀（跨平台布局差异见 core.rs）；
-///   - 逐个镜像回退（源回退，与版本回退无关）；
+///   - 逐个镜像回退（**源**回退，与**版本**回退是两件事）；
 ///   - 如实回传成败（含退出码/stderr），绝不吞错。
+///
+/// ⚠ 已知缺口（回退的端到端）：本命令**会照装选出的目标版本**（不做版本比较），
+///   所以"回退"在**被调用时**是生效的；但调用它的前置判据在 `core::build_plan`
+///   ——那里只按 `目标 > 已装` 判 upgrade，回退目标低于当前时会被判成 `none`，
+///   前端因而不会来调本命令。收口点与理由见 `core::build_plan` 的文档。
 #[tauri::command]
 pub async fn core_apply(app: tauri::AppHandle) -> ShellResult<serde_json::Value> {
     core_apply_inner(app).await
 }
 
-/// `core_apply` 的实现体（安装/升级到最新版，强制更新，只升不降）。
+/// `core_apply` 的实现体（安装/升级到**选出的目标版本**；见上方缺口说明）。
 /// 抽成独立函数：启动门 2（`core_apply`）与面板请求（`kernel_update_apply`）**共用同一实现** ——
 /// 内核包只能经这一处写入，符合「单写入者」契约（docs/DESIGN-SHELL-ARCHITECTURE.md §3.2c）。
 async fn core_apply_inner(app: tauri::AppHandle) -> ShellResult<serde_json::Value> {
@@ -267,7 +282,9 @@ async fn core_apply_inner(app: tauri::AppHandle) -> ShellResult<serde_json::Valu
     let pkg = crate::core::package_name()?;
     let prefix = crate::domain::coreloc::locate_core(&app).and_then(|b| crate::core::global_prefix_for(&b));
     let origins = crate::core::registry_origins();
-    // 强制更新：唯一目标是「当前最新」——不接受调用方指定版本，内核不存在回退路径。
+    // 目标版本由选版算法决定（契约 §3：rollback / canary / latest / versions 兜底）——
+    //   本命令**不做版本比较、不接受调用方指定版本**：目标高于本机就是升级，低于本机就是回退，
+    //   同一个写入路径，避免"升级与回退两套逻辑"再次分叉。
     let target = {
         let p = pkg.clone();
         let r = tauri::async_runtime::spawn_blocking(move || crate::core::latest_version(&p))
@@ -684,16 +701,32 @@ pub async fn shell_update_apply(app: tauri::AppHandle) -> ShellResult<serde_json
 
     crate::update::log(&format!("桌面更新开始下载 {}", target));
 
-    // 用进度事件驱动前端进度条；on_chunk 给的是本块大小（增量），此处自行累加。
+    // on_chunk 给的是本块大小（增量）与**可选**总量，此处自行累加。
     let mut got: u64 = 0;
     let dl = tokio::time::timeout(
         SHELL_DOWNLOAD_TIMEOUT,
         u.download(
             |chunk, total| {
                 got += chunk as u64;
+                // 统一安装事件（SSOT §2.4）：壳更新与 node/npm/内核同一形态，kind="shell"。
+                //   进度只以**文字**表达（MB），不再下发 downloaded/total —— 前端已按规范删除进度条，
+                //   再传字节数只会诱导消费方重新画条。
+                // total 为 Option：服务端未给 Content-Length 时只报已下载量（文字仍然可用）。
+                let text = match total.filter(|t| *t > 0) {
+                    Some(t) => format!(
+                        "正在下载桌面版本 {:.1} / {:.1} MB…",
+                        got as f64 / 1048576.0,
+                        t as f64 / 1048576.0
+                    ),
+                    None => format!("正在下载桌面版本 {:.1} MB…", got as f64 / 1048576.0),
+                };
+                let pct = total
+                    .filter(|t| *t > 0)
+                    .map(|t| (got as f32 / t as f32).min(1.0))
+                    .unwrap_or(0.0);
                 let _ = app.emit(
-                    "shell_update_progress",
-                    serde_json::json!({ "downloaded": got, "total": total }),
+                    "install_progress",
+                    serde_json::json!({ "kind": "shell", "status": text, "progress": pct }),
                 );
             },
             || {},
@@ -715,9 +748,14 @@ pub async fn shell_update_apply(app: tauri::AppHandle) -> ShellResult<serde_json
     };
 
     let total = bytes.len() as u64;
+    // 下载完成 → 安装态：仍是统一 install_progress（文字），不再带 installing/downloaded 旧字段。
     let _ = app.emit(
-        "shell_update_progress",
-        serde_json::json!({ "downloaded": total, "total": total, "installing": true }),
+        "install_progress",
+        serde_json::json!({
+            "kind": "shell",
+            "status": format!("下载完成（{:.1} MB）· 正在安装…", total as f64 / 1048576.0),
+            "progress": 1.0,
+        }),
     );
     crate::update::log(&format!("桌面更新下载完成（{} 字节），开始安装 {}", total, target));
 

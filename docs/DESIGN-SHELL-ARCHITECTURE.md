@@ -5,7 +5,7 @@
 > ## 本文件是**规范**（主张「应该长什么样」），§一 的现状诊断描述**改造前状态**
 >
 > §一 的实测数字与行号是**审计时快照**；其中的平台分支、分层、错误模型、前端模块拆分四条**已落地**
-> （前端已拆为 `bootstrap/js/00..80` 九个模块；见 `DESIGN-COMPLETE.md` 的「执行状态」）。
+> （前端已拆为 `bootstrap/js/00..80` **九个**模块；见 `DESIGN-COMPLETE.md` 的「§25 诚实说明」）。
 > 本文件是**规范**（normative）。每条不变量都对应一条**会失败的测试**。
 
 ---
@@ -258,12 +258,13 @@ bootstrap/
   └── js/
       ├── 00-runtime.js       #   IPC 获取 + withTimeout + 全局 onerror
       ├── 10-ui.js            #   状态/步骤/失败页
-      ├── 20-env.js           #   环境检测步骤
-      ├── 30-node.js          #   运行环境步骤
-      ├── 40-mirror.js        #   镜像设置
-      ├── 50-shell-update.js  #   桌面版本
-      ├── 60-kernel.js        #   内核版本
-      └── 70-guard.js         #   守卫就绪 + 面板
+      ├── 20-env.js           #   环境检测 / 工具链安装步骤（node 与 npm 并行同权）
+      ├── 30-mirror.js        #   镜像设置
+      ├── 40-shell-update.js  #   桌面版本
+      ├── 50-kernel.js        #   内核版本
+      ├── 60-guard.js         #   守卫就绪
+      ├── 70-boot.js          #   引导编排
+      └── 80-init.js          #   入口初始化 + 面板
 ```
 
 | 不变量 | 内容 |
@@ -323,7 +324,7 @@ fn g1_platform_branches_only_in_platform_layer() {
 | 已有 | 状态 |
 |---|---|
 | `bounded.rs`（有界执行）| **保留并强化** —— 它是本仓最好的基础设施，应成为 `infra::bounded` |
-| `bootstrap_flow.rs` B1–B55 | **全部保留** —— 门禁体系的基础 |
+| `bootstrap_flow.rs`（引导流程回归，现至 B63）| **全部保留** —— 门禁体系的基础 |
 | `service.rs` 的 per-OS 实现 | **作为 `platform/` 的模板** —— 它本来就是正确模式 |
 | `nodeprobe.rs` 的「规则一/规则二」（每步上报 + 硬死线）| **提升为全仓不变量** |
 | 主帧 IPC 不变量（B54）| **保留** —— 已由真实事故确立 |

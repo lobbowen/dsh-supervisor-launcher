@@ -2,6 +2,8 @@
 
 > 本清单属**壳仓**（原误置于内核仓，2026-09-16 移交）。
 > 前置：Linux 可本机验证；macOS / Windows 需对应平台构建（见 §5）。
+>
+> ⚠ 本节命令仅供**本机验收构建**；**发布产物一律经 GitHub CI 产出**（`RELEASE-STANDARD.md` §0/§1，本地不得产生发布产物）。
 
 ## 1. 构建产物
 ```bash
@@ -15,8 +17,8 @@ npx @tauri-apps/cli@2 build
 ## 2. 场景 A：全新环境（无 Node.js）
 1. 安装产物（Linux：`sudo dpkg -i dist/*.deb`，随后 `dsh-supervisor-gui` 启动壳）；
 2. 预期：壳窗口出现**引导页**「检测到缺少 Node.js · 官方最新 LTS <v>」+「一键安装 Node.js LTS」按钮（无 Node 也能跑，证明不携带运行时）；
-3. 点「一键安装」→ 弹出一次系统授权（pkexec/msiexec/installer）→ 进度条/日志 → Node 装好；
-4. 预期：自动拉起守卫 → 窗口切到面板 `127.0.0.1:3100`；任意终端 `node --version` 为最新 LTS；
+3. 点「一键安装」→ 弹出一次系统授权（pkexec/msiexec/installer）→ 文字状态（统一安装事件，见 `ENV-TOOLCHAIN-INSTALL-STANDARD.md`；**禁进度条**）→ Node 装好；
+4. 预期：自动拉起守卫 → 窗口切到面板（URL 由 `config.json` 的 `apiPort` 决定，默认 `127.0.0.1:36360`，被占自动顺延）；任意终端 `node --version` 为最新 LTS；
 5. 面板「设置 → 环境与自更新」卡：Node（系统+运行时）、npm、DSH 状态、内核更新（桌面壳执行；未配置包名 → 明确提示）。
 
 ## 3. 场景 B：已有旧版 Node
@@ -35,7 +37,7 @@ npx @tauri-apps/cli@2 build
 ## 5. 构建矩阵
 | 平台 | 命令（对应平台执行） | 产物 |
 |---|---|---|
-| Linux | `npx @tauri-apps/cli@2 build` | deb + AppImage |
+| Linux | `npx @tauri-apps/cli@2 build` | deb + rpm（**AppImage 已废弃**，见 `RELEASE-STANDARD.md`）|
 | macOS | 同上 | dmg |
 | Windows | 同上 | msi |
 
@@ -45,4 +47,4 @@ Node 安装矩阵（壳内实现）：Windows `msiexec /qn`（UAC）/ macOS `ins
 - ✅（已实现）Node 已装但低于最新 LTS：引导页显示「升级到官方最新 LTS」+「跳过并使用现有版本」；
 - 内核更新由桌面壳执行（守卫不自更新）：面板「更新」经壳 `kernel_update_apply` 装内核并由所有者重启守卫；
 - GUI 真机手动项（引导页交互/托盘/关窗隐藏）需桌面环境逐个核对；
-- AppImage 打包需可达 GitHub 下载 extern 工具（本环境超时；deb 已产出）。
+- ~~AppImage 打包需可达 GitHub 下载 extern 工具~~：**AppImage 已废弃**，改为标准 `deb` / `rpm`（`RELEASE-STANDARD.md`）。

@@ -1,3 +1,22 @@
+//! 环境探测：Node 定位 / 版本 / 产品状态根。
+//!
+//! == 为什么本文件里的子进程必须先经 `bounded::prepare`（2026-09-16） ==
+//!
+//! 壳在 release 下是 **GUI 子系统**（见 main.rs 顶部 `windows_subsystem = "windows"`），
+//!   自身不创建控制台；但 Windows 上子进程**默认会新建/继承控制台** ——
+//!   一个 GUI 进程去拉起控制台程序（node.exe 等）时，若不带 `CREATE_NO_WINDOW`，
+//!   系统就会为它弹出一个黑色控制台窗口。
+//! 本文件的 `node_version()` 每探测一个 Node 候选就执行一次，于是表现为
+//!   「引导期反复闪黑框」（NO-CONSOLE-WINDOW-STANDARD §1 记录的 S-W2 缺口）。
+//!
+//! `bounded::prepare` 是 `CREATE_NO_WINDOW` 的**唯一封装点**：平台分支只允许出现在
+//!   `bounded.rs` 与 `platform/`（门禁 G1），所以这里**只能调用它**，
+//!   不得在本文件写 `#[cfg(windows)]` + `creation_flags`。
+//! 为什么复用 prepare 而不改成 `bounded::run`：run 是「阻塞式收集输出 + 超时」，
+//!   而本函数必须保留「spawn 后轮询 try_wait 并自行计时」的既有非阻塞行为
+//!   （Windows 的 Store 别名存根会挂起，任何阻塞式等待都会把调用方拖死），
+//!   故只借用它「加标志」的能力，执行结构保持不变。
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -73,13 +92,15 @@ pub fn recorded_node_path() -> Option<PathBuf> {
 /// 这是「引导页不会因某个坏的可执行文件而永久卡住」的根本保证。
 pub fn node_version(node: &Path) -> Option<String> {
     use std::process::Stdio;
-    let mut child = Command::new(node)
-        .arg("--version")
+    // 先建命令再显式 prepare：不加该标志时，GUI 子系统下的每次探测都会弹控制台窗口。
+    let mut cmd = Command::new(node);
+    cmd.arg("--version")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
+        .stderr(Stdio::null());
+    // 与 bounded::run 同源：CREATE_NO_WINDOW 只在此封装点加（平台分支不得外溢到本文件）。
+    crate::bounded::prepare(&mut cmd);
+    let mut child = cmd.spawn().ok()?;
     let start = Instant::now();
     let status = loop {
         match child.try_wait() {
@@ -197,7 +218,8 @@ pub fn migrate_legacy() {
     }
 }
 
-/// 读取并解析守卫配置 ~/.dsh/supervisor/config.json（serde_json，**壳读内核配置的唯一解析入口**）。
+/// 读取并解析守卫配置 <产品状态根>/supervisor/config.json（serde_json，**壳读内核配置的唯一解析入口**）。
+/// ⚠ 路径已迁离 DSH 数据目录（旧注释写的 `~/.dsh/supervisor/…` 是过时说法，见 state_root()）。
 /// 契约 ARCHITECTURE-CONTRACT-phase0 §3.5：一律真 JSON 解析，禁止字符串扫描
 /// （格式微调——空白/换行/转义差异——即会让扫描失效；此前 apiPort/closeAction 各有一份扫描实现）。
 fn config_json() -> Option<serde_json::Value> {
@@ -218,6 +240,19 @@ pub fn api_base_url() -> String {
         .map(|n| n as u16)
         .unwrap_or(default_port);
     format!("http://127.0.0.1:{}/", port)
+}
+
+/// 读守卫 config.json 里的一个**布尔开关**（缺失/非布尔/解析失败 = false）。
+///
+/// 为什么单独抽出来：契约 §5 的灰度开关（`canary: true`）与灰度名单 opt-in
+/// （`canaryAllowlist: true`）都是`config.json`里的普通字段，而`config_json`是**私有**的
+/// —— 若各自再写一遍"读文件 + 解析"，就又出现第二份`config.json`解析实现（契约 §3.5 明令禁止）。
+/// 判定规则**只认真 JSON 布尔 true**（字符串 `"true"` 不算）：避免手改配置时把
+/// 灰度机悄悄变成灰度机（少读一位 = 稳定版用户被装上灰度版）。
+pub fn config_flag(key: &str) -> bool {
+    config_json()
+        .and_then(|v| v.get(key).and_then(|x| x.as_bool()))
+        .unwrap_or(false)
 }
 
 /// 关闭窗口时的行为（读守卫 config.closeAction；'exit'=退出管家全关，其余=隐藏至托盘）。

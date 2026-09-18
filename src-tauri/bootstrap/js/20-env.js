@@ -82,8 +82,10 @@
     if (!st.installed) {
       NS.setStep(0);
       return NS.probeMirrorThen(function () {
-        NS.status('未检测到 Node.js · 正在补全运行环境…');
-        return NS.core.invoke('start_node_install').then(function () { return NS.stepNodeWait(); });
+        // 安装文案统一走 NS.install（SSOT §3.2 / 不变量 T-6）：本模块只决定「装什么、说什么」，
+        //   样式与进度形态由 10-ui.js 的唯一实现负责，避免再次分裂成各阶段各画各的。
+        NS.install.begin('node', '未检测到 Node.js · 正在补全运行环境…');
+        return NS.core.invoke('start_node_install').then(function () { return NS.stepNodeWait('node'); });
       });
     }
     // 必须校验**最低门槛**：后端一直回传 minOk（DSH 要求 Node >= v22.12），
@@ -91,25 +93,30 @@
     if (st.minOk === false) {
       NS.setStep(0);
       return NS.probeMirrorThen(function () {
-        NS.status('Node.js ' + st.installed + ' 低于最低要求（' + (st.minRequired || 'v22.12') + '）· 正在升级…');
-        return NS.core.invoke('start_node_install').then(function () { return NS.stepNodeWait(); });
+        NS.install.begin('node', 'Node.js ' + st.installed + ' 低于最低要求（' + (st.minRequired || 'v22.12') + '）· 正在升级…');
+        return NS.core.invoke('start_node_install').then(function () { return NS.stepNodeWait('node'); });
       });
     }
-    // 工具链契约（2026-09-16）：npm 与 node **同等必需**。干净 Windows 上常见「node 在、npm 缺」，
-    //   旧前端只看 installed/minOk → 判「环境就绪」，随后用不存在的 npm 去装内核，必失败。
-    //   修复 = 重跑官方 Node 安装（官方分发包自带 npm）；npmOk 由 node_status 回传。
+    // npm 分支（SSOT §3.1）：npm 与 node **并行同权**，且**独立于**上面的 node 分支 ——
+    //   不得与 !installed / minOk === false 共用文案或注释。为什么要分开：两者是不同缺失项，
+    //   用户必须能一眼分辨是「没有 Node」还是「有 Node 但缺 npm」；共用文案会把两个根因
+    //   混成一句无从下手的话。后端 run_install 已在同一条管线里装 node 并修复 npm（SSOT §2.2），
+    //   故这里触发同一次安装调用；npmOk 由 node_status 真实探测回传（不变量 T-1）。
     if (st.npmOk === false) {
       NS.setStep(0);
       return NS.probeMirrorThen(function () {
-        NS.status('检测到 Node 缺少 npm · 正在补全工具链（重装官方 Node 分发包）…');
-        return NS.core.invoke('start_node_install').then(function () { return NS.stepNodeWait(); });
+        // 文案必须自带 npm 字样（SSOT 门禁 G-5）：只说「补全环境」会让 npm 缺失再次被掩盖。
+        NS.install.begin('npm', '检测到缺少 npm · 正在补全工具链…');
+        return NS.core.invoke('start_node_install').then(function () { return NS.stepNodeWait('npm'); });
       });
     }
     NS.nodeVer = st.installed;
     return NS.stepNodeDone();
   }
 
-  function stepNodeWait() {
+  // kind = 本次触发安装的缺失项（'node' | 'npm'），仅用于**失败文案前缀**：
+  //   同一段等待逻辑要能如实说出是「Node 没补上」还是「npm 没补上」，否则用户无法判断该重试什么。
+  function stepNodeWait(kind) {
     NS.phase('node');
     return new Promise(function (resolve) {
       var done = false;
@@ -118,13 +125,35 @@
         NS.withTimeout(NS.core.invoke('node_status'), 15000, '环境查询无响应').then(function (st) {
           st = st || {};
           if (st.__timeout) return;   // 下次 tick 重试
+          // 失败前置检查（SSOT §3.1 不变量 T-5）：安装器报错后它不再 busy，若只看 busy 会一路
+          //   轮询到兜底超时并被当作成功、直奔内核步骤 —— 而 npm 仍缺失，装内核必失败。
+          if (!st.busy && st.error) { if (!done) { done = true; clearInterval(t); resolve(failOnMissingNpm(kind, st.error)); } return; }
           // 就绪 = node **且** npm **且**达门槛（npm 缺失时安装器可能先出 node，必须继续等）。
           if (!st.busy && st.installed && st.minOk !== false && st.npmOk !== false) { if (!done) { done = true; clearInterval(t); NS.nodeVer = st.installed; resolve(NS.stepNodeDone()); } }
         }).catch(function () {});
       }, 700);
-      // 兜底：Node 安装可能长达数分钟；超时不当作成功（交给后续步骤如实报错）
-      setTimeout(function () { if (!done) { done = true; clearInterval(t); resolve(NS.stepNodeDone()); } }, 600000);
+      // 兜底：Node 安装可能长达数分钟。此处**绝不**默认成功（SSOT §3.1 不变量 T-5）——
+      //   旧实现在此直接 stepNodeDone()，于是「npm 没补上」也会进入内核步骤，用不存在的 npm 去装内核。
+      //   改为最后一次查询确认缺失项仍缺即如实失败，仅当节点确实已就绪才放行。
+      setTimeout(function () {
+        if (done) return;
+        clearInterval(t);
+        NS.withTimeout(NS.core.invoke('node_status'), 15000, '环境查询无响应').then(function (st) {
+          st = st || {};
+          if (!st.busy && st.installed && st.minOk !== false && st.npmOk !== false) { done = true; NS.nodeVer = st.installed; resolve(NS.stepNodeDone()); return; }
+          if (!done) { done = true; resolve(failOnMissingNpm(kind, st.error || '安装超时未完成')); }
+        }).catch(function () { if (!done) { done = true; resolve(failOnMissingNpm(kind, '安装超时未完成')); } });
+      }, 600000);
     });
+  }
+
+  // 安装失败/超时且 node 或 npm 仍缺失：**唯一**出口是既有失败面板（NS.fail），
+  //   返回 null 给调用链，确保**不进内核步骤**（SSOT §3.1 不变量 T-5：不得用不存在的 npm 装内核）。
+  //   为什么按 kind 分辨文案：补 npm 失败与补 node 失败的可操作结论不同，笼统一句「安装失败」会让用户无从下手。
+  function failOnMissingNpm(kind, error) {
+    var target = kind === 'npm' ? 'npm' : 'Node.js';
+    NS.fail('运行环境安装失败：' + target + ' 未能就绪' + (error ? '（' + error + '）' : '') + ' · 未进入内核安装，请重试或手动安装 Node 官方分发包');
+    return null;
   }
 
   function stepNodeDone() {
@@ -139,5 +168,6 @@
   NS.failEnvTimeout = failEnvTimeout;
   NS.afterEnv = afterEnv;
   NS.stepNodeWait = stepNodeWait;
+  NS.failOnMissingNpm = failOnMissingNpm;
   NS.stepNodeDone = stepNodeDone;
 })(window.__BOOT_NS);

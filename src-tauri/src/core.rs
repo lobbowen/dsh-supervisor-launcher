@@ -1,5 +1,15 @@
-// 内核（dsh-supervisor）版本治理 —— 引导期的强制更新（只升不降，无回退）。
+// 内核（dsh-supervisor）版本治理 —— 引导期的强制更新。
 //
+// "强制"的准确含义（2026-09-16 随发布通道契约修正）：
+//   · **正常路径**：只要目标版本严格高于本机，就必须更新（不跳过、不忽略）；
+//   · **非降级**：正常路径**不因版本比较**而降级（否则会被陈旧 tag 带回旧版）；
+//   · **回退是显式通道**：只有运维设了 dist-tags.rollback 才回退（契约 §3 第 ① 步、RC-2）。
+// 故本文件不再自称"无回退"——回退是**契约的一部分**，只是它必须由显式信号触发。
+//   ⚠ 2026-09-16 已收口：回退目标低于当前版本时，build_plan 依**通道信号**（via=rollback）
+//     判为需动手（action=upgrade）——纯版本比较无法识别回退，故必须把选版依据一并下传
+//     （latest_pick → build_plan → latestVia/isRollback）。执行体 core_apply 不做版本比较，
+//     升级与回退共用同一写入路径（刻意如此：避免"升级/回退两套逻辑"分叉）。
+
 // 跨平台规范性（本模块的全部设计依据）：
 //   1) 包名按 os/arch 映射：@dsh-sup/dsh-core-<linux|darwin|win>-<x64|arm64>。
 //   2) npm 可执行文件：Windows = npm.cmd，其余 = npm。
@@ -8,9 +18,17 @@
 //      prefix 报 nvm 路径，内核却在 ~/.npm-global），直接用 npm i -g 会装到别处、
 //      旧内核继续遮蔽新内核（「更新了却没生效」）。
 //   4) 镜像顺序尊重内核 registry.json（mode=manual 用 manualOrigin；否则 origins；缺失用内建默认）。
-//   5) 版本比较取 dist-tags + versions 的**全量最高**（与内核 fetchNpmLatest 同语义）——
-//      dist-tags.latest 可能落后于实际最高版本（实证：latest=0.1.1-BETA.1 而实际有 0.1.2-BETA.7），
-//      只信 latest 会导致「强制更新」变「强制降级」。
+//   5) **选版遵循发布通道契约**（RELEASE-CHANNEL-CONTRACT §3，见 release_channel.rs）——
+//      优先信 dist-tags.rollback / canary / latest，仅在 latest 缺失时兜底取 versions 最高。
+//
+//      ⚠ 本文件此前写的是「取全量最高（与内核 fetchNpmLatest 同语义）……只信 latest 会导致
+//        强制更新变强制降级」。**该结论已作废**，且与契约 §3 直接冲突：
+//        · 「取全量最高」会**绕过通道控制**——BETA 的数字可能压过 RC/正式，正式用户被装上测试版（RC-1）；
+//        · 那段注释举的实证（latest=0.1.1-BETA.1 而 max=0.1.5-BETA.7）事后查明是
+//          **latest 陈旧未更新**（SEA 时代遗留），不是「有人在回退」——恰是契约 §2 第 1 条
+//          「语义歧义」的活证据：latest 低于 max 有两种成因，机器不可分；
+//        · 紧急回退因此改用**独立 rollback tag**（显式信号，不依赖版本比较）。
+//      留此说明是为了让后来者知道「为什么不能改回全量最高」，而不是重复踩坑。
 
 use serde_json::Value;
 // 原 `use std::io::Read;` 已移除（2026-09-12）：read_log 改用 fs::read + from_utf8_lossy，
@@ -174,50 +192,55 @@ fn encode_pkg(pkg: &str) -> String {
     pkg.chars().map(|c| if c == '/' { "%2F".to_string() } else { c.to_string() }).collect()
 }
 
-/// 最新版本：**并行**探测全部镜像，取全量最高版本，并选最快且提供该版本的源。
-/// 返回 (version, 命中镜像)。
+/// 目标版本：**并行**探测全部镜像，按发布通道契约 §3 选版；返回 (version, 命中镜像)。
 ///
-/// 2026-09-11 重写：原实现是「串行、首个成功即返回」—— 既慢（慢源拖死整体），
-/// 又可能因某个镜像**元数据滞后**而选到旧版本（镜像同步存在延迟）。
-/// 现改为并行 + 跨源取最高，与 Node 侧策略一致。
-pub fn latest_version(pkg: &str) -> Result<(String, String), String> {
+/// ## 为什么"并行 + 跨源取最高"本身还是对的
+///
+/// 镜像**同步存在延迟**：同一个包在不同源上可能停在不同的时刻。若"首个成功的源即采信"，
+/// 一个滞后的源会把新版本掩盖成旧版本。故仍然**并行探测全部源**，再看它们各自的元数据。
+///
+/// ## 变的是**选版判据**（2026-09-16，契约 §3 冻结算法）
+///
+/// 旧实现：跨全部源取 `dist-tags` + `versions` 的**全量最高**。
+/// 那是"挑数字最大的版本"，会**绕过通道控制**（RC-1）——BETA 的数字可能压过正式版。
+/// 现在每个源的元数据都交给 `release_channel::select`（rollback / canary / latest / versions 兜底），
+/// 再在**同一通道**内跨源取最高，最后选提供该版本的最快源。
+///
+/// 为什么"直接按通道决策"要先于"跨源合并"：**通道是全局事实，元数据是逐源的**。
+///   若先把各源的 dist-tags 并起来（例如 A 源的 rollback 与 B 源的 latest 混在一起），
+///   就等于**发明了一个并不存在的发布状态** —— 回退必须由真实存在的那个 tag 决定。
+///   故本函数对每个源独立决策，再比较决策结果。
+///
+/// ## 不变量
+///
+/// · 每个源各自走完整 §3 五步，**绝不**跨源拼接 dist-tags；
+/// · 回退（rollback）优先于灰度（canary）优先于正式（latest）—— 详见 release_channel；
+/// · 同通道内多源给出不同版本时，取**较高**者（与旧行为一致；这不改变通道，只解决镜像滞后）；
+/// · 全部源都失败 → 原样回传**每个源**的失败原因（RC-5：绝不静默，也不谎报"已是最新"）。
+pub fn latest_pick(pkg: &str) -> Result<LatestPick, String> {
     if pkg.is_empty() { return Err("包名为空".into()); }
     let path = encode_pkg(pkg);
     let origins = registry_origins();
     let probes = crate::mirror::probe_all(&origins, &path);
 
-    // 跨全部可达源取最高版本；同版本时保留延迟最低者。
-    let mut best: Option<(String, u128, String)> = None; // (version, latency, source)
+    // §5 灰度判定**只做一次**（不要放进循环：那意味着每个源都去查一次名单包）。
+    //   本函数只在这一处调用；普通机器在此返回 false 且**零额外请求**（见 release_channel）。
+    let canary = canary_here();
+
+    let mut cands: Vec<Candidate> = Vec::new();
     let mut reachable = 0usize;
     for p in &probes {
         if !p.ok { continue; }
         reachable += 1;
         let Some(body) = &p.body else { continue };
         let Ok(j) = serde_json::from_str::<Value>(body) else { continue };
-        let mut local: Option<String> = None;
-        let mut consider = |v: &str| {
-            if !is_valid_version(v) { return; }
-            let better = local.as_deref().map(|b| semver_cmp(v, b) > 0).unwrap_or(true);
-            if better { local = Some(v.to_string()); }
-        };
-        if let Some(obj) = j.get("dist-tags").and_then(|x| x.as_object()) {
-            for v in obj.values() { if let Some(s) = v.as_str() { consider(s); } }
-        }
-        if let Some(obj) = j.get("versions").and_then(|x| x.as_object()) {
-            for k in obj.keys() { consider(k); }
-        }
-        let Some(v) = local else { continue };
-        let better = match &best {
-            None => true,
-            Some((bv, _, _)) => semver_cmp(&v, bv) > 0,
-        };
-        if better {
-            best = Some((v, p.latency_ms, p.source.clone()));
-        }
+        // 该源独立走 §3 五步 —— 一个源坏掉/缺 tag 不影响其它源的决策。
+        let Ok(pick) = crate::release_channel::select(&j, canary) else { continue };
+        cands.push((pick.version, p.latency_ms, p.source.clone(), pick.via));
     }
 
-    match best {
-        Some((version, _, source)) => Ok((version, source)),
+    match pick_best(cands) {
+        Some((version, _, source, via)) => Ok(LatestPick { version, origin: source, via: via.to_string() }),
         None => {
             let detail = probes
                 .iter()
@@ -227,6 +250,132 @@ pub fn latest_version(pkg: &str) -> Result<(String, String), String> {
             Err(format!("全部镜像不可用或均无该包（可达 {} 个；{}）", reachable, detail))
         }
     }
+}
+
+/// 选版结果 + **选版依据**（契约 §3 的通道）。
+///
+/// 为什么必须把 `via` 带回上层：`rollback` 生效时目标版本**低于**当前版本 ——
+///   若上层只看"目标 vs 已装"的版本比较，回退会被判成"无需动手"（RC-2 端到端断裂）。
+///   通道信息是"这是不是一个回退指令"的**唯一可靠依据**。
+pub struct LatestPick {
+    pub version: String,
+    pub origin: String,
+    /// rollback | canary | latest | versions（见 release_channel::select）
+    pub via: String,
+}
+
+/// 兼容封装：只要「版本, 源」的调用方（诊断输出等）用这个；需要判回退的用 `latest_pick`。
+pub fn latest_version(pkg: &str) -> Result<(String, String), String> {
+    latest_pick(pkg).map(|p| (p.version, p.origin))
+}
+
+/// 一个镜像给出的候选：(版本, 延迟ms, 源, 通道)。
+type Candidate = (String, u128, String, &'static str);
+
+/// 候选 a 是否**优于**候选 b（跨源仲裁的唯一判据）。
+///
+/// 顺序（**契约 §3 的优先级**，不是数字大小）：
+///   ① 通道优先级：rollback > canary > latest > versions；
+///   ② 同通道内：版本更高者胜（解决**镜像同步滞后**——同一通道不同源可能停在不同版本）；
+///   ③ 版本相同：延迟更低者胜（与旧行为一致，让"最快源"仍被优先命中）。
+///
+/// 为什么 ① 必须压过 ②：**回退目标是低于 latest 的**（这正是它的用途）。
+///   若按数字大小比较，一个尚未同步 rollback 的源会用更大的 latest 把它压过去，
+///   紧急回退就无法全量生效（RC-2 被违反）。
+fn better_candidate(a: &Candidate, b: &Candidate) -> bool {
+    let (av, alat, _, avia) = a;
+    let (bv, blat, _, bvia) = b;
+    match channel_rank(avia).cmp(&channel_rank(bvia)) {
+        std::cmp::Ordering::Less => true,
+        std::cmp::Ordering::Greater => false,
+        std::cmp::Ordering::Equal => {
+            let c = semver_cmp(av, bv);
+            c > 0 || (c == 0 && *alat < *blat)
+        }
+    }
+}
+
+/// 从全部候选里挑出唯一目标（纯函数 —— 跨源仲裁因此可被单元测试直接覆盖）。
+///
+/// 按输入顺序**一次遍历**：只有**严格更优**才替换，故并列时保留先到者
+///   （`probe_all` 已按"可达优先 + 延迟升序"排好，先到即最快）。
+fn pick_best(cands: Vec<Candidate>) -> Option<Candidate> {
+    let mut best: Option<Candidate> = None;
+    for c in cands {
+        match &best {
+            Some(b) if !better_candidate(&c, b) => {}
+            _ => best = Some(c),
+        }
+    }
+    best
+}
+
+/// 通道优先级（数值越小越优先）——**契约 §3 的顺序**，不是版本高低。
+///
+/// 为什么必须单列：跨源比较时，"哪个源的决策更该被采纳"取决于**通道**。
+///   若退回"比版本号大小"，回退目标（通常低于 latest）会被别的源的 latest 压过去，
+///   而这正是契约 §2 三条硬缺陷要根除的推断方式（RC-2）。
+fn channel_rank(via: &str) -> u8 {
+    match via {
+        crate::release_channel::CH_ROLLBACK => 0,
+        crate::release_channel::CH_CANARY => 1,
+        crate::release_channel::CH_LATEST => 2,
+        _ => 3, // versions 兜底
+    }
+}
+
+/// 本机是否在**灰度名单**内（契约 §5）。
+///
+/// 短路顺序见 `release_channel::canary_machine_with`（契约 §5.5，**顺序未变**）：
+///   ① 本机配置 `canary: true`（或 `DSH_CANARY=1`）→ 命中，**不查包**；
+///   ② 未标记且未 opt-in（`canaryAllowlist: true` / `DSH_CANARY_ALLOWLIST=1`）→ false，**零额外请求**；
+///   ③ 只有**显式进入候选**的机器才读 `@dsh-sup/canary-allowlist`（可选包，读不到只留日志）。
+///      名单只认 §5.3 唯一格式（`schema:1` + `entries[].installId` 主依据 + `hostnames[]` 兜底）；
+///      本机 installId 取自内核写的 `<supervisorDir>/install-id`（**壳不生成**，见 release_channel）。
+///
+/// ③ 的代价是"多一次网络请求"，故它**绝不能**发生在普通机器上 —— 这正是 ①② 短路的理由。
+///   也正因如此，这一次请求发生在**探测循环之外**：多源探测已经并行跑完，
+///   这里是全程串行的一次（最多 PROBE_TIMEOUT），不会随镜像数量放大。
+fn canary_here() -> bool {
+    let local = crate::release_channel::local_canary_hit();
+    // 普通机器（未标记、未 opt-in）在此**直接返回 false**，连 fetch 闭包都不会被调用
+    //   —— 于是"多一次网络请求"这件事对绝大多数用户根本不存在。
+    let opt_in = crate::release_channel::allowlist_opt_in();
+    if !local && !opt_in {
+        return false;
+    }
+    let origins = registry_origins();
+    crate::release_channel::canary_machine(local, opt_in, move |pkg| fetch_pkg_meta(&origins, pkg))
+}
+
+/// 按镜像顺序**串行**取一份包元数据，首个成功即返回。
+///
+/// ## 为什么复用 `probe_all` 的**单个源**而不是调用它整个
+///
+/// `probe_all` 的并行是为"测速"服务的：它要打满全部源才能选出最快者。
+///   而这里要的是"谁能给我这份可选内容"——第一个能回答的源就够了，
+///   打满全部源只会把这个**可选**查询的成本放大到 N 倍。
+/// 但也**不另写一套 HTTP**：仍经 `probe_all`（单源）取回响应体 ——
+///   URL 编码、超时（`mirror::PROBE_TIMEOUT`）、响应体读取全仓只有那一份实现，
+///   避免此处成为"第二份 registry 客户端"。单源时它内部只 spawn 一个线程，无额外代价。
+fn fetch_pkg_meta(origins: &[String], pkg: &str) -> Result<Value, String> {
+    let path = encode_pkg(pkg);
+    let mut last = String::from("无可用镜像");
+    for o in origins {
+        let one = std::slice::from_ref(o);
+        match crate::mirror::probe_all(one, &path).into_iter().next() {
+            Some(p) if p.ok => match p.body.as_deref() {
+                Some(body) => match serde_json::from_str::<Value>(body) {
+                    Ok(j) => return Ok(j),
+                    Err(_) => last = format!("{}: 响应不是合法 JSON", o),
+                },
+                None => last = format!("{}: 空响应", o),
+            },
+            Some(_) => last = format!("{}: 不可达", o),
+            None => last = format!("{}: 探测未返回", o),
+        }
+    }
+    Err(last)
 }
 
 /// 无 GUI 场景下定位内核可执行文件（与 main.rs 的 locate_core 同一候选集）。
@@ -507,15 +656,43 @@ fn run_command_bounded(
 //    GBK/非 UTF-8 的容忍现由 `bounded.rs::read_log` 单点负责（B62 锁定）。
 
 
-/// 计算规划：只有 latest 严格大于 installed 才需更新（**绝不降级**）。
-pub fn build_plan(installed: Option<String>, latest: Result<(String, String), String>) -> Value {
-    let (latest_v, origin, err) = match latest {
-        Ok((v, o)) => (Some(v), Some(o), None),
-        Err(e) => (None, None, Some(e)),
+/// 计算规划：只有目标版本**严格大于**已装版本才需动手（正常路径不因版本比较而降级）。
+///
+/// ## 与契约 §3 的边界（**已知缺口，需上层收口**）
+///
+/// 选版（`latest_version`）回答"**目标是谁**"：`rollback` tag 生效时它会给出
+///   **低于当前**的目标（这正是回退的用途）。本函数回答"**要不要动手**"，
+///   而它只按 `semver_cmp(目标, 已装) > 0` 判 `upgrade` ——
+///   于是**回退目标在这里被判成 `action=none`**，前端据此显示"已是最新"，
+///   回退到不了用户（RC-2 端到端未闭合）。
+///
+/// 为什么不在此处就地修：
+///   · 判"回退也要动手"必须知道**选版依据（via）**，而入参只有 `(version, origin)`；
+///     把 via 透传下来要改 `latest_version` 的返回形态与 `commands/mod.rs` 的调用点
+///     （本文件之外），并同步前端 `bootstrap/js/50-kernel.js`（它只认 install/upgrade/none）；
+///   · 只改这里的输出会让"后端说回退、前端不执行"变成**静默失效**——比现状更糟。
+/// 故此处**如实标注**，由上层一次性收口（选版依据 → action → 前端执行）。
+/// 注意 `core_apply` 本身**不做版本比较**：它直接安装选出的目标版本，回退机制本身是可用的。
+pub fn build_plan(installed: Option<String>, latest: Result<LatestPick, String>) -> Value {
+    let (latest_v, origin, err, via) = match latest {
+        Ok(p) => (Some(p.version), Some(p.origin), None, Some(p.via)),
+        Err(e) => (None, None, Some(e), None),
     };
+    // 回退判定（2026-09-16 收口 RC-2 端到端）：
+    //   `rollback` 通道生效时，目标版本**低于**当前版本 —— 这正是回退的目的，
+    //   但纯版本比较会把它判成"无需动手"（旧缺口：前端显示"已是最新"，回退到不了用户）。
+    //   故：**通道 = rollback 时，目标与已装不同即视为需动手**（action 仍用升级词，
+    //   因为前端的执行路径只有 install/upgrade —— 执行体 `core_apply` 不做版本比较，
+    //   直接装选出的目标版本，故"回退"与"升级"共用同一执行路径是正确且刻意的）。
+    let is_rollback = via.as_deref() == Some("rollback");
     let action = match (&installed, &latest_v) {
         (None, Some(_)) => "install",
-        (Some(i), Some(l)) => if semver_cmp(l, i) > 0 { "upgrade" } else { "none" },
+        (Some(i), Some(l)) => {
+            let cmp = semver_cmp(l, i);
+            if cmp > 0 { "upgrade" }
+            else if is_rollback && cmp != 0 { "upgrade" }   // ← 回退：显式通道信号，非版本比较
+            else { "none" }
+        }
         _ => "unknown",
     };
     // 统一更新决策形状（与桌面自更新同一组键）；保留原字段向后兼容前端。
@@ -525,6 +702,9 @@ pub fn build_plan(installed: Option<String>, latest: Result<(String, String), St
     extra.insert("action".into(), serde_json::json!(action));
     extra.insert("updateAvailable".into(), serde_json::json!(action == "upgrade"));
     extra.insert("registry".into(), serde_json::json!(origin));
+    // 选版依据（rollback/canary/latest/versions）——前端与运维据此识别"当前是否回退中"。
+    extra.insert("latestVia".into(), serde_json::json!(via));
+    extra.insert("isRollback".into(), serde_json::json!(is_rollback));
     crate::update_plan::unified(
         "kernel",
         installed,
@@ -537,6 +717,10 @@ pub fn build_plan(installed: Option<String>, latest: Result<(String, String), St
 }
 
 /// 无头自检输出（--core-plan 用，便于发布后冒烟验证，无需 GUI）。
+///
+/// 输出含 `latest_via`（本次是从 **rollback / canary / latest / versions** 哪条通道选出来的）：
+///   契约 §4 把"rollback tag 存在 = 回退进行中"当作**可观测性**承诺 ——
+///   而运维在无 GUI 的机器上核对回退是否生效，靠的就是这个自检入口。
 pub fn plan_text() -> String {
     let pkg = match package_name() { Ok(p) => p, Err(e) => return format!("pkg_error={}", e) };
     let mut lines = vec![format!("package={}", pkg)];
@@ -545,10 +729,35 @@ pub fn plan_text() -> String {
         Ok((v, o)) => {
             lines.push(format!("latest={}", v));
             lines.push(format!("latest_origin={}", o));
+            lines.push(format!("latest_via={}", decision_channel(&pkg)));
         }
         Err(e) => lines.push(format!("latest_error={}", e)),
     }
     lines.join(" | ")
+}
+
+/// 目标版本是经哪条通道选出的（**仅供自检/日志**，不参与安装决策）。
+///
+/// 为什么**重新查一遍**而不是让 `latest_version` 也返回通道：
+///   · `latest_version` 的签名（version, origin）被 8 处调用点依赖，改动面远大于收益；
+///   · 本函数**只在 `--core-plan` 自检路径上执行**，不在引导主链路上 ——
+///     多一次元数据探测的代价可接受（自检本就是"多花几秒换确定性"的入口）。
+/// 失败一律回传原因，绝不编造通道（RC-5）。
+fn decision_channel(pkg: &str) -> String {
+    let path = encode_pkg(pkg);
+    let origins = registry_origins();
+    let probes = crate::mirror::probe_all(&origins, &path);
+    let canary = canary_here();
+    let mut cands: Vec<Candidate> = Vec::new();
+    for p in &probes {
+        if !p.ok { continue; }
+        let Some(body) = &p.body else { continue };
+        let Ok(j) = serde_json::from_str::<Value>(body) else { continue };
+        if let Ok(pick) = crate::release_channel::select(&j, canary) {
+            cands.push((pick.version, p.latency_ms, p.source.clone(), pick.via));
+        }
+    }
+    pick_best(cands).map(|c| c.3.to_string()).unwrap_or_else(|| "unknown".into())
 }
 #[cfg(test)]
 mod tests {
@@ -688,5 +897,142 @@ mod tests {
         for p in ["C:\\Users\\x", "/home/u/x", ""] {
             assert_eq!(strip_verbatim(p), p, "不应改写: {}", p);
         }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // 跨源仲裁（契约 §3 + 镜像同步滞后）—— `latest_version` 的决策内核。
+    //
+    // §3 五步本身由 release_channel.rs 的单元测试逐分支覆盖；
+    //   此处覆盖**第二步**：多个源各自决策之后，谁的目标版本会被采纳。
+    // ═══════════════════════════════════════════════════════════════════
+
+    use crate::release_channel::{CH_CANARY, CH_LATEST, CH_ROLLBACK, CH_VERSIONS};
+
+    fn cand(v: &str, lat: u128, src: &str, via: &'static str) -> Candidate {
+        (v.to_string(), lat, src.to_string(), via)
+    }
+
+    #[test]
+    fn pick_best_prefers_higher_version_within_same_channel() {
+        // 同一通道内取更高版本 —— 解决"某镜像元数据滞后一版"。
+        let got = pick_best(vec![
+            cand("0.1.5-BETA.3", 10, "fast", CH_LATEST),
+            cand("0.1.5-BETA.7", 500, "slow", CH_LATEST),
+        ])
+        .unwrap();
+        assert_eq!(got.0, "0.1.5-BETA.7");
+        assert_eq!(got.2, "slow", "更高版本胜出，即使它更慢");
+    }
+
+    #[test]
+    fn pick_best_prefers_lower_latency_on_tie() {
+        let got = pick_best(vec![
+            cand("0.1.5", 900, "slow", CH_LATEST),
+            cand("0.1.5", 12, "fast", CH_LATEST),
+        ])
+        .unwrap();
+        assert_eq!(got.2, "fast", "同版本时保留更快源");
+    }
+
+    #[test]
+    fn pick_best_rollback_beats_other_sources_latest() {
+        // **RC-2 回归（跨源形态）**：A 源已同步 rollback（低版本），B 源还是 latest（高版本）。
+        //   若按"数字大小"仲裁，B 会压过 A → 紧急回退无法全量生效。
+        let got = pick_best(vec![
+            cand("0.2.0", 5, "synced-latest", CH_LATEST),
+            cand("0.1.4", 800, "synced-rollback", CH_ROLLBACK),
+        ])
+        .unwrap();
+        assert_eq!(got.0, "0.1.4");
+        assert_eq!(got.3, CH_ROLLBACK);
+    }
+
+    #[test]
+    fn channel_priority_is_rollback_canary_latest_versions() {
+        // 通道优先级即契约 §3 的步序；**与版本数字无关**。
+        assert!(channel_rank(CH_ROLLBACK) < channel_rank(CH_CANARY));
+        assert!(channel_rank(CH_CANARY) < channel_rank(CH_LATEST));
+        assert!(channel_rank(CH_LATEST) < channel_rank(CH_VERSIONS));
+        // 交叉验证：灰度版本低于 latest 时，灰度机仍取灰度
+        let got = pick_best(vec![
+            cand("0.9.9", 1, "a", CH_LATEST),
+            cand("0.1.6-BETA.1", 900, "b", CH_CANARY),
+        ])
+        .unwrap();
+        assert_eq!(got.3, CH_CANARY);
+    }
+
+    /// RC-G5 反向：判据必须能识别"取全量最高"的旧形态 —— 否则门禁是空转的。
+    ///
+    /// 旧形态与 §3 在**同一份元数据**上给出不同答案，故"改回旧实现"必然被测试抓到。
+    #[test]
+    fn pick_best_rejects_old_highest_of_all_form() {
+        let meta = serde_json::json!({
+            "dist-tags": { "latest": "0.1.5-BETA.3" },
+            "versions": { "0.1.5-BETA.3": {}, "1.0.0-BETA.1": {} },
+        });
+        // 契约 §3 第 ③ 步：信 latest（BETA 数字大也不动）
+        let picked = crate::release_channel::select(&meta, false).unwrap();
+        assert_eq!(picked.version, "0.1.5-BETA.3");
+        // 旧的"全量最高"会选 1.0.0-BETA.1 —— 两者不同，故本门禁非空转
+        let old_would_pick = "1.0.0-BETA.1";
+        assert_ne!(picked.version, old_would_pick, "RC-G5 反向自检失败");
+    }
+
+    #[test]
+    fn pick_best_empty_is_none() {
+        assert!(pick_best(vec![]).is_none(), "无候选必须返回 None（由调用方如实报错，RC-5）");
+    }
+
+    // ── 回退端到端（RC-2）：契约最关键的运维能力，必须有回归锚点 ──
+    //
+    // 缺口背景：回退目标**低于**当前版本，若 build_plan 只做版本比较会判 action=none
+    //   → 前端显示"已是最新" → 回退到不了用户。修法是让**通道信号**（via=rollback）参与判定。
+    // 本测试锁定该行为，防止将来有人"简化"回版本比较。
+
+    fn pick(v: &str, via: &'static str) -> Result<LatestPick, String> {
+        Ok(LatestPick { version: v.to_string(), origin: "test".into(), via: via.to_string() })
+    }
+
+    #[test]
+    fn rollback_lower_version_still_triggers_action() {
+        // 本机 0.1.5，回退目标 0.1.4（更低）→ **必须**判为需动手，而非"已是最新"
+        let p = build_plan(Some("0.1.5".into()), pick("0.1.4", "rollback"));
+        assert_eq!(p["action"], "upgrade", "回退目标更低时必须触发（否则 RC-2 端到端断裂）");
+        assert_eq!(p["available"], true);
+        assert_eq!(p["isRollback"], true);
+        assert_eq!(p["latestVia"], "rollback");
+        assert_eq!(p["latest"], "0.1.4");
+    }
+
+    #[test]
+    fn same_version_via_rollback_is_noop() {
+        // 回退目标 == 当前版本：无意义，不动手（避免无谓重装）
+        let p = build_plan(Some("0.1.5".into()), pick("0.1.5", "rollback"));
+        assert_eq!(p["action"], "none");
+        assert_eq!(p["isRollback"], true);
+    }
+
+    #[test]
+    fn non_rollback_lower_version_does_not_trigger() {
+        // **反向对照**：非回退通道给出更低版本（陈旧 latest）→ 不得触发
+        //   （这正是契约 §2 缺陷 1 的场景：陈旧 ≠ 回退，必须区分）
+        let p = build_plan(Some("0.1.5".into()), pick("0.1.1-BETA.1", "latest"));
+        assert_eq!(p["action"], "none", "陈旧 latest 不得被误判为回退");
+        assert_eq!(p["isRollback"], false);
+    }
+
+    #[test]
+    fn rollback_above_current_is_normal_upgrade() {
+        // 回退 tag 指向更高版本（运维设错/已恢复正常）→ 按正常升级处理
+        let p = build_plan(Some("0.1.5".into()), pick("0.1.6", "rollback"));
+        assert_eq!(p["action"], "upgrade");
+        assert_eq!(p["isRollback"], true);
+    }
+
+    #[test]
+    fn not_installed_via_rollback_is_install() {
+        let p = build_plan(None, pick("0.1.4", "rollback"));
+        assert_eq!(p["action"], "install");
     }
 }
