@@ -6,6 +6,21 @@
 
 （下一版本待记）
 
+## [1.1.11]（2026-09-18）
+
+### 修复：跨平台权限模型重写 —— Node 用户级安装（零权限）
+
+用户实测 Windows：msiexec 退出码 1619（安装包无法打开）。这不是 UAC 取消，而是系统级
+安装本身的缺陷：UAC 提升到管理员账户后常读不到当前用户 profile 下的 .msi；且
+canonicalize() 在 Windows 返回 \\?\ 前缀路径，msiexec 不认。macOS .pkg 需要系统授权且无
+arm64 pkg；Linux /usr/local 需要 pkexec/sudo（容器/WSL/SSH 常不可用）且 tar -xJf 依赖 xz。
+
+- **三平台统一为用户级安装（零权限）**：制品 Windows win-{arch}.zip / macOS
+  darwin-{arch}.tar.gz / Linux linux-{arch}.tar.gz，解包到 <状态根>/node，经
+  platform::commit_user_node 原子落定；node_bin_after_install 与 node_candidate_paths
+  指向该落点；运行期契约记录绝对路径，服务管理器无需 PATH 里有 node。
+- 提权从此只与「壳自更新（替换安装程序）」有关，由各平台自身通道完成。
+
 ## [1.1.10]（2026-09-18）
 
 ### 修复：环境工具链标准化（Node 安装 / npm 可用性 / 镜像网络）
