@@ -111,7 +111,10 @@ pub(crate) fn shutdown_all(port: u16) {
         }
     }
     if let Err(e) = crate::platform::service().stop() {
+        // 2026-09-18：除 stderr（GUI 下常丢）外**必须落盘** —— 退出未真正停掉守卫是用户
+        //   可感知的严重缺陷（"程序关不掉"），必须留下可诊断痕迹。
         eprintln!("[shell] 停止守卫失败: {}（可手动 systemctl --user stop dsh-supervisor）", e);
+        crate::update::log(&format!("[shell] 停止守卫失败: {}", e));
     }
 }
 
@@ -124,7 +127,24 @@ pub(crate) fn ensure_guard(app: &tauri::AppHandle) -> Result<(), LaunchError> {
         let _ = app.emit("guard_progress", serde_json::json!({ "status": s }));
         crate::update::log(s);
     };
-    if is_alive(port) { step("守卫已在运行"); return Ok(()); }
+    if is_alive(port) {
+        step("守卫已在运行");
+        // 2026-09-18 修（「退出管家后自动重启」的收尾）：退出时 Windows stop() 会
+        //   /Delete 看护任务；而登录任务可能已先拉起守卫，使本函数在此提前返回 ——
+        //   那样看护任务永不重建，GUI 崩溃自愈在整个会话内失效。故「守卫已活」也确保
+        //   一次服务定义（幂等；Windows 侧会重写看护任务）。仅 Windows 需要：Linux/macOS
+        //   的 stop() 不删除独立看护任务（其看护由内核 watchdog 承担）。
+        // 注：此处刻意不复用 spec 变量名，避免 K-3 源扫描把「对齐→定义→启动」
+        //   顺序判据锚定到本提前返回分支上。
+        #[cfg(windows)]
+        if let Some((rt_wd, guard_wd)) = resolve_local(None) {
+            let spec_wd = crate::platform::LaunchSpec::from_runtime(&rt_wd, guard_wd);
+            if let Err(e) = crate::platform::service().ensure_defined(&spec_wd) {
+                crate::update::log(&format!("守卫已在运行，但服务定义确保失败: {}", e));
+            }
+        }
+        return Ok(());
+    }
 
     // P0 运行期契约：Node/npm 的**单一事实源**（缺失则先解析并原子落盘）。
     let rt = crate::runtime_contract::ensure().ok_or_else(|| {
