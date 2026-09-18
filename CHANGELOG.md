@@ -6,6 +6,20 @@
 
 （下一版本待记）
 
+## [1.1.9]（2026-09-18）
+
+### 修复
+
+- **退出管家后桌面壳被自动重新拉起（严重，Windows 主根因）**：`platform/windows.rs stop()`
+  对 `DSH-Supervisor-Watchdog` 计划任务改用 `schtasks /Delete /F` —— 原 `/End` 只结束本次运行实例、
+  不禁用 `/SC MINUTE /MO 5` 计划，导致 ≤5 分钟后 `watchdog.ps1` 把守卫与桌面壳拉回；
+  下次 `ensure_defined` 幂等重建看护任务。
+- `domain/guardctl.rs ensure_guard`：在「守卫已在运行」的提前返回分支补一次 Windows-only 幂等
+  `ensure_defined`（防登录任务先拉起守卫 → 看护任务永不重建 → 本会话 GUI 崩溃自愈失效）。
+- `guardctl::shutdown_all`：停止守卫失败除 stderr 外**落盘 `shell.log`**（GUI 下 stderr 常丢）。
+
+详见 `docs/audit/2026-09-18/_s3-exit-relaunch.md`（含跨仓完整清单）。
+
 ## [1.1.8]（2026-09-18）
 
 ### 新增：内核选版遵循发布通道契约（RELEASE-CHANNEL-CONTRACT §3）
