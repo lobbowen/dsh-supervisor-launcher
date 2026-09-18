@@ -132,11 +132,11 @@ pub(crate) fn ensure_guard(app: &tauri::AppHandle) -> Result<(), LaunchError> {
         // 2026-09-18 修（「退出管家后自动重启」的收尾）：退出时 Windows stop() 会
         //   /Delete 看护任务；而登录任务可能已先拉起守卫，使本函数在此提前返回 ——
         //   那样看护任务永不重建，GUI 崩溃自愈在整个会话内失效。故「守卫已活」也确保
-        //   一次服务定义（幂等；Windows 侧会重写看护任务）。仅 Windows 需要：Linux/macOS
-        //   的 stop() 不删除独立看护任务（其看护由内核 watchdog 承担）。
+        //   一次服务定义。ensure_defined 三平台幂等且自愈：Windows 重写看护任务，
+        //   Linux/macOS 仅在定义内容漂移时才重建（稳态为纯比对，不重启守卫）。
         // 注：此处刻意不复用 spec 变量名，避免 K-3 源扫描把「对齐→定义→启动」
-        //   顺序判据锚定到本提前返回分支上。
-        #[cfg(windows)]
+        //   顺序判据锚定到本提前返回分支上；且**不得**在此引入平台条件编译
+        //   （bootstrap_flow.rs G1/B59：platform/ 之外禁止平台分支）。
         if let Some((rt_wd, guard_wd)) = resolve_local(None) {
             let spec_wd = crate::platform::LaunchSpec::from_runtime(&rt_wd, guard_wd);
             if let Err(e) = crate::platform::service().ensure_defined(&spec_wd) {
