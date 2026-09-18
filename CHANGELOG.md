@@ -4,7 +4,22 @@
 
 ## [未发布]
 
-（下一版本待记）
+### 修复：环境工具链标准化（Node 安装 / npm 可用性 / 镜像网络）
+
+- **全部 Node 镜像均不可用（用户实测）**：ureq 默认既不读环境变量也不读系统代理
+  → 只有代理的机器上全部镜像直连失败。新增进程级 mirror::agent：环境变量
+  （ALL_PROXY/HTTPS_PROXY/HTTP_PROXY）优先，缺失时回退**系统代理**
+  （Windows WinINET 注册表 / macOS scutil --proxy）；镜像探测与 Node 下载共用同一 agent。
+- probe_all 过去把失败原因丢弃（只报「不可达」）→ 新增 Probe.error，逐源带出
+  HTTP/DNS/TLS/代理/读体原因；PROBE_TIMEOUT 8s→20s（index.json 单个 1.5~2MB）。
+- **npm 只查文件存在、从不执行**：新增 runtime_contract::probe_npm_usable，真实执行
+  npm --version（Windows .cmd 经 cmd /C）；node_status.npmOk 改三态
+  （true/false/null=未知），新增 npmVersion；前端只有 npmOk === true 才放行。
+- 删除 record_runtime_meta：与 runtime_contract::write 双写同一 runtime.json，
+  覆盖掉 npmPath/npmArgs/schema。
+- run_install：安装后先作废探测缓存，并校验**安装器返回的路径**（而非可能记录旧 Node 的
+  PATH）→ 修「安装后版本不一致」永不收敛；断言最低门槛。Windows install_node 对 /i
+  路径加引号、用 -PassThru 取真实 ExitCode、核对 node.exe 是否就位；macOS 同补结果核对。
 
 ## [1.1.9]（2026-09-18）
 

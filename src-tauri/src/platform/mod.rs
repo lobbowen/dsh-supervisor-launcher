@@ -66,17 +66,16 @@ pub fn system_proxy() -> Option<String> {
 fn windows_system_proxy() -> Option<String> {
     use std::process::Command;
     let query = |name: &str| -> Option<String> {
-        let out = Command::new("reg")
-            .args([
-                "query",
-                "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings",
-                "/v",
-                name,
-            ])
-            .output()
-            .ok()?;
-        let s = String::from_utf8_lossy(&out.stdout);
-        let line = s.lines().find(|l| l.contains(name))?;
+        // 必须经 bounded::run（B32：任何外部命令不得裸 .output()/status() 无界阻塞）。
+        let mut cmd = Command::new("reg");
+        cmd.args([
+            "query",
+            "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings",
+            "/v",
+            name,
+        ]);
+        let out = crate::bounded::run(&mut cmd, SVC_QUICK).ok()?;
+        let line = out.stdout.lines().find(|l| l.contains(name))?;
         line.split_whitespace().last().map(|x| x.to_string())
     };
     let enabled = query("ProxyEnable").map(|v| v.ends_with('1')).unwrap_or(false);
@@ -103,8 +102,10 @@ fn windows_system_proxy() -> Option<String> {
 #[cfg(target_os = "macos")]
 fn macos_system_proxy() -> Option<String> {
     use std::process::Command;
-    let out = Command::new("scutil").arg("--proxy").output().ok()?;
-    let s = String::from_utf8_lossy(&out.stdout);
+    let mut cmd = Command::new("scutil");
+    cmd.arg("--proxy");
+    let out = crate::bounded::run(&mut cmd, SVC_QUICK).ok()?;
+    let s = out.stdout;
     let field = |k: &str| -> Option<String> {
         s.lines()
             .find(|l| l.trim_start().starts_with(k))
