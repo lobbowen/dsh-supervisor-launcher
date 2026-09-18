@@ -422,8 +422,14 @@ impl ServiceControl for Impl {
     fn stop(&self) -> Result<(), String> {
         // Windows：先停 watchdog 保活任务，再终止守卫进程（否则 watchdog 会立刻重新拉起）。
         // 全部有界：退出流程也要能在服务管理器无响应时走完，否则用户会觉得「程序关不掉」。
+        // ⚠ 2026-09-18 修（严重缺陷：退出管家后自动重启）：
+        //   原只用 /End —— 那只结束**本次运行实例**，而 DSH-Supervisor-Watchdog 是
+        //   /SC MINUTE /MO 5 的**计划**（watchdog.ps1 在无 dsh-supervisor* GUI 进程时
+        //   `Start-Process <壳>`，在守卫端口 down 时 `Start-Process <壳> --run-guard`）。
+        //   /End 不禁用计划 ⇒ ≤5 分钟后看护再次触发，把守卫与桌面壳一起拉回来。
+        //   故看护任务必须 **/Delete 计划**；下次启动 ensure_defined 会重建（幂等）。
         crate::bounded::run_lossy(
-            Command::new("schtasks").args(["/End", "/TN", WATCHDOG_TASK]),
+            Command::new("schtasks").args(["/Delete", "/TN", WATCHDOG_TASK, "/F"]),
             SVC_NORMAL,
         );
         crate::bounded::run_lossy(
