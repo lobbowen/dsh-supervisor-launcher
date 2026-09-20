@@ -54,8 +54,8 @@ GitHub **永远不会执行**它；但 `docs/RELEASE-AND-BUILD-DECISION.md` 与 
 | H3 | 无头冒烟 | `cargo run -- --node-plan` | 是 |
 | H4 | 构建 + 打包 | `cargo tauri build`（bundles 见第 2 节）| 是 |
 | H5 | glibc 基座门禁（仅 Linux）| `bash ci/check-glibc.sh <bin> 2.35` | 是 |
-| H6 | 组装 npm 壳包 | `node shell-release/assemble-shell-pkg.js --platform <p>` | 是 |
-| H7 | 产物验收（同源验签 + 清单契约）| `cargo test --test updater_artifacts` | 是 |
+| H6 | 组装 npm 壳包 | `node shell-release/assemble-shell-pkg.js --platform <p> [--require-sig]`（缺 `.sig` 仅在带 `--require-sig` 时判红；CI 只对 tag 构建传该开关）| 是 |
+| H7 | 产物验收（同源验签 + 清单契约）| `cargo test --test updater_artifacts`（CI 中仅 `refs/tags/v*` 执行：无密钥构建本就产不出 `.sig`）| 是 |
 | H8 | 发布（tag `v*`）| `publish` job：归拢产物 → `node shell-release/make-manifest.js` → `npm publish` | 是 |
 | H9 | 发布后验证 | 见第 5 节 | 是 |
 
