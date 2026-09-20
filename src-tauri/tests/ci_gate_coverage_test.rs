@@ -19,6 +19,19 @@
 //! 轻量检查给出「绿了」的假象，反而掩盖问题。
 //! 现按明确要求修订为：push main 直接跑完整构建矩阵（不设轻量替代、不设 tag 守卫）。
 //!
+//! ## 缺陷 ③（产线承诺与执行不符）
+//!
+//! 打包步骤注释写着「未配置 secret 时为空，仅构建不产 .sig，不阻断」，但 secret 未配置时
+//! Actions 把它展开成空字符串并继续导出，Tauri v2 CLI 视其为一把非法私钥
+//! （incorrect updater private key password）而失败。撤掉空变量后仍会红在下一步：
+//! 配置内置了 pubkey，Tauri 见「有公钥无私钥」即报 A public key has been found, but no
+//! private key，所以验证构建必须同时关掉 updater 产物。随后的组装步骤又对缺 .sig 无条件
+//! exit 1，验签验收步骤也无条件跑。叠加结果是：任何没有签名密钥的构建必然全红，
+//! 而该红与本次代码改动无关，等于完整构建矩阵不可用。
+//! 修法是把承诺变成执行：撤掉空变量 + 关 updater 产物，安装程序照常产出；缺 .sig 的强校验
+//! 只在 tag 构建生效（发布仍必须成对，不可放宽）；验签验收只在 tag 上跑。
+//! 注意这不能靠给 build job 加 if: 实现，那会命中 C-c/C-d。
+//!
 //! ## 锁定不变量
 //!   C-a  CI 门禁步骤必须自动枚举 tests/*.rs（不得硬编码 target 列表）
 //!   C-b  唯一允许排除的 target 是 updater_artifacts（它需打包产物 SHELL_REHEARSAL_DIR）
@@ -26,6 +39,12 @@
 //!        matrix 必须含 macOS 与 Windows；且 build 内要跑 cargo test
 //!   C-d  反悔防护：不得存在「只做 cargo check、不做构建」的轻量 job 替代完整构建
 //!   C-e  反向：判据能识别旧形态（门禁非空转）
+//!   C-f  无密钥构建不得被阻断：打包步骤在 key 缺失分支内撤掉空签名变量并关掉 updater 产物
+//!        （override 必须真的传给 build 命令）；组装对 .sig 的强校验按 tag 分流；
+//!        验签验收步骤有 tag 级步骤 if
+//!   C-g  发布侧严格性不得被放宽：组装器仍对缺 .sig 早失败，且该失败挂在 require-sig 上；
+//!        parseArgs 必须能识别布尔开关；备用形态只在主形态零命中时启用
+//!   C-h  反向：C-f/C-g 的判据能识别旧形态，且 step_block 定位准确
 
 use std::fs;
 use std::path::PathBuf;
@@ -164,6 +183,256 @@ fn c_d_no_lightweight_substitute_job() {
     assert!(
         job_block(&y, "platform-check").is_empty(),
         "C-d FAIL 轻量 platform-check job 又回来了 —— 应以完整构建替代"
+    );
+}
+
+/// 抽取某个步骤（`      - name: X`）的文本块，到下一个步骤名或文件尾结束。
+fn step_block(yaml: &str, name: &str) -> String {
+    let mut out: Vec<&str> = Vec::new();
+    let mut hit = false;
+    for l in yaml.lines() {
+        let t = l.trim_start();
+        if let Some(rest) = t.strip_prefix("- name:") {
+            if hit {
+                break;
+            }
+            if rest.trim() == name {
+                hit = true;
+            }
+        }
+        if hit {
+            out.push(l);
+        }
+    }
+    out.join("\n")
+}
+
+/// 「未配置私钥就不阻断」是否真被执行：只在 key 缺失分支里把空变量从环境撤掉才算。
+/// 判据只看该分支体内的代码行，注释与 echo 里的承诺不算。
+fn clears_empty_signing_env(step: &str) -> bool {
+    let i = match step.find("-z \"${TAURI_SIGNING_PRIVATE_KEY}\"") {
+        Some(i) => i,
+        None => return false,
+    };
+    let tail = &step[i..];
+    let branch = match tail.find("\n          fi") {
+        Some(e) => &tail[..e],
+        None => tail,
+    };
+    branch.contains("unset TAURI_SIGNING_PRIVATE_KEY")
+}
+
+/// 缺 .sig 的判罚是否随 ref 变化：必须同时出现开关与 tag 判据，写死一边都不算。
+fn sig_strictness_is_tag_gated(step: &str) -> bool {
+    step.contains("--require-sig") && step.contains("refs/tags/v")
+}
+
+/// 组装器里「缺 .sig 就退出」那段是否受开关控制（无条件 exit 1 = 无密钥构建永红）。
+fn assembler_failure_is_conditional(src: &str) -> bool {
+    let i = match src.find("const missing = entries.filter") {
+        Some(i) => i,
+        None => return false,
+    };
+    let block = match src[i..].find("\n}") {
+        Some(e) => &src[i..i + e],
+        None => &src[i..],
+    };
+    block.contains("require-sig") && block.contains("process.exit(1)")
+}
+
+/// 布尔开关解析：flag 后面跟另一个 flag 或到末尾时不得被当成值吞掉。
+fn parse_args_handles_bool_flags(src: &str) -> bool {
+    let i = match src.find("function parseArgs") {
+        Some(i) => i,
+        None => return false,
+    };
+    let body = match src[i..].find("\n}") {
+        Some(e) => &src[i..i + e],
+        None => &src[i..],
+    };
+    body.contains("startsWith('--')") && body.contains("= true")
+}
+
+/// 无私钥时是否真的关掉 updater 产物：配置内置了 pubkey，Tauri 见「有公钥无私钥」即失败
+/// （A public key has been found, but no private key），只 unset 变量并不足以让构建通过。
+fn disables_updater_artifacts_without_key(step: &str) -> bool {
+    let i = match step.find("-z \"${TAURI_SIGNING_PRIVATE_KEY}\"") {
+        Some(i) => i,
+        None => return false,
+    };
+    let tail = &step[i..];
+    let branch = match tail.find("\n          fi") {
+        Some(e) => &tail[..e],
+        None => tail,
+    };
+    branch.contains("\"createUpdaterArtifacts\":false")
+        && branch.contains("--config")
+        && step.contains("${UPDATER_OFF}")
+}
+
+/// 备用形态只能在主形态零命中时启用（否则 tag 发布会把 .dmg 当更新产物打进店内）。
+fn assembler_fallback_is_last_resort(src: &str) -> bool {
+    let primary = src.find("ARTIFACT_PATTERNS[installer]");
+    let guard = src.find("if (!hits.length && FALLBACK_PATTERNS[installer])");
+    match (primary, guard) {
+        (Some(p), Some(g)) => p < g && src.contains("FALLBACK_PATTERNS"),
+        _ => false,
+    }
+}
+
+#[test]
+fn c_f_unsigned_build_does_not_break_the_pipeline() {
+    let y = strip_yaml_comments(&ci());
+    let bundle = step_block(&y, "Build + bundle (Tauri)");
+    assert!(
+        !bundle.is_empty(),
+        "C-f FAIL 未找到打包步骤 —— 门禁空转"
+    );
+    assert!(
+        clears_empty_signing_env(&bundle),
+        "C-f FAIL 未配置私钥时没有撤掉空的签名环境变量 —— Tauri CLI 会把空串当非法私钥而失败，\
+         注释里承诺的「非 tag 构建不阻断」并不成立"
+    );
+    assert!(
+        disables_updater_artifacts_without_key(&bundle),
+        "C-f FAIL 无私钥时没有关掉 updater 产物 —— 配置内置了 pubkey，Tauri 会以\
+         「有公钥无私钥」直接失败，构建矩阵仍不可用"
+    );
+
+    let assemble = step_block(&y, "组装 npm 包（更新产物 + 签名）");
+    assert!(
+        sig_strictness_is_tag_gated(&assemble),
+        "C-f FAIL 组装步骤对 .sig 的强校验没有按 tag 分流 —— 无密钥的验证构建会必然变红"
+    );
+
+    let accept = step_block(&y, "产物验收（Tauri 同源验签 + 清单契约）");
+    assert!(
+        !accept.is_empty(),
+        "C-f FAIL 未找到产物验收步骤 —— 门禁空转"
+    );
+    let has_tag_if = accept
+        .lines()
+        .any(|l| l.trim_start().starts_with("if:") && l.contains("refs/tags/v"));
+    assert!(
+        has_tag_if,
+        "C-f FAIL 验签验收步骤无条件执行 —— 没有 .sig 时它必然红，发布专用校验应在 tag 上才跑"
+    );
+
+    // 反向：C-c 的「build job 不得有 job 级 if」与上面的步骤级 if 不冲突。
+    let build = job_block(&y, "build");
+    assert!(
+        build.contains("产物验收"),
+        "C-f FAIL 验收步骤已不在 build job 内 —— 位置变了需同步本门禁"
+    );
+    assert!(
+        !build
+            .lines()
+            .any(|l| l.starts_with("    if:") && !l.starts_with("     ")),
+        "C-f FAIL 为了跳过验签给 build job 加了 job 级 if —— 那会让日常 push 跳过完整构建"
+    );
+}
+
+#[test]
+fn c_g_assembler_keeps_release_strictness() {
+    let p = manifest_dir()
+        .join("..")
+        .join("shell-release")
+        .join("assemble-shell-pkg.js");
+    let src = fs::read_to_string(&p).unwrap_or_else(|e| panic!("读取 {:?} 失败: {}", p, e));
+    assert!(
+        assembler_failure_is_conditional(&src),
+        "C-g FAIL 缺 .sig 的退出没有挂在 require-sig 上 —— 要么无密钥构建全红，要么发布不再强校验"
+    );
+    assert!(
+        src.contains("process.exit(1)"),
+        "C-g FAIL 组装器不再对缺签名早失败 —— tag 发布必须保留强校验"
+    );
+    assert!(
+        parse_args_handles_bool_flags(&src),
+        "C-g FAIL parseArgs 不识别布尔开关 —— 末尾的 --require-sig 会取到 undefined"
+    );
+    assert!(
+        assembler_fallback_is_last_resort(&src),
+        "C-g FAIL 备用形态没有「主形态零命中」的前提 —— tag 发布可能把 .dmg 当成更新产物打进店内"
+    );
+}
+
+#[test]
+fn c_h_new_judges_are_not_vacuous() {
+    // 旧形态：只 echo 警告，没有撤掉空变量。
+    let old_bundle = "        run: |\n          if [ -z \"${TAURI_SIGNING_PRIVATE_KEY}\" ]; then\n            echo \"::warning::未配置 —— 不阻断\"\n          fi\n          npx --yes @tauri-apps/cli@2 build\n";
+    assert!(
+        !clears_empty_signing_env(old_bundle),
+        "C-h FAIL 判据无法识别「只承诺不撤变量」的旧形态 —— C-f 空转"
+    );
+    let new_bundle = "        run: |\n          if [ -z \"${TAURI_SIGNING_PRIVATE_KEY}\" ]; then\n            echo \"::warning::未配置 —— 不阻断\"\n            unset TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD\n          fi\n          npx --yes @tauri-apps/cli@2 build\n";
+    assert!(
+        clears_empty_signing_env(new_bundle),
+        "C-h FAIL 修复形态被误判 —— 判据过严会挡住正确的改动"
+    );
+    // 把 unset 写在 fi 之外（key 存在分支）不算修好。
+    let misplaced = "        run: |\n          if [ -z \"${TAURI_SIGNING_PRIVATE_KEY}\" ]; then\n            echo \"::warning::未配置\"\n          fi\n          unset TAURI_SIGNING_PRIVATE_KEY\n";
+    assert!(
+        !clears_empty_signing_env(misplaced),
+        "C-h FAIL unset 在 key 缺失分支之外也被判为通过 —— 会把有密钥的 tag 构建判错"
+    );
+
+    assert!(
+        !sig_strictness_is_tag_gated("node assemble.js --platform p --require-sig"),
+        "C-h FAIL 无条件 --require-sig 被误判为已按 tag 分流"
+    );
+    // 只 unset 不关 updater 产物（实测会报 A public key has been found, but no private key）
+    let unset_only = "        run: |\n          UPDATER_OFF=\"\"\n          if [ -z \"${TAURI_SIGNING_PRIVATE_KEY}\" ]; then\n            unset TAURI_SIGNING_PRIVATE_KEY\n          fi\n          npx --yes @tauri-apps/cli@2 build ${UPDATER_OFF}\n";
+    assert!(
+        !disables_updater_artifacts_without_key(unset_only),
+        "C-h FAIL 判据无法识别「撤了变量但没关 updater 产物」的半修形态"
+    );
+    let off_written_but_unused = "        run: |\n          if [ -z \"${TAURI_SIGNING_PRIVATE_KEY}\" ]; then\n            printf '%s' '{\"bundle\":{\"createUpdaterArtifacts\":false}}' > t.json\n            UPDATER_OFF=\"--config t.json\"\n          fi\n          npx --yes @tauri-apps/cli@2 build\n";
+    assert!(
+        !disables_updater_artifacts_without_key(off_written_but_unused),
+        "C-h FAIL 写好了 override 却没传给 build 命令也被判为通过"
+    );
+    let off_wired = "        run: |\n          UPDATER_OFF=\"\"\n          if [ -z \"${TAURI_SIGNING_PRIVATE_KEY}\" ]; then\n            printf '%s' '{\"bundle\":{\"createUpdaterArtifacts\":false}}' > t.json\n            UPDATER_OFF=\"--config t.json\"\n          fi\n          npx --yes @tauri-apps/cli@2 build ${UPDATER_OFF}\n";
+    assert!(
+        disables_updater_artifacts_without_key(off_wired),
+        "C-h FAIL 正确形态被误判 —— 判据过严会挡住正确的改动"
+    );
+    // 备用形态若无前提即启用，tag 发布会拿 .dmg 当更新产物
+    assert!(
+        !assembler_fallback_is_last_resort("  let hits = by(FALLBACK_PATTERNS[installer]);\n"),
+        "C-h FAIL 判据无法识别无条件使用备用形态的旧写法"
+    );
+    assert!(
+        !assembler_fallback_is_last_resort("  const hits = by(ARTIFACT_PATTERNS[installer]);\n"),
+        "C-h FAIL 没有备用形态时判据被误判为通过"
+    );
+    assert!(
+        !sig_strictness_is_tag_gated("node assemble.js --platform p"),
+        "C-h FAIL 完全没有签名开关时被误判为通过"
+    );
+    assert!(
+        sig_strictness_is_tag_gated("REQ=\"--require-sig\"; [[ \"${GITHUB_REF}\" == refs/tags/v* ]] || REQ=\"\"\nnode assemble.js ${REQ}"),
+        "C-h FAIL 正确的 tag 分流形态被误判"
+    );
+
+    let old_asm = "  const missing = entries.filter((e) => !e.sig);\n  if (missing.length) {\n    console.error('缺 .sig');\n    process.exit(1);\n  }\n}\n";
+    assert!(
+        !assembler_failure_is_conditional(old_asm),
+        "C-h FAIL 判据无法识别无条件早失败的旧形态"
+    );
+    let old_parse = "function parseArgs(argv) {\n  const o = {};\n  for (let i = 2; i < argv.length; i += 1) {\n    const a = argv[i];\n    if (a.startsWith('--')) { o[a.slice(2)] = argv[i + 1]; i += 1; }\n  }\n  return o;\n}\n";
+    assert!(
+        !parse_args_handles_bool_flags(old_parse),
+        "C-h FAIL 判据无法识别吞掉布尔开关的旧 parseArgs"
+    );
+
+    // step_block 定位能力（否则 C-f 空转）
+    let sample = "steps:\n      - name: A\n        run: one\n      - name: B\n        run: two\n      - name: A again\n";
+    let b = step_block(sample, "B");
+    assert!(
+        b.contains("run: two") && !b.contains("run: one") && !b.contains("run: A again"),
+        "C-h FAIL step_block 定位错误，C-f 会空转：{:?}",
+        b
     );
 }
 

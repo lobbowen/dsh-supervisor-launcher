@@ -1,10 +1,104 @@
 # Changelog（桌面壳）
 
-本文件记录桌面壳（`dsh-supervisor-gui`，公开仓 `wasi7mglns/dsh-supervisor-launcher`）的重要变更。
+本文件记录桌面壳（`dsh-supervisor-gui`，公开仓 `lobbowen/dsh-supervisor-launcher`）的重要变更。
 
 ## [未发布]
 
-（下一版本待记）
+### 修复：装了 npm 却看不见 npm —— 工具链版本贯穿契约 / 事件 / 文案
+
+用户实测：环境检测与安装全流程走通后，界面上没有任何 npm 的痕迹。npm 确实被安装并校验过
+（1.1.10 起的工具链契约），但它的**版本**在源头就没有落脚点：`runtime.json` 只记 npm 路径，
+安装管线返回 `(node_path, version)` 元组，于是完成事件 `install_done { kind: "npm", version }`
+只能填 node 的版本号 —— 引导页念出的「npm 已就绪（v22.x）」从来不是 npm 的版本。
+
+- 运行期契约（schema 2）新增 `npm.version`：只在真实执行过 `npm --version` 时写入，未执行为
+  null，`derive`（只解析路径，服务启动路径）与 `derive_usable`（执行过）因此可区分。
+  写与读改为共用同一处键映射（`meta` / `from_meta`），加字段不再会漏一侧。
+- 安装管线（`run_install` / `node::finalize_install` / `reinstall_for_npm`）返回**契约本身**，
+  不再返回字段子集。顺带修三处同源缺陷：重装后仍上报重装前的 node 路径、node 版本可能以空串
+  写进契约、一次收尾把 npm 探测执行两遍。
+- `install_done` 按 kind 各发一条，version 各归各的；npm 版本未回读时发 null，怎么念由 UI 决定。
+- 引导层把 `NS.nodeVer` / `NS.npmVer` 两个散装字段收成 `NS.toolchain` 快照：唯一写入点
+  `applyToolchain`、唯一读取口 `readEnv`（三个轮询点各写一遍的 15s 超时预算与文案一并收口）。
+  「环境就绪 · Node x · npm y」与诊断串同时含 node 与 npm，缺失如实说「版本未回读」。
+- 门禁：新增 G-7（按 `handle.emit(...)` 调用切块对账 kind 与 version 归属）、G-8（快照只有一个
+  所有者与一个读取口），各带旧形态反向夹具；G-2 改为只按**函数体的代码行**取证，注释不再能
+  让门禁转绿。SSOT `docs/ENV-TOOLCHAIN-INSTALL-STANDARD.md` §1/§2.1/§2.2/§2.4/§3.1/§3.2/§5 同步
+  （新增不变量 T-1b/T-1c/T-7b/T-8/T-9），并纠正两处错误引导：`npmOk === false` 应为 `!== true`、
+  `node_status` 契约漏记 `npmVersion`。
+- 删除 `10-ui.js` 中重复声明的 `wait` / `hideFail`（合并残留；行为不变，但会让人读错出口）。
+
+### 修复：产线承诺与执行不符 —— 无签名密钥的构建被误判为代码红
+
+`build.yml` 的打包步骤注释写着「未配置 secret 时为空，不阻断」，但这句话没有实现：secret 缺失时
+Actions 把变量展开成空字符串继续导出，Tauri v2 CLI 拿空串去解码并报
+`failed to decode secret key: ... Missing comment in secret key`；紧接着组装步骤对缺 `.sig` 无条件
+`exit 1`，验签验收步骤也无条件跑。结果是**任何没有签名密钥的构建必然全红**（mac/win/linux 四平台
+一起红），而这红与当次代码改动无关，等价于完整构建矩阵不可用。
+
+- 打包步骤：key 缺失分支内 `unset TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD`，
+  并在同一分支关掉 updater 产物（`--config` 覆盖 `bundle.createUpdaterArtifacts=false`）。
+  两步都是必需的：配置里内置了 pubkey，Tauri 见「有公钥无私钥」会直接失败
+  （`A public key has been found, but no private key`），只撤变量仍红。
+  tag 构建仍先拦后报（缺密钥不可发布）。
+- 组装步骤：`--require-sig` 仅在 `refs/tags/v*` 上传入；`assemble-shell-pkg.js` 的缺 `.sig` 早失败
+  挂到该开关上（发布路径的强校验一字不放宽），并修 `parseArgs` 使末尾布尔开关不被当成取值
+  （旧实现会让 `--require-sig` 得到 `undefined` 且其后参数整体错位）。
+  macOS 在关闭 updater 产物时不产 `.app.tar.gz`，组装器加「主形态零命中才用 `.dmg`」的备用形态；
+  tag 构建主形态必命中，产物集合与既往一致。
+- 验签验收步骤加步骤级 tag `if:`；**不给** `build` job 加 job 级 `if:`（那会违反 C-c/C-d）。
+- 门禁：新增 C-f（无密钥构建不阻断的三处语义）、C-g（组装器保留发布强校验 + 布尔开关解析）、
+  C-h（三条判据的旧形态反向夹具），全部为纯函数判据。
+- 文档：`docs/UPDATER-SIGNING-KEY.md` 纠正把同一报错归因成「漏填密码」的错误引导，并如实登记
+  当前无私钥、无 GitHub Release、公钥指纹可核而私钥指纹不可核的实测状态。
+
+## [1.1.11]（2026-09-18）
+
+### 修复：跨平台权限模型重写 —— Node 用户级安装（零权限）
+
+用户实测 Windows：msiexec 退出码 1619（安装包无法打开）。这不是 UAC 取消，而是系统级
+安装本身的缺陷：UAC 提升到管理员账户后常读不到当前用户 profile 下的 .msi；且
+canonicalize() 在 Windows 返回 \\?\ 前缀路径，msiexec 不认。macOS .pkg 需要系统授权且无
+arm64 pkg；Linux /usr/local 需要 pkexec/sudo（容器/WSL/SSH 常不可用）且 tar -xJf 依赖 xz。
+
+- **三平台统一为用户级安装（零权限）**：制品 Windows win-{arch}.zip / macOS
+  darwin-{arch}.tar.gz / Linux linux-{arch}.tar.gz，解包到 <状态根>/node，经
+  platform::commit_user_node 原子落定；node_bin_after_install 与 node_candidate_paths
+  指向该落点；运行期契约记录绝对路径，服务管理器无需 PATH 里有 node。
+- 提权从此只与「壳自更新（替换安装程序）」有关，由各平台自身通道完成。
+
+## [1.1.10]（2026-09-18）
+
+### 修复：环境工具链标准化（Node 安装 / npm 可用性 / 镜像网络）
+
+- **全部 Node 镜像均不可用（用户实测）**：ureq 默认既不读环境变量也不读系统代理
+  → 只有代理的机器上全部镜像直连失败。新增进程级 mirror::agent：环境变量
+  （ALL_PROXY/HTTPS_PROXY/HTTP_PROXY）优先，缺失时回退**系统代理**
+  （Windows WinINET 注册表 / macOS scutil --proxy）；镜像探测与 Node 下载共用同一 agent。
+- probe_all 过去把失败原因丢弃（只报「不可达」）→ 新增 Probe.error，逐源带出
+  HTTP/DNS/TLS/代理/读体原因；PROBE_TIMEOUT 8s→20s（index.json 单个 1.5~2MB）。
+- **npm 只查文件存在、从不执行**：新增 runtime_contract::probe_npm_usable，真实执行
+  npm --version（Windows .cmd 经 cmd /C）；node_status.npmOk 改三态
+  （true/false/null=未知），新增 npmVersion；前端只有 npmOk === true 才放行。
+- 删除 record_runtime_meta：与 runtime_contract::write 双写同一 runtime.json，
+  覆盖掉 npmPath/npmArgs/schema。
+- run_install：安装后先作废探测缓存，并校验**安装器返回的路径**（而非可能记录旧 Node 的
+  PATH）→ 修「安装后版本不一致」永不收敛；断言最低门槛。Windows install_node 对 /i
+  路径加引号、用 -PassThru 取真实 ExitCode、核对 node.exe 是否就位；macOS 同补结果核对。
+
+## [1.1.9]（2026-09-18）
+
+### 修复
+
+- **退出管家后桌面壳被自动重新拉起（严重，Windows 主根因）**：`platform/windows.rs stop()`
+  对 `DSH-Supervisor-Watchdog` 计划任务改用 `schtasks /Delete /F` —— 原 `/End` 只结束本次运行实例、
+  不禁用 `/SC MINUTE /MO 5` 计划，导致 ≤5 分钟后 `watchdog.ps1` 把守卫与桌面壳拉回；
+  下次 `ensure_defined` 幂等重建看护任务。
+- `domain/guardctl.rs ensure_guard`：在「守卫已在运行」的提前返回分支补一次 Windows-only 幂等
+  `ensure_defined`（防登录任务先拉起守卫 → 看护任务永不重建 → 本会话 GUI 崩溃自愈失效）。
+- `guardctl::shutdown_all`：停止守卫失败除 stderr 外**落盘 `shell.log`**（GUI 下 stderr 常丢）。
+
+详见 `docs/audit/2026-09-18/_s3-exit-relaunch.md`（含跨仓完整清单）。
 
 ## [1.1.8]（2026-09-18）
 

@@ -11,7 +11,7 @@
     }
     NS.hideFail();
     NS.hideUpdChoice();
-    NS.cur = -1; NS.nodeVer = null; NS.coreVersion = null; NS.lastError = null; NS.updPlan = null;
+    NS.cur = -1; NS.toolchain = NS.emptyToolchain(); NS.coreVersion = null; NS.lastError = null; NS.updPlan = null;
     // 诊断状态一并重置：重试后不应残留上一次的追踪（否则诊断会误导排障）。
     // lastMirror 不重置（镜像选择结果与本次重试无关，保留可对比）。
     NS.lastEnv = null; NS.envStuck = null;

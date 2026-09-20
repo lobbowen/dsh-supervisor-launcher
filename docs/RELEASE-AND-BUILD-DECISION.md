@@ -6,11 +6,17 @@
 
 > 本文是**壳仓**侧的发布规范。**跨仓时序与契约**的权威定义在内核仓
 > `release/README.md` §0（两仓构建决策）与 §0.2（跨仓发布时序）—— 本文与之保持一致，冲突时以内核仓为准。
-> 最近更新：2026-09-13。
+> 最近更新：2026-09-20。
+>
+> **仓库地址现状**：两仓现均在账号 `lobbowen` 下（内核 `lobbowen/dsh-supervisor-core`、
+> 壳 `lobbowen/dsh-supervisor-launcher`）。旧账号仓 `advgyxqamf/dsh-supervisor-core` 与
+> `wasi7mglns/dsh-supervisor-launcher` 仍可公开访问但已停更（最后 push 2026-09-18），
+> 不要向它们推送或以其内容为准。**注意**：`main` 分支保护未在 `lobbowen` 两仓恢复，
+> 本文给出的 protection 调用是「如何恢复」的步骤，不是现状描述。
 
 ## 1. 为什么是两个仓（**必须分开，不是历史包袱**）
 
-| | 内核仓 `advgyxqamf/dsh-supervisor-core`（公开） | 壳仓 `wasi7mglns/dsh-supervisor-launcher`（公开，本仓） |
+| | 内核仓 `lobbowen/dsh-supervisor-core`（公开） | 壳仓 `lobbowen/dsh-supervisor-launcher`（公开，本仓） |
 |---|---|---|
 | 职责 | 产品逻辑 + 守护：API/路由/relay/实例/插件/端口/更新编排 | **仅**桌面体验：引导页、托盘、安装程序、原生能力 |
 | 技术栈 | JS（CommonJS），运行时依赖 **0**、原生扩展 **0** | Rust（Tauri 2）+ 纯 HTML/CSS/JS 引导页（无构建步骤）|
@@ -141,7 +147,7 @@ curl -X PUT \
   -H "Authorization: Bearer ADMIN_TOKEN" \
   -H "Accept: application/vnd.github+json" \
   -d @protection.json \
-  https://api.github.com/repos/wasi7mglns/dsh-supervisor-launcher/branches/main/protection
+  https://api.github.com/repos/lobbowen/dsh-supervisor-launcher/branches/main/protection
 ```
 
 > **context 字符串必须与 job 名逐字一致**（含括号内矩阵参数）。

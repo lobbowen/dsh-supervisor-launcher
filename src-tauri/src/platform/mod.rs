@@ -46,24 +46,220 @@ pub fn user_name() -> String {
         .unwrap_or_else(|_| "user".into())
 }
 
+/// 系统代理 URL（环境变量之外的**第二来源**）。
+///
+/// 为什么需要：Windows 用户常用 Clash / v2ray 的**系统代理**（只写 WinINET 注册表，
+///   不设 HTTP_PROXY）；macOS 的「网络 → 代理」同理只写 SystemConfiguration。
+///   ureq 不读这些位置，于是出现「浏览器能上网，壳却全部镜像不可用」。
+/// 返回 http://host:port；无系统代理返回 None。
+pub fn system_proxy() -> Option<String> {
+    #[cfg(target_os = "windows")]
+    let v = windows_system_proxy();
+    #[cfg(target_os = "macos")]
+    let v = macos_system_proxy();
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    let v: Option<String> = None;
+    v
+}
+
+#[cfg(target_os = "windows")]
+fn windows_system_proxy() -> Option<String> {
+    use std::process::Command;
+    let query = |name: &str| -> Option<String> {
+        // 必须经 bounded::run（B32：任何外部命令不得裸 .output()/status() 无界阻塞）。
+        let mut cmd = Command::new("reg");
+        cmd.args([
+            "query",
+            "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Internet Settings",
+            "/v",
+            name,
+        ]);
+        let out = crate::bounded::run(&mut cmd, SVC_QUICK).ok()?;
+        let line = out.stdout.lines().find(|l| l.contains(name))?;
+        line.split_whitespace().last().map(|x| x.to_string())
+    };
+    let enabled = query("ProxyEnable").map(|v| v.ends_with('1')).unwrap_or(false);
+    if !enabled {
+        return None;
+    }
+    let server = query("ProxyServer")?;
+    // ProxyServer 可能是 "host:port"，也可能是 "http=host:port;https=host:port"。
+    let hostport = if server.contains('=') {
+        server
+            .split(';')
+            .find_map(|p| p.split_once('='))
+            .filter(|(k, _)| k.eq_ignore_ascii_case("https") || k.eq_ignore_ascii_case("http"))
+            .map(|(_, v)| v.to_string())?
+    } else {
+        server
+    };
+    if hostport.trim().is_empty() {
+        return None;
+    }
+    Some(if hostport.contains("://") { hostport } else { format!("http://{}", hostport) })
+}
+
+#[cfg(target_os = "macos")]
+fn macos_system_proxy() -> Option<String> {
+    use std::process::Command;
+    let mut cmd = Command::new("scutil");
+    cmd.arg("--proxy");
+    let out = crate::bounded::run(&mut cmd, SVC_QUICK).ok()?;
+    let s = out.stdout;
+    let field = |k: &str| -> Option<String> {
+        s.lines()
+            .find(|l| l.trim_start().starts_with(k))
+            .and_then(|l| l.split(':').nth(1))
+            .map(|v| v.trim().to_string())
+    };
+    for (enable, host, port) in [
+        ("HTTPSEnable", "HTTPSProxy", "HTTPSPort"),
+        ("HTTPEnable", "HTTPProxy", "HTTPPort"),
+    ] {
+        if field(enable).as_deref() == Some("1") {
+            if let Some(h) = field(host) {
+                let p = field(port).unwrap_or_else(|| "80".into());
+                return Some(format!("http://{}:{}", h, p));
+            }
+        }
+    }
+    None
+}
+
+/// 用户级 Node 安装的**原子落定**（三平台共用）。
+///
+/// 约定：调用方先把官方归档解到 `staging`。两种布局都由本函数统一处理：
+///   · Unix：`tar --strip-components=1` → staging 下直接是 bin/lib/...；
+///   · Windows：`Expand-Archive` → staging 下多一层 `node-vX-win-.../`。
+/// 落定后返回 node 可执行路径。失败不留下半装状态（root 只在确认可执行后才替换）。
+pub fn commit_user_node(
+    staging: &std::path::Path,
+    root: &std::path::Path,
+    node_rel: &[&str],
+) -> Result<std::path::PathBuf, String> {
+    let probe = |b: &std::path::Path| -> std::path::PathBuf {
+        node_rel.iter().fold(b.to_path_buf(), |p, s| p.join(*s))
+    };
+    let mut base = staging.to_path_buf();
+    if !probe(&base).is_file() {
+        // Windows：压缩包内多一层版本目录 → 若 staging 下只有一个目录且其中含 node，以此为准。
+        if let Ok(entries) = std::fs::read_dir(&base) {
+            let dirs: Vec<std::path::PathBuf> = entries
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| p.is_dir())
+                .collect();
+            if dirs.len() == 1 {
+                base = dirs[0].clone();
+            }
+        }
+    }
+    let found = probe(&base);
+    if !found.is_file() {
+        return Err(format!("解包后未找到 Node 可执行（{}）", found.display()));
+    }
+    if let Some(parent) = root.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let _ = std::fs::remove_dir_all(root);
+    if let Err(e) = std::fs::rename(&base, root) {
+        return Err(format!("落定 {} 失败: {}", root.display(), e));
+    }
+    let _ = std::fs::remove_dir_all(staging); // base != staging 时清掉剩余空壳
+    let installed = probe(root);
+    if !installed.is_file() {
+        return Err(format!("{} 未就位", installed.display()));
+    }
+    Ok(installed)
+}
+
+/// 以当前平台的**正确方式**执行版本探针（`<prog> [args...] --version`），有界返回首个非空行。
+///
+/// 为什么必须在平台层：Windows 上的 .cmd / .bat（如官方 npm.cmd）**不能**被
+///   CreateProcess 直接执行，必须经 `cmd /C`。这是平台知识，按门禁 G1 只能出现在本层。
+/// 无输出 / 非零退出 / 超时一律 None（视为不可用）—— 「文件存在」不等于「可执行」。
+pub fn run_version_probe(prog: &std::path::Path, args: &[String]) -> Option<String> {
+    use std::process::{Command, Stdio};
+    let mut cmd;
+    #[cfg(target_os = "windows")]
+    {
+        let needs_shell = prog
+            .extension()
+            .map(|e| {
+                let e = e.to_string_lossy().to_ascii_lowercase();
+                e == "cmd" || e == "bat"
+            })
+            .unwrap_or(false);
+        if needs_shell {
+            let mut c = Command::new("cmd");
+            c.arg("/C").arg(prog);
+            for a in args { c.arg(a); }
+            c.arg("--version");
+            cmd = c;
+        } else {
+            let mut c = Command::new(prog);
+            for a in args { c.arg(a); }
+            c.arg("--version");
+            cmd = c;
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let mut c = Command::new(prog);
+        for a in args { c.arg(a); }
+        c.arg("--version");
+        cmd = c;
+    }
+    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
+    crate::bounded::prepare(&mut cmd);
+    let mut child = cmd.spawn().ok()?;
+    let started = std::time::Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(st)) => break st,
+            Ok(None) => {
+                if started.elapsed() >= std::time::Duration::from_secs(8) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(40));
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    };
+    if !status.success() { return None; }
+    let mut out = String::new();
+    {
+        use std::io::Read;
+        if let Some(mut s) = child.stdout.take() {
+            let _ = s.read_to_string(&mut out);
+        }
+    }
+    out.lines().map(|l| l.trim().to_string()).find(|l| !l.is_empty())
+}
+
 /// 平台能力声明（供 `--platform-matrix` 自检与诊断，**不参与业务逻辑**）。
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Capabilities {
     pub platform: &'static str,
     /// 是否有**原生**服务管理器（systemd / launchd / 计划任务）。
     pub native_service: bool,
-    /// 是否有提权通道（Node 安装需要）。
+    /// 是否有提权通道（**仅壳自更新/可选系统安装**需要；Node 安装已用户级、零权限）。
     pub privilege_channel: bool,
-    /// Node 制品形态（`tar.xz` / `pkg` / `msi`）。
+    /// Node 制品形态（`zip` / `tar.gz`，均为用户级零权限归档）。
     pub node_artifact: &'static str,
 }
 
 /// Node 官方制品的描述（**平台层解析**，业务层只消费）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NodeArtifact {
-    /// `index.json` 的 `files[]` 标签（如 `linux-x64` / `osx-x64-pkg` / `win-x64-msi`）。
+    /// `index.json` 的 `files[]` 标签（如 `linux-x64` / `osx-arm64-tar` / `win-x64-zip`）。
     pub tag: &'static str,
-    /// 发布文件名（含版本号），如 `node-v22.12.0-linux-x64.tar.xz`。
+    /// 发布文件名（含版本号），如 `node-v22.12.0-linux-x64.tar.gz`。
     pub file: String,
 }
 
@@ -270,14 +466,16 @@ pub trait Platform: Send + Sync {
         home_dir().join(".local").join("state").join("dsh-supervisor")
     }
 
-    /// **安装 Node**（含平台提权通道）。
+    /// **安装 Node**（**用户级，零权限**；2026-09-18 权限模型重写）。
     ///
-    /// · Linux   `pkexec sh -c "tar -xJf … -C /usr/local"`
-    /// · macOS   `osascript` + `installer -pkg … -target /`（带管理员授权）
-    /// · Windows `powershell Start-Process msiexec … -Verb RunAs -Wait`
+    /// 三平台统一：把官方归档解到 `<状态根>/node`，再原子替换。
+    /// · Linux/macOS `tar -xzf <archive> -C <staging> --strip-components=1`
+    /// · Windows     `powershell Expand-Archive`
     ///
-    /// 这是**壳独有**的能力：装内核之前必须先把运行环境装好（引导顺序），
-    ///   而提权需要人在场 —— 内核（无头服务）永远做不到这件事。
+    /// 为什么不再提权：系统级安装（MSI/pkg//usr/local）需要 UAC/pkexec/sudo，
+    ///   而 UAC 提升到管理员账户后常读不到当前用户 profile 下的安装包（msiexec 1619）、
+    ///   容器/WSL/SSH 常无可用 polkit agent 或 sudo。用户级解包在**任何**权限下都能成功。
+    /// 提权只与**壳自更新**（替换安装程序）有关，由各平台自身通道完成。
     fn install_node(&self, file: &std::path::Path) -> Result<std::path::PathBuf, String>;
 
     /// 是否存在可用的**提权通道**（用于「不可自更新」的提前判定）。

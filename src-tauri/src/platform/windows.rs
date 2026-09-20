@@ -45,7 +45,7 @@ fn ps_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "''"))
 }
 
-/// 安装命令超时（15 分钟：下载 + msiexec + UAC 授权）。
+/// 归档解包超时（15 分钟；下载已完成，余量给解包与慢盘）。
 const INSTALL_CMD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
 pub struct Impl;
@@ -70,8 +70,8 @@ impl Platform for Impl {
         Capabilities {
             platform: NAME,
             native_service: true, // 计划任务
-            privilege_channel: true, // UAC / msiexec
-            node_artifact: "msi",
+            privilege_channel: true, // 仅壳自更新（替换安装包）用；Node 安装已改为用户级、零权限
+            node_artifact: "zip",
         }
     }
 
@@ -84,13 +84,19 @@ impl Platform for Impl {
     }
 
     fn node_artifact(&self, version: &str) -> Option<super::NodeArtifact> {
-        // 官方**没有** win-arm64-msi（files[] 只有 win-arm64-7z / win-arm64-zip）。
-        // 故 arm64 Windows 也取 x64 msi —— 依赖系统的 x64 模拟执行。
-        // 这是**有意为之的折中**（原生 arm64 需改用 zip 解包，当前未实现），
-        // 并在本方法的文档与 --platform-matrix 输出中如实记录。
+        // 用户级安装：官方对 x64/arm64 都提供 zip，解包到 <状态根>/node，**无需 UAC**
+        //   （2026-09-18 权限模型重写）。原 MSI + UAC 路径在「提升到管理员账户」时
+        //   常读不到当前用户 profile 下的安装包 → msiexec 1619；zip 路径彻底消除该问题，
+        //   且 arm64 用**原生**制品（原实现只能退 x64 msi 靠模拟）。
+        let arch = match std::env::consts::ARCH {
+            "x86_64" => "x64",
+            "aarch64" => "arm64",
+            _ => return None,
+        };
+        let tag = if arch == "arm64" { "win-arm64-zip" } else { "win-x64-zip" };
         Some(super::NodeArtifact {
-            tag: "win-x64-msi",
-            file: format!("node-v{}-x64.msi", version),
+            tag,
+            file: format!("node-v{}-win-{}.zip", version, arch),
         })
     }
 
@@ -99,7 +105,8 @@ impl Platform for Impl {
         //   真实路径随**系统盘符**与**系统语言**变化（中文系统是本地化目录名），
         //   也可能装在 Program Files (x86)。故一律经环境变量推导。
         let exe = "node.exe";
-        let mut v: Vec<PathBuf> = Vec::new();
+        // 用户级安装（<状态根>/node）**最先**：壳自己装的，优先于系统其它 Node。
+        let mut v: Vec<PathBuf> = vec![self.node_bin_after_install()];
         let env_dir = |var: &str, rest: &[&str]| -> Option<PathBuf> {
             std::env::var(var).ok().map(|base| {
                 let mut p = PathBuf::from(base);
@@ -147,9 +154,8 @@ impl Platform for Impl {
     }
 
     fn node_bin_after_install(&self) -> PathBuf {
-        std::env::var("ProgramFiles")
-            .map(|b| PathBuf::from(b).join("nodejs").join("node.exe"))
-            .unwrap_or_else(|_| PathBuf::from("C:\\Program Files\\nodejs\\node.exe"))
+        // 用户级安装落点（零权限）；不再指向 %ProgramFiles%\nodejs（那需要管理员）。
+        crate::env::node_install_root().join(self.node_exe_name())
     }
 
     fn is_usable_executable(&self, cand: &Path) -> bool {
@@ -167,24 +173,35 @@ impl Platform for Impl {
     }
 
     fn install_node(&self, file: &Path) -> Result<PathBuf, String> {
-        let abs = file.canonicalize().map_err(|e| e.to_string())?;
-        let esc = abs.display().to_string().replace('"', "");
+        // 用户级解包（zip），**完全不需要管理员/UAC**（2026-09-18 权限模型重写）。
+        //   原 MSI + Start-Process -Verb RunAs 的两个致命问题：
+        //     ① UAC 提升到管理员账户后常读不到当前用户 profile 下的 .msi → msiexec 1619；
+        //     ② canonicalize() 在 Windows 返回 \\?\ 前缀路径，msiexec 不认。
+        //   zip 解包两问题都不存在（本进程直接写自己的状态目录）。
+        let root = crate::env::node_install_root();
+        let staging = root.with_file_name("node.extract");
+        let _ = std::fs::remove_dir_all(&staging);
+        std::fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
+        // Expand-Archive 是 Windows 内置（PS 5+）；单引号内再转义单引号。
         let ps = format!(
-            "Start-Process -FilePath msiexec -ArgumentList '/i','{}','/qn','/norestart' -Verb RunAs -Wait",
-            esc
+            "Expand-Archive -LiteralPath '{}' -DestinationPath '{}' -Force",
+            file.display().to_string().replace('\'', "''"),
+            staging.display().to_string().replace('\'', "''")
         );
         let out = crate::bounded::run(
-            Command::new("powershell").args(["-NoProfile", "-Command", &ps]),
+            Command::new("powershell").args(["-NoProfile", "-NonInteractive", "-Command", &ps]),
             INSTALL_CMD_TIMEOUT,
         )
         .map_err(|e| format!("无法启动 powershell: {}", e))?;
         if !out.success {
-            return Err(format!(
-                "Windows 安装失败（用户取消 UAC 或 msiexec 报错）: {}",
-                out.stderr.trim()
-            ));
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(format!("解包 Node 归档失败: {}", out.stderr.trim()));
         }
-        Ok(self.node_bin_after_install())
+        let r = super::commit_user_node(&staging, &root, &[self.node_exe_name()]);
+        if r.is_err() {
+            let _ = std::fs::remove_dir_all(&staging);
+        }
+        r
     }
 
     fn core_extra_candidates(&self, names: &[&str], pkg: Option<&str>) -> Vec<PathBuf> {
@@ -259,7 +276,7 @@ impl Platform for Impl {
     }
 
     fn has_privilege_channel(&self) -> bool {
-        // Windows 的 UAC 提权**恒可用**（msiexec -Verb RunAs）。
+        // Windows 恒有 UAC 提权通道（**仅壳自更新用**；Node 安装已用户级、零权限）。
         true
     }
 
@@ -422,8 +439,14 @@ impl ServiceControl for Impl {
     fn stop(&self) -> Result<(), String> {
         // Windows：先停 watchdog 保活任务，再终止守卫进程（否则 watchdog 会立刻重新拉起）。
         // 全部有界：退出流程也要能在服务管理器无响应时走完，否则用户会觉得「程序关不掉」。
+        // ⚠ 2026-09-18 修（严重缺陷：退出管家后自动重启）：
+        //   原只用 /End —— 那只结束**本次运行实例**，而 DSH-Supervisor-Watchdog 是
+        //   /SC MINUTE /MO 5 的**计划**（watchdog.ps1 在无 dsh-supervisor* GUI 进程时
+        //   `Start-Process <壳>`，在守卫端口 down 时 `Start-Process <壳> --run-guard`）。
+        //   /End 不禁用计划 ⇒ ≤5 分钟后看护再次触发，把守卫与桌面壳一起拉回来。
+        //   故看护任务必须 **/Delete 计划**；下次启动 ensure_defined 会重建（幂等）。
         crate::bounded::run_lossy(
-            Command::new("schtasks").args(["/End", "/TN", WATCHDOG_TASK]),
+            Command::new("schtasks").args(["/Delete", "/TN", WATCHDOG_TASK, "/F"]),
             SVC_NORMAL,
         );
         crate::bounded::run_lossy(

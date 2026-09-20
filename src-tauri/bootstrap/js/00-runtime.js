@@ -13,7 +13,11 @@ window.__BOOT_NS = window.__BOOT_NS || {};
   NS.fatalShown = false;
   NS.cur = -1;
   NS.skipAction = null;
-  NS.nodeVer = null;
+  // 工具链快照（环境步骤的唯一事实源）：node 与 npm **成对**出现，形状只由 emptyToolchain 定义一次。
+  //   旧实现是两个散装字段（NS.nodeVer / NS.npmVer），一个声明并重置、另一个只被赋值：
+  //   新增收敛点时漏写一个不报错，只让「已就绪」文案少一半，并在重试时残留上一轮的值。
+  NS.emptyToolchain = function () { return { node: null, npm: null }; };
+  NS.toolchain = NS.emptyToolchain();
   NS.lastEnv = null;
   NS.envStuck = null;
   NS.warmMirror = null;

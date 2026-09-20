@@ -10,7 +10,9 @@ use std::path::{Path, PathBuf};
 const HTTP_TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
 fn http_get_bytes(url: &str) -> Result<Vec<u8>, String> {
-    let resp = ureq::get(url)
+    // 与镜像探测共用同一个 agent：代理与超时只有一处定义（见 mirror::agent）。
+    let resp = crate::mirror::agent()
+        .get(url)
         .timeout(HTTP_TOTAL_TIMEOUT)
         .call()
         .map_err(|e| format!("下载失败 {}: {}", url, e))?;
@@ -21,9 +23,9 @@ fn http_get_bytes(url: &str) -> Result<Vec<u8>, String> {
 
 /// 本平台在官方 index.json 中的平台标签（必须与 `platform_artifact()` 的产物语义一致）。
 ///
-/// 不变量：判定依据与下载对象必须是同一种制品。macOS 用通用 `.pkg`
-/// （标签 `osx-x64-pkg`，官方无 `osx-arm64-pkg`）；Linux 按架构 `linux-x64`/`linux-arm64`；
-/// Windows 只有 `win-x64-msi`（无 arm64 msi，arm64 上装 x64 msi 依赖系统模拟）。
+/// 不变量：判定依据与下载对象必须是同一种制品（2026-09-18 起统一为**用户级归档**）：
+///   macOS `osx-{arch}-tar` → `darwin-{arch}.tar.gz`；Linux `linux-{arch}` → `linux-{arch}.tar.gz`；
+///   Windows `win-{arch}-zip` → `win-{arch}.zip`。三平台均零权限解包到 <状态根>/node。
 /// 当前平台的 Node 官方制品（**标签 + 文件名同源**）。
 ///
 /// 实现已下沉到 platform 层（2026-09-11）：这是纯「平台 → 官方制品」映射
@@ -120,11 +122,18 @@ pub fn latest_lts() -> Result<LtsChoice, String> {
             Ok(LtsChoice { version, file, source, latency_ms, probes: diag })
         }
         None => {
-            let detail = diag
+            // 失败原因必须逐源带出（HTTP / DNS / TLS / 代理 / 读体），而不是一句「不可达」。
+            let detail = probes
                 .iter()
-                .map(|(s, ok, ms)| format!("{}:{}", s, if *ok { format!("{}ms", ms) } else { "不可达".into() }))
+                .map(|p| {
+                    if p.ok {
+                        format!("{}:{}ms", p.source, p.latency_ms)
+                    } else {
+                        format!("{}:失败({})", p.source, p.error.as_deref().unwrap_or("无详情"))
+                    }
+                })
                 .collect::<Vec<_>>()
-                .join(", ");
+                .join("; ");
             Err(format!("全部 Node 镜像均不可用或无可用 LTS（{}）", detail))
         }
     }
@@ -215,7 +224,7 @@ pub fn download_verified(
 /// 平台安装：官方产物 + 一次性系统授权弹窗。
 ///
 /// 实现已下沉到 platform 层（2026-09-11）：三平台的提权通道与安装器各不相同
-/// （pkexec+tar / osascript+installer / powershell+msiexec），这是平台知识。
+/// 实现已迁至 platform 层：三平台统一为**用户级归档解包（零权限）**，见 ENV-TOOLCHAIN-INSTALL-STANDARD §4bis。
 ///
 /// 这是**壳独有**的能力：装内核之前必须先把运行环境装好（引导顺序 R1），
 ///   而提权需要人在场 —— 内核（无头系统服务）永远做不到这件事。
@@ -271,17 +280,6 @@ mod tests {
     }
 }
 
-/// 安装后复探 npm，成功时把**运行期契约**落盘，返回可用的 npm 事实（SSOT §2.2 步骤 2）。
-///
-/// 为什么返回契约而不是路径：命中「包内 npm-cli.js」时，可用程序是 `node + args` 而非一个
-///   npm 可执行文件 —— 只有契约（`runtime_contract`）能表达这种二元组，消费者必须读它。
-/// 刻意不区分「命中哪条通道」（垫片 / 包内 CLI）：统一事实源就是契约本身。
-pub fn probe_npm_after() -> Option<crate::runtime_contract::NodeRuntime> {
-    let rt = probe_after().and_then(|(node, ver)| crate::runtime_contract::derive(&node, &ver))?;
-    crate::runtime_contract::write(&rt);
-    Some(rt)
-}
-
 /// npm 仍缺失时的**可操作**文案（SSOT §2.3 步骤 4 / T-4：绝不静默，必须给手动安装指引）。
 /// 经平台层取 npm 可执行名（G1：平台差异只在 platform 层）。
 pub fn npm_manual_hint(version: &str) -> String {
@@ -299,12 +297,52 @@ pub fn npm_manual_hint(version: &str) -> String {
 /// 复用**已下载且 SHA256 校验通过**的同一产物，不重新下载：网络下载已在管线前段完成，
 ///   再下一遍只会把「补 npm」拖成一次完整重装，并让用户多等一个 30~50MB 的下载。
 /// 失败一律归 npm 步骤（调用方据此发 `install_error { kind: "npm" }`），不报成 node 失败。
-pub fn reinstall_for_npm(local: &Path) -> Result<crate::runtime_contract::NodeRuntime, String> {
-    install(local)?;
-    probe_npm_after().ok_or_else(|| {
-        let v = probe_after().map(|(_, v)| v).unwrap_or_default();
-        npm_manual_hint(&v)
-    })
+///
+/// `version` 由调用方（`finalize_install`）传入**已校验**的 Node 版本：产物是同一个经 SHA256
+///   核对的归档，其版本在管线前段就确认过了。这里不再 `unwrap_or_default()` 兜一个空版本 ——
+///   空版本一旦被写进契约，下游每一条「已就绪」播报都会念出一个看不见的号。
+pub fn reinstall_for_npm(local: &Path, version: &str) -> Result<crate::runtime_contract::NodeRuntime, String> {
+    // 重装可能把「另一个旧 Node」留在 PATH/记录里，故用安装器返回的路径直接复探，
+    //   而不是再问一次 PATH（否则可能拿到旧版本，与目标版本不一致 → 永不收敛）。
+    let node = install(local)?;
+    let rt = crate::runtime_contract::derive_usable(&node, version)
+        .ok_or_else(|| npm_manual_hint(version))?;
+    crate::runtime_contract::write(&rt);
+    Ok(rt)
+}
+
+/// 安装收尾（SSOT §2.2 步骤 2/3）：校验 node（版本 + 最低门槛）→ 校验 npm →
+/// 不可用则重装补 npm（幂等）。
+/// 成功返回**运行期契约本身**（node 路径/版本 + npm 路径/参数/版本），
+///   而不是再拼一份字段子集：管线外层的每一条播报都必须出自这份事实，
+///   否则就会出现「拿 node 版本当 npm 版本念出去」那类无从校验的口径分叉。
+/// 失败以 bool 区分归属（true=npm / false=node），供调用方发对应 install_error。
+///
+/// 为什么这段必须在 node.rs 而不是 main.rs：G3 门禁要求 main.rs 只做组装
+///   （≤550 行）；工具链校验属于技术实现，不属于装配。
+pub fn finalize_install(
+    node_bin: &Path,
+    target: &str,
+    local: &Path,
+) -> Result<crate::runtime_contract::NodeRuntime, (bool, String)> {
+    let v = crate::env::node_version(node_bin)
+        .ok_or_else(|| (false, "安装后未能检测到 Node.js".to_string()))?;
+    if v != target {
+        return Err((false, format!("安装后版本 {} 与目标 {} 不一致", v, target)));
+    }
+    if !meets_minimum(Some(&v)) {
+        return Err((false, format!("安装到的 Node.js {} 低于最低要求 {}", v, MIN_NODE)));
+    }
+    // derive_usable 内部就是一次真实执行 npm（T-1b）：None 即「npm 不可用」，
+    //   不需要先单独判可用再 derive_usable —— 那会把同一个 npm 探测执行两遍。
+    if let Some(rt) = crate::runtime_contract::derive_usable(node_bin, &v) {
+        crate::runtime_contract::write(&rt);
+        return Ok(rt);
+    }
+    crate::update::log("官方分发包未提供可用 npm，正在重新执行官方安装（幂等）…");
+    // 直接返回重装后的契约：路径/版本以安装器**这次**给出的为准（旧实现把重装前的 node_bin
+    //   报出去，一旦重装换了落点，外层拿到的就是一个不再存在的路径）。
+    reinstall_for_npm(local, &v).map_err(|e| (true, e))
 }
 
 /// 安装后复探（PATH 优先，其次已知落点）。
@@ -313,35 +351,10 @@ pub fn probe_after() -> Option<(PathBuf, String)> {
     crate::env::known_install_node_path().and_then(|p| crate::env::node_version(&p).map(|v| (p, v)))
 }
 
-/// 写运行时纪要（版本/路径/时间/**最低门槛**）供面板透明展示，并**供内核做环境判定**。
-///
-/// 原子写（tmp + rename，2026-09-11 架构修复）：
-///   内核会读这个文件做「环境是否就绪」判定，非原子写可能让它读到**半截 JSON**，
-///   从而误判为「Node 未安装」。同一目录下其它契约文件（identity.json / registry.json）
-///   都已是原子写，此处补齐保持一致。
-pub fn record_runtime_meta(node_path: &str, version: &str) {
-    let dir = crate::env::supervisor_dir();
-    let _ = std::fs::create_dir_all(&dir);
-    let meta = serde_json::json!({
-        "nodeVersion": version,
-        "nodePath": node_path,
-        "installedAt": now_iso(),
-        "source": "official-lts",
-        // 最低门槛由**壳**投放（内核读它做判定）—— 修复「面板谎报环境就绪」：
-        //   内核原只判 `which node` 成功即 ok，而壳会因门槛不足**拒绝启动内核**，
-        //   用户看到的是「面板说没问题，但就是起不来」。门槛的所有权在壳。
-        "minNode": MIN_NODE,
-    });
-    let path = dir.join("runtime.json");
-    let body = serde_json::to_string_pretty(&meta).unwrap_or_default();
-    let tmp = path.with_extension("json.tmp");
-    if std::fs::write(&tmp, body + "\n").is_ok() {
-        let _ = std::fs::rename(&tmp, &path);
-    } else {
-        // 落盘失败不影响安装结果（纪要仅用于展示与判定），但保留旧文件不破坏内部一致性
-        let _ = std::fs::remove_file(&tmp);
-    }
-}
+// record_runtime_meta 已删除（2026-09-18 修）：它与 runtime_contract::write 是
+// **两个写者**写同一个 <supervisor_dir>/runtime.json，且它不写 npmPath/npmArgs/schema ——
+// 在 runtime_contract::write 之后调用会把 npm 事实整体覆盖掉（随后 read_node() 还会用
+// 不存在的 bin/npm 伪造路径）。运行时纪要现由 runtime_contract::write 单一写入。
 
 /// 当前 UTC 时间，ISO 8601（`YYYY-MM-DDTHH:MM:SSZ`）。
 /// 纯 std 计算（Howard Hinnant civil-from-days），三平台一致、无副作用；

@@ -42,3 +42,4 @@
 | `_s2-b-hotpath.md` / `_s2-b-release-probe.md` | 启动/工具链/更新计划/稳定性 + 下级分片 |
 | `_s2-c-contract.md` | release_channel vs 内核契约/启动/单写入/跨仓文件/签名 |
 | `_s2-d-deadcode-gates.md` / `_s2-d-docs.md` / `_s2-d-gates.md` | 死代码/文档漂移/门禁覆盖 |
+| `_s3-exit-relaunch.md` | **退出管家后桌面壳自启**：跨仓完整排查 + 修复（PR #23 / 内核 PR #20） |

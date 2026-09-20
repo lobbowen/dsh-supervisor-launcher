@@ -20,12 +20,7 @@
 
   function status(t) { NS.$('status').textContent = t; }
   function wait(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
-
-  function wait(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
   function hideFail() { NS.$('fail').style.display = 'none'; }
-
-  function hideFail() { NS.$('fail').style.display = 'none'; }
-
 
   // ── 安装/下载的统一文字出口（SSOT §3.2，唯一实现）──
   // 为什么集中在这里：历史上 node / npm / 内核 / 桌面壳各画各的（进度条与纯文字并存），
@@ -41,6 +36,15 @@
 
   function installTarget(kind) { return INSTALL_TARGET[kind] || '组件'; }
 
+  // 版本号形态归一（唯一实现）：Node 契约自带 v，npm 与内核/桌面壳的版本号都不带。
+  //   形态规则一旦散落到各播报点，同一行里就会出现两种写法，且每处都可能写错。
+  //   未探测到版本时返回 ''，由调用方如实说明（绝不拿别的组件的版本顶替）。
+  function versionLabel(v) {
+    var s = (v == null ? '' : String(v)).trim();
+    if (!s) return '';
+    return /^\d/.test(s) ? 'v' + s : s;
+  }
+
   function installBegin(kind, text) {
     var at = INSTALL_STEP[kind];
     // 只前进、不回退：守卫对齐等场景会在更靠后的阶段调用，回退步骤条会误导进度。
@@ -51,10 +55,8 @@
   function installText(kind, text) { if (text) status(text); }
 
   function installDone(kind, text) {
-    var v = text ? String(text) : '';
-    // 后端各阶段回传的版本号形态不一（Node 自带 v，内核/桌面壳不带）；统一补 v，
-    //   保证不同阶段的完成文案完全同形：<目标> <版本> 已就绪（SSOT §3.2）。
-    if (/^\d/.test(v)) v = 'v' + v;
+    // 完成文案完全同形：<目标> <版本> 已就绪（SSOT §3.2）；形态归一只经 versionLabel 这一处。
+    var v = versionLabel(text);
     status(installTarget(kind) + (v ? ' ' + v : '') + ' 已就绪');
   }
 
@@ -111,7 +113,9 @@
 
   function diagText() {
     return [
-      'node=' + (NS.nodeVer || 'unknown'),
+      'node=' + (NS.toolchain && NS.toolchain.node ? versionLabel(NS.toolchain.node) : 'unknown'),
+      // npm 与 node 并列：诊断串只报 node，「npm 探到了没有」就又只能靠读代码猜。
+      'npm=' + (NS.toolchain && NS.toolchain.npm ? versionLabel(NS.toolchain.npm) : 'unknown'),
       'core=' + (NS.coreVersion || 'none'),
       'plan=' + (NS.lastPlan ? JSON.stringify(NS.lastPlan) : 'none'),
       'shell=' + (NS.shellId ? (NS.shellId.version + '/' + NS.shellId.installKind + '/capable=' + NS.shellId.selfUpdateCapable) : 'unknown'),
@@ -146,6 +150,7 @@
   // ── 导出到 NS（跨模块可调用）──
   NS.setStep = setStep;
   NS.status = status;
+  NS.versionLabel = versionLabel;
   NS.wait = wait;
   NS.hideFail = hideFail;
   NS.install = { begin: installBegin, text: installText, done: installDone, fail: installFail };

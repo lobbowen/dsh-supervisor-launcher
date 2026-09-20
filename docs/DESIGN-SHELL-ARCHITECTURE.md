@@ -78,7 +78,7 @@ pub trait Platform: Send + Sync {
     fn name(&self) -> &'static str;
 
     // ── Node 制品与安装 ──
-    /// 制品形态（Linux tar.xz / macOS pkg / Windows msi）与文件名。
+    /// 制品形态（Linux/macOS tar.gz / Windows zip，均为**用户级零权限**归档）与文件名。
     fn node_artifact(&self, version: &str) -> Option<NodeArtifact>;
     /// 安装（含提权）。**提权为本平台专有实现**。
     fn install_node(&self, artifact: &Path) -> Result<InstallReport, ShellError>;
@@ -146,8 +146,8 @@ pub enum ShellError {
 | 能力 | Linux | macOS | Windows | 实现位 |
 |---|---|---|---|---|
 | 环境探针（候选枚举/版本/PATH）| | | | `domain/probe` |
-| Node 制品解析 | `tar.xz` | `pkg` | `msi` | `platform/*::node_artifact` |
-| Node 安装（提权）| `pkexec` | `osascript` | `msiexec` | `platform/*::install_node` |
+| Node 制品解析 | `tar.gz` | `tar.gz` | `zip` | `platform/*::node_artifact` |
+| Node 安装（**用户级/零权限**）| `tar` → `<状态根>/node` | `tar` | `Expand-Archive` | `platform/*::install_node` |
 | 镜像测速与选择 | | | | `domain/mirror` |
 | 内核安装/升级 | | | | `domain/provision` |
 | 服务定义（守卫）| systemd | LaunchAgent | schtasks | `platform/*::ServiceControl` |
@@ -186,7 +186,9 @@ ExecStart 以 127 失败 → **内核装上了却永远拉不起来**。
 | 键 | 含义 |
 |---|---|
 | nodePath / nodeVersion | Node 可执行与版本（**旧键，内核已读，不得删**）|
-| nodeBinDir / npmPath | 服务/子进程 PATH 首位；npm 绝对路径 |
+| nodeBinDir / npmPath / npmArgs | 服务/子进程 PATH 首位；npm 绝对路径与前置参数（npm 只有包内 JS 时 `npmPath`=node、`npmArgs`=[npm-cli.js]）|
+| node{path,binDir,version} | 与旧键同源的嵌套形态（写/读共用一处键映射）|
+| npm{path,args,version} | npm 的路径/前置参数/**版本**。`version` 只在真实执行过 `npm --version` 时写入，未执行为 null |
 | minNode | 壳投放的最低门槛 |
 | schema / writtenBy | 契约版本与写者 |
 

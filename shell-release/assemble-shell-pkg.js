@@ -10,11 +10,13 @@
 //   1) Tauri 的 {{target}}/{{arch}} 取值（linux|windows|darwin / x86_64|aarch64）
 //      与 npm 包命名（linux|win|darwin / x64|arm64）不同，直接拼进包名会得到不存在的包；
 //      故采用【静态清单】解耦：清单内部用 Tauri 的 OS-ARCH 键映射到真实 npm 产物 URL。
-//   2) .sig 与安装包必须成对收集，缺 .sig 则自动更新不可用，此处强校验。
+//   2) .sig 与安装包必须成对收集；--require-sig 时缺 .sig 直接失败（发布路径），
+//      不带该开关则只报告不失败（CI 验证路径：无密钥的构建本就产不出 .sig）。
 //
 // 用法：
 //   node assemble-shell-pkg.js --platform linux-x64 --ver 0.2.0 \
-//        --bundle-dir src-tauri/target/release/bundle --out dist/npm-shell
+//        --bundle-dir src-tauri/target/release/bundle --out dist/npm-shell \
+//        [--require-sig]
 
 const fs = require('node:fs');
 const path = require('node:path');
@@ -35,11 +37,24 @@ const ARTIFACT_PATTERNS = {
   nsis: [/-setup\.exe$/i, /\.exe$/i],
 };
 
+// 关闭 updater 产物的构建（无密钥的验证构建）不会产 .app.tar.gz，只产 .dmg。
+// 主形态命中时永不走这里，故 tag 发布的产物集合与既往完全一致。
+const FALLBACK_PATTERNS = {
+  app: [/\.dmg$/],
+};
+
 function parseArgs(argv) {
   const o = {};
   for (let i = 2; i < argv.length; i += 1) {
     const a = argv[i];
-    if (a.startsWith('--')) { o[a.slice(2)] = argv[i + 1]; i += 1; }
+    if (!a.startsWith('--')) continue;
+    const k = a.slice(2);
+    const nxt = argv[i + 1];
+    // 布尔开关不能吞掉后一个 token 当值：否则末尾的 --require-sig 会得到 undefined，
+    // 且它前面的真值参数会被整体错位一格。
+    if (nxt === undefined || nxt.startsWith('--')) { o[k] = true; continue; }
+    o[k] = nxt;
+    i += 1;
   }
   return o;
 }
@@ -55,9 +70,13 @@ function walk(dir) {
 }
 
 function findArtifacts(bundleDir, installer, version) {
-  const pats = ARTIFACT_PATTERNS[installer] || [];
   const all = walk(bundleDir).filter((f) => !/\.sig$/.test(f));
-  const hits = all.filter((f) => pats.some((re) => re.test(path.basename(f))));
+  const by = (pats) => all.filter((f) => pats.some((re) => re.test(path.basename(f))));
+  let hits = by(ARTIFACT_PATTERNS[installer] || []);
+  if (!hits.length && FALLBACK_PATTERNS[installer]) {
+    hits = by(FALLBACK_PATTERNS[installer]);
+    if (hits.length) console.log('   主形态未命中，改用备用形态（关闭 updater 产物的验证构建）');
+  }
   // 必须按**版本**过滤（2026-09-11 修复）：bundle 目录会累积历史版本安装包，
   //   不过滤会把旧版本一并打进发布包（体积膨胀 + 语义混乱，且清单与包内容不一致）。
   //   CI 每次全新 workspace 故只产一个版本，但本地开发/重跑会命中此问题（实测 1.0.1 与 1.0.2 同目录）。
@@ -118,8 +137,12 @@ function main() {
 
   const missing = entries.filter((e) => !e.sig);
   if (missing.length) {
-    console.error('有产物缺 .sig —— 自动更新不可用（请确认 TAURI_SIGNING_PRIVATE_KEY(_PASSWORD) 已配置）');
-    process.exit(1);
+    const names = missing.map((e) => e.name).join(', ');
+    if (a['require-sig'] === true) {
+      console.error('有产物缺 .sig —— 自动更新不可用（请确认 TAURI_SIGNING_PRIVATE_KEY(_PASSWORD) 已配置）: ' + names);
+      process.exit(1);
+    }
+    console.log('未签名构建（缺 .sig）: ' + names + ' —— 仅供产线验证，不可发布自动更新');
   }
 }
 
