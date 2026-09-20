@@ -34,7 +34,7 @@
 
 ---
 
-## 二、审计结果（内核 80 文件 / 19354 行）
+## 二、审计结果（内核 80 文件 / 19354 行 —— 审计时快照，非当前规模）
 
 ### 2.1 内核**运行期专有**（R2 → 必须留内核，约 95%）
 
@@ -98,7 +98,7 @@
 | 探测方法与排序 | **规格随产物投放**，内核按其执行 → 两侧给出**同一答案** |
 | 内核的硬编码副本 | 降级为**最小兜底**（契约缺失时用），不再是一等来源 |
 | 投放时机 | **壳启动时 + 选择变化时 + 小版本升级后**（修掉「只在手动改时导出」的缺口）|
-| 契约文件 | 扩展现有 `~/.dsh/supervisor/registry.json`（内核已在读，不新建文件）|
+| 契约文件 | 扩展现有 `<状态根>/supervisor/registry.json`（内核已在读，不新建文件；路径记法见 §四 开头）|
 
 **为什么不是「内核调壳」**：内核在无壳时也要选源（自升级、装 DSH/插件）—— R2。
 
@@ -107,7 +107,8 @@
 | 项 | 决策 |
 |---|---|
 | 执行器 | **两份**（不可合并）|
-| 理由 | 壳装**内核**需提权（`pkexec`/`osascript`/`msiexec`）；内核装 **DSH/插件**不提权且无人值守。**提权需要人在场，内核永远做不到**（R1+R2）|
+| 理由 | 装的是**不同对象**、活在**不同约束**里：壳装**内核**要在 GUI 里同步回传结构化证据（命令/prefix/源/两次输出），并按壳持有的镜像 catalog 选源；内核装 **DSH/插件**必须**无人值守**（壳可能根本没开）—— R2 决定它不能反过来调壳 |
+| 提权 | **两条安装链都不主动提权**：Node 安装是用户级零权限（`platform/*.rs::install_node`，门禁 A-2）；内核 `npm install -g` 若落在只读前缀（如系统 Node 目录）只回传证据、**不擅自换前缀**（`core.rs::is_node_install_prefix`）。全仓唯一的提权消费者是**壳自更新**（deb/rpm 落系统位置），由 tauri-plugin-updater 承担 |
 | 共享部分 | npm 参数形态、registry 注入、超时、输出捕获 —— 写进**规格**（文档 + 测试向量）|
 
 ### D3 环境探测 —— **规格统一，代码各自保留**
@@ -132,10 +133,10 @@
 
 | 产物 | 唯一所有者 |
 |---|---|
-| 守卫服务**定义**（unit / plist / 计划任务）| **桌面壳**（`service.rs`）|
+| 守卫服务**定义**（unit / plist / 计划任务）| **桌面壳**（`platform/service.rs` 定 `ServiceControl` trait；三平台实现在 `platform/{linux,macos,windows}.rs`）|
 | 守卫自启**开关**（enable/disable）| **内核**（面板）|
-| 壳（GUI）自启产物 | **内核**（`autostart.js`）|
-| 壳崩溃自愈 | **守卫看护**（`domains/shell/watchdog`）|
+| 壳（GUI）自启产物 | **内核**（`app/settings/autostart.js`）|
+| 壳崩溃自愈 | **守卫看护**（`domains/shell/watchdog.js`）|
 
 详见内核仓 `PLATFORM-CAPABILITY-MATRIX.md §六`。
 
@@ -146,13 +147,21 @@
 | 把 DSH/插件安装移到壳 | 内核在壳关闭时必须能自升级/装插件（R2）|
 | 把服务管理（`platform/os/service.js`）移到壳 | 它管的是 **DSH 实例**的 systemd transient 单元，与壳的守卫服务是**不同对象**（Linux 专有属设计使然）|
 | 把日志合并 | 内核 `EventHub` 是**有不变量的子系统**（单写者、seq 全局单调、跨重启续号），壳日志是启动轨迹。**合并会破坏不变量**；应做的是**统一格式 + 统一读取视图** |
-| 追求「代码量减少」| 待统一的是**内核侧约 420 行副本**（占内核 19354 行的 **2%**）。壳侧模块是所有者，不减。真实收益是**「只有一个答案」**，不是行数 |
+| 追求「代码量减少」| 审计时估算：内核侧待统一副本约 420 行（占当时内核 2%）。**已按 D1 落地为「契约优先 + 最小兜底」**（内核 `platform/distribution/registry.js` 读契约，`platform/contract/registry.js` 校验），兜底副本按设计保留 —— 收益是**「只有一个答案」**，不是行数 |
 
 ---
 
 ## 四、合作契约（跨语言「共享」的唯一可行形态）
 
-### 4.1 契约文件：`~/.dsh/supervisor/registry.json`
+> **路径记法**：本章的 `<状态根>` = **产品状态根**，与 DSH 的 `~/.dsh` 无关。
+> 覆盖变量 `DSH_SUPERVISOR_HOME`；默认 Linux `~/.local/state/dsh-supervisor`、
+> macOS `~/Library/Application Support/dsh-supervisor`、Windows `%LOCALAPPDATA%\dsh-supervisor`。
+> 单一事实源：内核 `src/platform/service/state-root.js`、壳 `src-tauri/src/env.rs::state_root()`，
+> 两侧 schema 常量由门禁握手。契约文件只落在 `<状态根>/supervisor/`（内核读写）与
+> `<状态根>/shell/`（壳读写）；`~/.dsh/{supervisor,shell}` 仅是启动期一次性前向迁移的**源**，
+> 不再是任何读写路径。
+
+### 4.1 契约文件：`<状态根>/supervisor/registry.json`
 
 由**壳**写，**内核**读。扩展现有格式（加 `schema` / `catalog` / `probe`），保持向后兼容：
 
@@ -191,8 +200,8 @@
 
 | 契约 | 方向 | 内容 |
 |---|---|---|
-| `~/.dsh/shell/identity.json` | 壳 → 内核 | 版本、phase、pid、**exe**（看护定位用）、lastSeenAt |
-| `~/.dsh/shell/update-journal.json` | 内核内部 | 壳更新账本（to/confirmed）；**不含隐式回退/拉黑/冷却字段**（紧急回退走发布通道契约的 `rollback` dist-tag，不经此账本）|
+| `<状态根>/shell/identity.json` | 壳 → 内核 | 版本、phase、pid、**exe**（看护定位用）、lastSeenAt |
+| `<状态根>/shell/update-journal.json` | 内核内部 | 壳更新账本（to/confirmed）；**不含隐式回退/拉黑/冷却字段**（紧急回退走发布通道契约的 `rollback` dist-tag，不经此账本）|
 | `shell-release/version-vectors.json` | 双向（测试）| 版本比较/合法性的共享测试向量（内核侧副本为 `shared/version-vectors.json`）|
 
 ### 4.4 不变量

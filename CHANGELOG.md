@@ -4,6 +4,87 @@
 
 ## [未发布]
 
+### 文档纠正：以现在时态写着的假现状（第 3 轮残留清扫）
+
+等 CI 的窗口里把两仓又扫了一遍。判据只有一条：**这句话会不会让人去做一件仓库里不存在的事**。
+下列每一条都先用代码/grep 核实过，再改；未核实的外报一律不采纳。
+
+**权限模型的残留（危害最大）**
+
+- `docs/DESIGN-BOUNDARY.md` D2 把「壳装内核**需提权**（`pkexec`/`osascript`/`msiexec`），
+  提权需要人在场所以内核永远做不到」当作两条安装链不可合并的**理由**。2026-09-18 的权限模型重写
+  之后这条理由已不存在：全仓的提权消费者只剩**壳自更新**（`has_privilege_channel` 只喂
+  `privilege_channel` 一个状态字段，Node 安装由门禁 `a2_user_scope_install_needs_no_privilege`
+  反向钉住不含 `pkexec`/`sudo`，内核 npm 安装落在只读前缀时只回传证据不擅自换前缀）。
+  理由改为真正的两条：**装的对象不同** + **内核必须无人值守**（R2）。
+- `src-tauri/src/platform/linux.rs` 的 `PRIVILEGE_COMMANDS` 头注仍写着「`install_node()` 用它选
+  **实际执行**的命令」—— 与它自己文件里的门禁直接矛盾；同文件把安装超时注解为「下载 + 解包 + 系统授权」。
+  两处都改为只描述壳自更新通道。`main.rs` 的 shell.log 注释也还写着旧前缀 `~/.dsh/shell/`。
+
+**「本机可以跑」的错误引导**
+
+- `docs/RELEASE-STANDARD.md` §0 硬标准只覆盖了**构建与发布**，没覆盖**测试**，于是别处继续出现
+  本地跑测试的指令。现补入「测试一律不得在本机执行；验收只能由 CI 裁决」（与内核仓
+  `ACCEPTANCE-STANDARD.md` §0 同源），§1 全流程表加「位置」列（H2–H7 全部标 **仅 CI**），
+  §7 红线加第 7 条。原先那行「本地可做 H0–H5 / H7」正是与 §0 互相打脸的入口，已删。
+- 三处具体的本地执行指令按新口径收口：`RELEASE-AND-BUILD-DECISION.md` §2.2 的 `cargo test` +
+  `cargo check --all-targets` → 上限为 `bash -n` / `node --check` / `cargo fmt --check`；
+  `DEVELOPMENT-TRACK.md` 铁律 R-1 的「允许：跑本仓测试」→ 移到禁止列；
+  `UPDATER-SIGNING-KEY.md` §五 用 `export` 私钥 + 本机 `npx @tauri-apps/cli@2 build` 验证密钥
+  → 私钥只进 CI secret、由**非 tag** 的 CI 构建产出成对 `.sig` 来证明，并明确这不等于 H7 同源验签。
+- `DESKTOP-ACCEPTANCE.md` §1 不再给任何本机产包命令（含此前留的 `cargo build --release`），
+  §5 构建矩阵改为只指向 `RELEASE-STANDARD.md` §2 的唯一事实源。
+
+**契约路径与不存在的机制**
+
+- 产品状态根迁移后，`~/.dsh/supervisor/*` 与 `~/.dsh/shell/*` 作为**现行读写路径**残留在
+  `KERNEL-LAUNCH-STANDARD.md`（P0/runtime.json、§3/core.json）、`DESIGN-BOUNDARY.md`（D1、§4.1、§4.3）、
+  `DESIGN-SHELL-ARCHITECTURE.md`（§3.2 契约层）、`DESIGN-COMPLETE.md`（§6 契约面、§18 契约层）
+  —— 共 10+ 处。统一改为 `<状态根>/…`，并在 `DESIGN-BOUNDARY.md` §四 与 `DESIGN-COMPLETE.md` §6
+  各立一处**路径记法**定义（含 `DSH_SUPERVISOR_HOME` 与三平台默认、`migrate_legacy` 只是迁移源）。
+- `KERNEL-LAUNCH-STANDARD.md` §4 的失败分类表列了 `INSTALL_FAILED`（P1）与 `SERVICE_DEFINE_FAILED`（P4）
+  两个**代码里从未产出过**的 code（`domain/guardctl.rs` 实际只有 5 个）。删掉，并写明这两个位置
+  **刻意没有独立 code**：P1 失败由 `core_apply` 回传 npm 原始输出；P4 定义失败**不阻断启动**，
+  只记一条日志继续走 P5，真起不来时由 `SERVICE_START_FAILED` 连服务管理器错误原文一起报出。
+- `DESIGN-SHELL-ARCHITECTURE.md` §3.2 的契约层树画的是 `domain/contract/{schema.rs,identity.rs}` ——
+  该目录与这两个文件都不存在（`identity.rs` 尤其误导：壳身份写在 `update.rs`）。改为四个真实模块，
+  并补上树里完全缺失的 `core_contract.rs`。§2.2 的 `trait Platform` 代码块按 `// platform/mod.rs`
+  的名义展示了 `path_dirs` / `known_node_locations` / `InstallReport` / `PlatformCapabilities`
+  —— 四个名字全仓 0 命中，且 `install_node` 的返回类型写错。改为当前 17 个方法的真实面。
+  C4 不变量仍写「现仅在 `latest_lts()` 成功时导出部分内容」，该缺陷早已由 `mirror::export_on_boot`
+  无条件导出修掉，按现状改写。
+- `DESIGN-COMPLETE.md` §27.2 给出的内核侧落地代码（`dist/index.js::_registryOrigins` 调
+  `_catalogFromContract`）**从未存在**，`dist/index.js` 也没有这个文件。改为指向真实落点
+  （`platform/contract/registry.js` 校验 + `platform/distribution/registry.js` 逐级回退 +
+  `policies.js::FALLBACK_REGISTRIES` 两条兜底），并确认 `REGISTRY_PRESETS` 确已全仓 0 引用。
+
+**数字漂移**
+
+- `DESIGN-COMPLETE.md` §7 的 IPC 表标题写着「全部经 `main.rs` 的 20 个 `#[tauri::command]`」——
+  门禁 G3 恰恰要求 `main.rs` 里命令数为 **0**（实测 0），23 个命令全在 `commands/mod.rs`。
+  表的「行 / 体量」两列同批漂移（`shell_identity` 记 960 行，实际该文件共 813 行）。
+  整表改为按职责分组、不记行号，并指出权威清单 = `#[tauri::command]` 与 `generate_handler!` 两处。
+- 同文 §8「工程现状」的七行审计快照里有四条判断已被后续改造**反转**（壳零平台层 / `main.rs` 1487 行
+  单体 / Error 枚举 0 / 前端 760 行单块）。改为按当前代码复测 + 标出各自由哪条门禁锁定，
+  并留下两条**仍然真实**的缺口：`Result<_, String>` 51 处残留、`main.rs` 538 行未达 <150 目标。
+  `DESIGN-BOUNDARY.md` §二 标题与 D6 的「内核 80 文件 / 19354 行」「待统一 420 行副本」标注为审计时快照，
+  D6 那行按已落地形态（契约优先 + 最小兜底）改写。
+- 无头入口数「4 个」其实列了 5 个，实际 `main.rs` 分派 8 个自检/计划入口 + `--run-guard`；
+  同时如实记下 **CI 目前只冒烟 `--node-plan`（且 `|| true`）**，其余入口有产出无断言。
+- `RELEASE-STANDARD.md` §8 门禁表停在 R-8/R-9，而 `release_spec_consistency_test.rs` 已有 **R-10**
+  （CI 矩阵 artifact 必须被 assembler 的 `PLATFORMS` 覆盖）。补登记。
+- `SHELL-UPDATE-CHANNEL-VERIFICATION.md` 的 §六/§八 是**建议**，被后人读成**已具备**：N3 的
+  「内核预取 + 缓存到 `~/.dsh/shell/cache/`」从未落地，且与当前「无预取、无缓存、无隐式回退，
+  账本只有 `pending -> confirmed`」的实况相反。加读前必看的三项裁决表（N1/N2 已采纳、N3 未采纳），
+  并在 §六 那段就地标注。§一 的网速实测标注为当时出口取样、非当前结论。
+- `DESKTOP-ACCEPTANCE.md` §3 与 §6 对同一件事**各写了一套矛盾说法**：§6 声明「已实现：引导页显示
+  『升级到官方最新 LTS』+『跳过并使用现有版本』」，§3 却说这是已知缺口。前端 grep 不到这两个文案，
+  也没有对应分支 —— 引导页判定只看 `minNode`（v22.12，经 `commands/mod.rs` 的 `minOk`/`minRequired`
+  回传），达标就不弹。**「已实现」那一侧是假的**，删除并把两节统一到同一个事实：
+  升级入口只在「缺失或低于 `minNode`」时出现，达标但低于最新 LTS 没有入口。
+
+**本批不含发布动作**：不打 tag、不 `npm publish`；合入条件仍是 CI 全绿。
+
 ### 文档纠正（续）：把「做不到 / 没在做」写成「已具备」的残留
 
 - `docs/RELEASE-AND-BUILD-DECISION.md` 把分支保护未设的原因写成「自动化令牌属另一账号、无该仓

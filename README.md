@@ -9,7 +9,7 @@
 
 ## 功能
 
-- **环境引导**：探测系统 Node.js → 缺失/过旧时内嵌引导页一键安装官方最新 LTS（下载 + SHA256 校验 + 一次授权）
+- **环境引导**：探测系统 Node.js → 缺失/过旧时内嵌引导页一键安装官方最新 LTS（下载 + SHA256 校验 + **用户级零权限解包到 `<状态根>/node`，不弹系统授权**）
 - **守卫拉起**：自动定位已安装内核并启动守护进程，控制面板就绪后直达（端口由内核配置 `apiPort` 决定，动态分配）
 - **生命周期守卫**（内核提供）：进程保活、故障自动重启、崩溃退避、期望状态语义（启动/停止可控）
 - **局域网安全访问**：`0.0.0.0:3088 → 127.0.0.1:3080` 反向代理，DSH 官方生态同款回环呈现，`remoteToken` 可选
@@ -59,7 +59,7 @@ systemd user unit → dsh-supervisor（守卫内核，闭源）→ dsh web (127.
 | [DESIGN-SHELL-ARCHITECTURE.md](docs/DESIGN-SHELL-ARCHITECTURE.md) | **规范（权威）** | 壳工程架构：分层 / 平台适配层 / 错误模型 / 契约层 / 门禁 |
 | [DESIGN-BOUNDARY.md](docs/DESIGN-BOUNDARY.md) | **规范（权威）** | 内核↔壳职责边界与抽取审计 |
 | [KERNEL-LAUNCH-STANDARD.md](docs/KERNEL-LAUNCH-STANDARD.md) | **规范（SSOT）** | 内核启动的唯一事实源（跨平台 P0–P6 流水线 / 平台矩阵 / core.json）|
-| [SHELL-UPDATE-CHANNEL-VERIFICATION.md](docs/SHELL-UPDATE-CHANNEL-VERIFICATION.md) | 实测记录 | 壳更新通道验证（含 CDN `@latest` 缓存延迟实测） |
+| [SHELL-UPDATE-CHANNEL-VERIFICATION.md](docs/SHELL-UPDATE-CHANNEL-VERIFICATION.md) | 实测记录（2026-09-11） | 壳更新通道为什么定为 npm CDN（unpkg/jsdelivr）；其 §六/§八 的三项建议此后被推翻，见该文件头部的现状块 |
 | [UPDATER-SIGNING-KEY.md](docs/UPDATER-SIGNING-KEY.md) | 运维手册 | minisign 自更新签名密钥的保管/备份/验证/轮换（**不含私钥**）|
 | [DESKTOP-ACCEPTANCE.md](docs/DESKTOP-ACCEPTANCE.md) | 验收清单 | 桌面壳真机验收（引导页 / 服务定义 / 自更新，GUI 场景）|
 | 内核仓 `RELEASE-CHANNEL-CONTRACT.md` | **规范（SSOT，跨仓）** | **发布通道/选版唯一事实源**（canary/beta/rc/latest/rollback）；壳侧实现 `src-tauri/src/release_channel.rs` |
@@ -81,7 +81,9 @@ dsh-supervisor self-check                      # guardVersion / node / platform 
 
 ### 壳（本仓库）
 
-> 正式安装包在 Releases 下载；从源码构建：
+> **当前 Releases 是空的**：产线尚未跑通发布（签名私钥未配置 + 分支保护未定案，见
+> `docs/UPDATER-SIGNING-KEY.md`），安装包只在 CI 每次构建的 artifacts 里，没有面向用户的下载点。
+> 想从源码跑起来（**不是产包**，产包只在 CI）：
 
 ```bash
 cd src-tauri && cargo build --release
@@ -108,7 +110,7 @@ cargo test                              # 含引导流程回归与更新产物�
 
 ## 截图
 
-<!-- 放真实截图：引导页 / 面板概览 / 托盘菜单 / 局域网开关（可参考仓库 screenshots/） -->
+<!-- 放真实截图：引导页 / 面板概览 / 托盘菜单 / 局域网开关。仓库内暂无 screenshots/ 目录（此项为待办） -->
 
 - 引导页：环境检测 + 一键安装
 - 面板：实时状态卡 + 事件时间线

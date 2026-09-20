@@ -10,6 +10,8 @@
 ## 0. 硬标准（2026-09-13，不可协商）
 
 > **所有平台构建与发布必须经 GitHub CI 完成。本地不得产生任何发布产物。**
+> **测试一律不得在本机执行；验收只能由推送后的 GitHub CI 裁决。**（与内核仓
+> `ACCEPTANCE-STANDARD.md` §0 同源，2026-09-20 补齐到壳侧。）
 
 | 要求 | 壳仓实现 | 门禁 |
 |---|---|---|
@@ -17,8 +19,11 @@
 | 本地无全平台构建脚本 | 壳仓**本就没有**本地构建/发布脚本（仅 `bump-shell.sh` + `verify-shell-versions.js`）| R-9（新增）|
 | 发布只在 CI 内 | `publish` job（tag 触发）| R-4 |
 | 无本地发布产物入口 | 壳仓根目录**不存在 `package.json`**，故不可能有本地 release/publish script | R-9 |
+| 测试只在 CI 内 | `cargo test` / `cargo build` / 无头冒烟全部是 `build` job 的步骤；本机上限是**纯静态**检查（读文件、`bash -n`、`node --check`）| 第 1 节 H2–H7 的「位置」列 |
 
 **为什么**：本地构建让「产物从哪来」不可复现、不可审计；统一到 CI 后产物可追溯、四平台同构、发布单一入口。
+本机跑测试则是另一类代价：它只在**单一平台、单一 glibc、单一 HOME** 下成立，且会在工作区留下
+`src-tauri/target/` 与临时产物 —— 结论既不可移植，也不可复现。
 
 ---
 ## 为什么需要这份文件（问题的实质）
@@ -46,20 +51,21 @@ GitHub **永远不会执行**它；但 `docs/RELEASE-AND-BUILD-DECISION.md` 与 
 
 ## 1. 全流程（阶段化）
 
-| 阶段 | 名称 | 命令 / 位置 | 必须绿 |
-|---|---|---|---|
-| H0 | 版本提升（三处同步）| `bash scripts/bump-shell.sh <ver>` | 是 |
-| H1 | 版本一致性 | `node scripts/verify-shell-versions.js` | 是（CI 的 version job 亦强制）|
-| H2 | 门禁测试 | `cargo test --bins <tests>` | 是 |
-| H3 | 无头冒烟 | `cargo run -- --node-plan` | 是 |
-| H4 | 构建 + 打包 | `cargo tauri build`（bundles 见第 2 节）| 是 |
-| H5 | glibc 基座门禁（仅 Linux）| `bash ci/check-glibc.sh <bin> 2.35` | 是 |
-| H6 | 组装 npm 壳包 | `node shell-release/assemble-shell-pkg.js --platform <p> [--require-sig]`（缺 `.sig` 仅在带 `--require-sig` 时判红；CI 只对 tag 构建传该开关）| 是 |
-| H7 | 产物验收（同源验签 + 清单契约）| `cargo test --test updater_artifacts`（CI 中仅 `refs/tags/v*` 执行：无密钥构建本就产不出 `.sig`）| 是 |
-| H8 | 发布（tag `v*`）| `publish` job：归拢产物 → `node shell-release/make-manifest.js` → `npm publish` | 是 |
-| H9 | 发布后验证 | 见第 5 节 | 是 |
+> **每一行的「位置」就是它唯一合法的发生地。** 除 H0/H1 外全部在 CI 内 —— 与 §0 硬标准同源，
+> 不存在「本地也可以跑一遍」的余地：本机的 `cargo build` 只用于复现已知问题，**不构成验收**。
 
-> 本地可做 H0–H5 / H7；H6 / H8 走 CI（四平台产物必须来自各自 runner）。
+| 阶段 | 名称 | 命令 | 位置 | 必须绿 |
+|---|---|---|---|---|
+| H0 | 版本提升（三处同步）| `bash scripts/bump-shell.sh <ver>` | 本地（只改三个文件，不产产物）| 是 |
+| H1 | 版本一致性 | `node scripts/verify-shell-versions.js` | 本地或 CI（纯静态读文件）| 是（CI 的 `version` job 亦强制）|
+| H2 | 门禁测试 | `cargo test --bins` + **自动枚举** `tests/*.rs`（每个文件一个 `--test`；`updater_artifacts` 除外，见 H7）| **仅 CI**（`build` job）| 是 |
+| H3 | 无头冒烟 | `cargo build` → `./target/debug/dsh-supervisor-gui --node-plan` | **仅 CI**（`build` job）| 是 |
+| H4 | 构建 + 打包 | `npx --yes @tauri-apps/cli@2 build --bundles "<matrix.bundles>"` | **仅 CI**（各 runner 只构建自己平台）| 是 |
+| H5 | glibc 基座门禁（仅 Linux）| `bash ci/check-glibc.sh <bin> 2.35` | **仅 CI**（ubuntu-22.04 runner）| 是 |
+| H6 | 组装 npm 壳包 | `node shell-release/assemble-shell-pkg.js --platform <p> [--require-sig]`（缺 `.sig` 仅在带 `--require-sig` 时判红；CI 只对 tag 构建传该开关）| **仅 CI** | 是 |
+| H7 | 产物验收（同源验签 + 清单契约）| `cargo test --test updater_artifacts` | **仅 CI**，且只在 `refs/tags/v*` 执行（无密钥构建本就产不出 `.sig`）| 是 |
+| H8 | 发布（tag `v*`）| `publish` job：归拢产物 → `node shell-release/make-manifest.js` → `npm publish` | **仅 CI** | 是 |
+| H9 | 发布后验证 | 见第 5 节 | CI 结论 + registry 查询 | 是 |
 
 ## 2. 平台矩阵（4 平台，唯一来源 = CI 矩阵）
 
@@ -122,6 +128,16 @@ GitHub **永远不会执行**它；但 `docs/RELEASE-AND-BUILD-DECISION.md` 与 
 | CI 结论 | tag run | version + 四平台 build + publish 全绿 |
 | 安装冒烟 | 各平台安装包 | 能装、能起、能更新 |
 
+> **执行位置与判据顺序**（与内核仓 `RELEASE-STANDARD.md` §5 同规）：本机没有 `gh` / `curl`，
+> 且 registry 查询有**传播延迟** —— 刚发布就 `npm view` 可能返回 E404 或旧版本，这**不是发布失败**。
+> 判据顺序：先看 CI 的 `publish` 日志里 npm 自己的确认行（`+ @dsh-sup/<pkg>@<ver>`），
+> 再重试查询（45s 间隔、最多 4 次）。查询需要凭据时在**进程内**读取凭据库里的 `github-pat`
+> （库在内核仓 `release/scripts/cred.sh path github-pat` 所指位置，本仓不携带凭据工具），
+> 不把令牌拼进命令行参数。
+>
+> **GitHub Release 一行的现状**：tag 发布会被 workflow 主动拦下，直到 minisign 私钥重新可用
+> （见 `docs/UPDATER-SIGNING-KEY.md` §〇）；在此之前 Release 恒为空是**设计**，不是产物丢失。
+
 > **注意：查询 npm 必须容忍传播延迟**（2026-09-14 实测）：刚发布后立即查询可能返回 E404 或旧版本列表 ——
 > 这是 **registry / CDN 传播延迟**，不代表发布失败。判据顺序：**先看 CI 的 publish 日志**
 > （`+ @dsh-sup/<pkg>@<ver>` 是 npm 的确认），再重试查询（建议 45s 间隔、最多 4 次）。
@@ -143,7 +159,9 @@ GitHub **永远不会执行**它；但 `docs/RELEASE-AND-BUILD-DECISION.md` 与 
 3. 不得缺平台发布（四平台是壳的完整定义）；
 4. 不得在非 22.04 基座构建 Linux 产物；
 5. 不得绕过 `make-manifest.js` 手写 `shell-manifest.json`；
-6. 不得把壳的版本 / 资产逻辑放回内核仓（双仓隔离）。
+6. 不得把壳的版本 / 资产逻辑放回内核仓（双仓隔离）；
+7. 不得在本机跑 `cargo build` / `cargo test` / `npx @tauri-apps/cli build` 来「代替」或「抢跑」CI 的结论 ——
+   本机跑绿不算绿，本机跑红也不算红（单平台单 glibc 下两类都是假信号，且会留下 `src-tauri/target/`）。
 
 ## 8. 规范自校验（防漂移）
 
@@ -160,6 +178,7 @@ GitHub **永远不会执行**它；但 `docs/RELEASE-AND-BUILD-DECISION.md` 与 
 | R-7 | 必需章节标题齐备 |
 | R-8 | 反向：判据能识别幽灵文件 / 缺失入口（门禁非空转）|
 | R-9 | `scripts/` 下无本地构建/发布脚本（硬标准：仅 CI 构建与发布）|
+| R-10 | CI 矩阵的每个 artifact 都在 `assemble-shell-pkg.js` 的 `PLATFORMS` 里（防「能构建但组装不了」）|
 
 ```json shell-release-pipeline
 {
@@ -222,6 +241,6 @@ GitHub **永远不会执行**它；但 `docs/RELEASE-AND-BUILD-DECISION.md` 与 
     "## 8. 规范自校验（防漂移）"
   ],
   "versionGuardScript": "scripts/verify-shell-versions.js",
-  "hardStandard": "所有平台构建与发布必须经 GitHub CI 完成；本地不得产生发布产物"
+  "hardStandard": "所有平台构建与发布必须经 GitHub CI 完成；本地不得产生发布产物；测试一律不得在本机执行，验收由 CI 裁决"
 }
 ```

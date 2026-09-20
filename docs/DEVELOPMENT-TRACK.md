@@ -17,7 +17,8 @@
 | 允许 | 禁止 |
 |---|---|
 | 读写**本仓工作区**（克隆目录）内文件 | 改/删 `~/.local/state/dsh-supervisor/`（系统状态根） |
-| 跑本仓测试（`cargo test`，自带隔离 tmp） | 停/启/改 `dsh-supervisor.service`（系统已安装的服务） |
+| 静态自查（`bash -n` / `node --check` / `cargo fmt --check`）| 在本机跑 `cargo test` / `cargo build`（测试与构建都由 CI 裁决，见 `RELEASE-STANDARD.md` §0）|
+| 停/启**自己工作区里**起的进程 | 停/启/改 `dsh-supervisor.service`（系统已安装的服务） |
 | 读系统状态用于**诊断**（只读） | 覆盖 `/usr/bin/dsh-supervisor-gui`、`~/.npm-global/lib/node_modules/@dsh-sup/*` |
 | 操作 `/tmp` 下**自己创建的具名路径** | 触碰 `~/.dsh`（DSH 自身数据目录） |
 

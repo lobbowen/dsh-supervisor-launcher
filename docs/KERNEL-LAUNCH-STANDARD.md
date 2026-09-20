@@ -27,7 +27,7 @@
 ## 1. 规范流水线（P0 → P6，四平台一致）
 
 ```
-P0 运行期契约   resolve runtime      ~/.dsh/supervisor/runtime.json（node/npm/nodeBinDir/PATH）   壳写
+P0 运行期契约   resolve runtime      <状态根>/supervisor/runtime.json（node/npm/nodeBinDir/PATH）  壳写
 P1 版本对齐     align to latest      resolve 通道选版（rollback>canary>latest，兜底 versions 最高）→ 与磁盘比较 → 需要则安装    壳写(唯一)
 P2 位置落契约   record location      安装成功后写 core.json（bin/prefix/version/source）        壳写(唯一)
 P3 定位         resolve aligned      读 core.json → 校验 bin 可执行 且 version==通道选出版本     壳读
@@ -65,7 +65,7 @@ P6 就绪         readiness            healthz 200（端口 = ports.json 的 sup
 
 ## 3. core.json（位置契约，P2 产物）
 
-路径：`~/.dsh/supervisor/core.json`；schema 1；**壳是唯一写入方**；原子写（tmp+rename）。
+路径：`<状态根>/supervisor/core.json`（`env::supervisor_dir()`，见 `DESIGN-BOUNDARY.md` §7）；schema 1；**壳是唯一写入方**；原子写（tmp+rename）。
 
 ```json
 {
@@ -89,15 +89,22 @@ P3 定位顺序（**先契约，后启发式**）：
 
 ## 4. 失败分类（前端/日志据此给可操作结论）
 
+> 下表 = `domain/guardctl.rs` 实际产出的**全部** code，不多不少。
+
 | code | stage | 含义 / 处置 |
 |---|---|---|
 | `RUNTIME_MISSING` | P0 | Node/npm 未就绪 → 回环境步骤 |
 | `ALIGN_RESOLVE_FAILED` | P1 | 线上版本查询失败（离线/源不可达）→ 停在原地、如实报因 |
-| `INSTALL_FAILED` | P1 | npm 安装失败 → 回传命令/prefix/源/输出 |
 | `KERNEL_NOT_ALIGNED` | P3 | 磁盘无「== 通道选出版本」的内核 → 必须先 P1 对齐 |
-| `SERVICE_DEFINE_FAILED` | P4 | 平台服务定义写入失败 → 回传平台错误 |
-| `SERVICE_START_FAILED` | P5 | 服务管理器启动失败且 spawn 兜底也失败 |
-| `READY_TIMEOUT` | P6 | healthz 超时 → 回传端口与 kernel 日志路径 |
+| `SERVICE_START_FAILED` | P5 | 服务管理器启动失败**且** spawn 兜底也失败 |
+| `READY_TIMEOUT` | P6 | healthz 超时 → 回传端口与服务管理器错误 |
+
+**P1 安装失败、P4 定义失败刻意没有独立 code**：
+
+- P1 由 `core_apply` 承担，失败原因是 npm/网络的原始输出，不经过 `LaunchError`；
+- P4 `ensure_defined` 失败**不阻断启动**（`guardctl.rs` 只记一条日志后继续 P5），
+  因为服务管理器不可用（容器 / 无 user session / 策略拦截）正是 spawn 兜底要覆盖的场景；
+  真正无法启动时由 P5 的 `SERVICE_START_FAILED` 报出，其消息里已带服务管理器错误原文。
 
 ---
 
