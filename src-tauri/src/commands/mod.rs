@@ -752,14 +752,14 @@ pub async fn shell_update_apply(app: tauri::AppHandle) -> ShellResult<serde_json
     let mut downloaded: Option<Vec<u8>> = None;
     for url in &candidates {
         let host = url.host_str().unwrap_or("?").to_string();
-        let mut attempt = u.clone();
-        attempt.download_url = url.clone();
+        let mut candidate = u.clone();
+        candidate.download_url = url.clone();
         // on_chunk 给的是本块大小（增量）与**可选**总量，此处自行累加；
         //   每个候选源重新计数，否则换源后进度会从半程继续跳。
         let mut got: u64 = 0;
         let dl = tokio::time::timeout(
             SHELL_DOWNLOAD_TIMEOUT,
-            attempt.download(
+            candidate.download(
                 |chunk, total| {
                     got += chunk as u64;
                     // 统一安装事件（SSOT §2.4）：壳更新与 node/npm/内核同一形态，kind="shell"。

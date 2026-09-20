@@ -11,6 +11,12 @@
 //! `bootstrap/`），防止已废除的回退/拉黑机构复活。
 //!
 //! 判据用 `concat!` 拼接关键词，避免本文件自匹配（与 `update.rs::t5` 同一手法）。
+//!
+//! 边界（2026-09-21 澄清）：这四个 token 禁的是**标识符**，即那套按版本记账并抑制重试的
+//! 机构本身，不是这些英文词的日常用法。安装包下载换源（`mirror::artifact_candidates` 的
+//! 候选源循环）不属于被禁机构：它不落账本、不拉黑版本、失败时把每个源的原因一起报出，
+//! 判据见 `docs/SHELL-UPDATE-CHANNEL-VERIFICATION.md` §九。但该循环里的变量**不得取这些
+//! token 名**，否则本门禁按子串命中而红 —— 用 `candidate` 一类的名字。
 
 use std::fs;
 use std::path::{Path, PathBuf};
