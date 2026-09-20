@@ -150,20 +150,10 @@ GitHub **永远不会执行**它；但 `docs/RELEASE-AND-BUILD-DECISION.md` 与 
 > `github-pat`（库在内核仓 `release/scripts/cred.sh path github-pat` 所指位置，本仓不携带凭据工具），
 > 不把令牌拼进命令行参数。
 >
-> **但「刚发布就 404」不能一律记成传播延迟**（2026-09-21 取证，触发点是同一清单包出厂 42 分钟后
-> `@latest` 已给 200、`@<ver>` 仍稳定 404，而同一路径在 jsdelivr 是 200、unpkg 的
-> **版本文件列表 API** 也已列出该文件）：
->
-> - unpkg 按 URL 缓存**未命中**，且这个负缓存与文件是否入库无关 —— 「列出文件的 API 有它」
->   与「取文件的 URL 404」可以同时成立，所以后者推不出「产物没发出去」。
-> - 结论口径：**H6-④ 只判客户端真正走的 URL** —— `tauri.conf.json` 的两条 `endpoints` 都写 `@latest`，
->   安装包 URL 是清单里的 `@<ver>/artifact/<文件>`。两者各自直取（本机实测四条 payload 全 200/206）；
->   `@<ver>/shell-manifest.json` 这一格没有任何客户端会走，404 不改变发布是否成立。
-> - 想主动清掉负缓存：重写该包的 dist-tag 让描述符换掉（`npm dist-tag rm <pkg> beta && npm dist-tag add
->   <pkg>@<ver> beta`），**不重发、不改产物**。本轮实测它对 `@latest` 生效、对旧的 `@<ver>` 失败 URL
->   没立刻生效 —— 所以这是排障手段，不是判据。
-> - 判据顺序不变：**先看 CI 的 `publish` 日志**（npm 自认的 `+ @dsh-sup/<pkg>@<ver>`），
->   再看 registry 的 `versions` / `dist-tags`，最后才动 CDN 结论。
+> **H6-④ 只判客户端真正走的 URL**，别判那些没人走的路径：`tauri.conf.json` 的两条 `endpoints` 都写
+> `@latest`，清单里的安装包是 `@<ver>/artifact/<文件>`。（曾按 `@<ver>/shell-manifest.json` 这一格取证，
+> 它在发布后约 3 分钟内返回 404、之后自愈 —— unpkg 的同步滞后，不是产物缺失；而这一格**没有任何客户端会取**，
+> 所以拿它当判据只会诱导「发布失败」的误判。判发布是否成立按上面的顺序：CI 日志 → registry → 真实 URL。）
 >
 > **GitHub Release 一行的判据来源**：tag 构建在无密钥时会被 workflow 主动判红
 > （`.github/workflows/build.yml` 的 `::error::TAURI_SIGNING_PRIVATE_KEY 未配置`），所以
