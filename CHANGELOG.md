@@ -35,6 +35,26 @@
 - `DESKTOP-ACCEPTANCE.md` §1 不再给任何本机产包命令（含此前留的 `cargo build --release`），
   §5 构建矩阵改为只指向 `RELEASE-STANDARD.md` §2 的唯一事实源。
 
+### 文档纠正：README 仍在本机跑构建与测试（第 4 轮）
+
+第 3 轮把「本机可以跑」这一类收口时漏了根 `README.md` —— 它不在任何门禁的读取范围内
+（壳侧门禁读 `docs/RELEASE-STANDARD.md`、`docs/DEVELOPMENT-TRACK.md` 等，不读 README），
+于是它继续以命令块教操作者本机执行：
+
+- 「想从源码跑起来」下的 `cd src-tauri && cargo build --release`；
+- 「开发 / 贡献」下的 `cargo build` + `./target/debug/dsh-supervisor-gui --node-plan`
+  （H3 无头冒烟在 §1 全流程表里明确标「仅 CI」，本机跑它没有验收意义）；
+- 版本校验代码块里的 `cargo test`。
+
+三处删净，改为说明构建 / 无头冒烟 / 全部测试都是 CI `build` job 的步骤、本机上限只有
+`bash -n` / `node --check` / `cargo fmt --check`，安装包取自 CI run 的 artifacts。
+`bump-shell.sh` 与 `verify-shell-versions.js` 留在本机（只改文件 / 只读比对，不构建）。
+`DEVELOPMENT-TRACK.md` §2 的「壳改动必须过 `cargo test --bins --tests`」补明由 CI 执行。
+
+**登记缺口**：`README.md` 没有任何门禁读取，这类漂移只能靠人工清扫；本轮不新增文本匹配门禁
+（对「提到 `cargo test`」的正文做正则区分「禁止语境 / 指令语境」必然误伤），
+待有真实判据再收口。
+
 **契约路径与不存在的机制**
 
 - 产品状态根迁移后，`~/.dsh/supervisor/*` 与 `~/.dsh/shell/*` 作为**现行读写路径**残留在

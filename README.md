@@ -83,27 +83,23 @@ dsh-supervisor self-check                      # guardVersion / node / platform 
 
 > **当前 Releases 是空的**：产线尚未跑通发布（签名私钥未配置 + 分支保护未定案，见
 > `docs/UPDATER-SIGNING-KEY.md`），安装包只在 CI 每次构建的 artifacts 里，没有面向用户的下载点。
-> 想从源码跑起来（**不是产包**，产包只在 CI）：
 
-```bash
-cd src-tauri && cargo build --release
-# 产物: target/release/dsh-supervisor-gui（Linux/Win/macOS 矩阵构建见 workflow）
-```
+**没有「本机先把壳跑起来」这一步。** `docs/RELEASE-STANDARD.md` §0 的硬标准：构建、无头冒烟
+（`cargo build` + `--node-plan`）与全部测试都是 CI `build` job 的步骤，本机执行既产不出可验收的包，
+其结论也不构成验收依据；本机跑起来还会绕过 CI 的 glibc 基座门禁与签名步骤，跑出与用户拿到的不同的二进制。
+本机上限只有纯静态检查：`bash -n`、`node --check`、`cargo fmt --check`。
 
 ## 开发 / 贡献
 
-```bash
-cd src-tauri
-cargo build            # 调试构建
-./target/debug/dsh-supervisor-gui --node-plan   # 无头冒烟：环境探针 + 官方最新 LTS
-```
+改代码规则见 `docs/DEVELOPMENT-TRACK.md`（SSOT）。推上去由 CI 裁决：
+`cargo test --bins` + 自动枚举的 `tests/*.rs`（引导流程回归、更新产物验收、各结构门禁）
+→ 无头冒烟 → 四平台打包。看 run 的 job 日志与 artifacts，而不是本机结论。
 
-版本升级与校验（本仓自持）：
+版本升级与校验（本仓自持，只改文件、不构建）：
 
 ```bash
 bash scripts/bump-shell.sh <ver>        # 三处互锁同号：Cargo.toml / tauri.conf.json / Cargo.lock
-node scripts/verify-shell-versions.js   # 自洽校验
-cargo test                              # 含引导流程回归与更新产物验收
+node scripts/verify-shell-versions.js   # 自洽校验（只读比对，本机可跑）
 ```
 
 感兴趣的方向：引导页交互、多语言、Windows 打包、自动化测试。欢迎提 Issue / PR。
