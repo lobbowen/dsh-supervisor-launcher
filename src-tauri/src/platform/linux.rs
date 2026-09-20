@@ -14,7 +14,7 @@ pub const NAME: &str = "linux";
 const INSTALL_CMD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
 /// Linux 可用提权通道（**按优先级**）。单一事实源：只由 `has_privilege_channel()` 使用，
-/// 供**壳自更新**（deb/rpm 落系统目录）判定「能否提权」。
+/// 供**壳自更新**（deb 落系统目录）判定「能否提权」。
 ///
 /// 提权探测与实际执行必须同源，否则会「宣称可更新却在安装时失败」。
 /// Node 安装**刻意不经过这里**：它解到用户级状态目录，零权限（门禁 A-2）。

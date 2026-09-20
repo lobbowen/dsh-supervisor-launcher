@@ -476,9 +476,17 @@ fn b19_all_three_download_paths_use_mirrors() {
     // ② 内核 npm：并行 + 壳配置优先
     assert!(core.contains("crate::mirror::probe_all"), "B19 FAIL 内核 npm 未用并行探测");
     assert!(core.contains("crate::mirror::load"), "B19 FAIL 内核 npm 未读壳镜像配置");
-    // ③ 壳自更新：运行时端点覆盖
+    // ③ 壳自更新：清单端点运行时覆盖 **+ 安装包按候选源换源**。
+    //   清单每平台只有一个绝对产物 URL，而插件下载阶段不会自己换源 ——
+    //   只做端点覆盖等于「清单拿得到、安装包拿不到」时仍然无解。
     assert!(main.contains(".endpoints(endpoints)"), "B19 FAIL 壳自更新端点未运行时覆盖");
     assert!(main.contains("crate::mirror::load()"), "B19 FAIL 壳自更新未读镜像配置");
+    let all = crate_sources();
+    assert!(all.contains("mirror::artifact_candidates"), "B19 FAIL 壳安装包未接候选源");
+    assert!(
+        all.contains("worth_next_source"),
+        "B19 FAIL 壳安装包换源未区分「源没给到字节」与「验签失败」（后者换源只会掩盖故障）"
+    );
     eprintln!("B19 PASS all three download paths use mirrors");
 }
 

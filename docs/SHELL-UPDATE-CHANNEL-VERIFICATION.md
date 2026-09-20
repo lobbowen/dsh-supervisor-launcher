@@ -7,14 +7,15 @@
 >
 > | 建议 | 后来怎样 | 现在的事实源 |
 > |---|---|---|
-> | **N1 通道 = npm CDN（unpkg/jsdelivr）** | **已采纳**：`tauri.conf.json` 的 `plugins.updater.endpoints` 就是这两条直链，清单由 CI 的 `shell-release/make-manifest.js` 生成。**冗余度打折**：1.2.0 出厂后分端点复测，jsdelivr 对 `.exe` 返 403（unpkg 200），故 Windows 实际只有单一 CDN | `docs/RELEASE-STANDARD.md` §1 H6/H8；`CHANGELOG.md` `[1.2.0]` 缺口条目 |
-> | **N2 Linux 主形态 = deb（放弃 AppImage）** | **已采纳并扩展**：Linux bundles = `deb,rpm`；**AppImage 全仓已废弃**，任何文档再出现它都是残留 | `docs/RELEASE-STANDARD.md` §2 矩阵 |
+> | **N1 通道 = npm CDN（unpkg/jsdelivr）** | **已采纳**：`tauri.conf.json` 的 `plugins.updater.endpoints` 就是这两条直链，清单由 CI 的 `shell-release/make-manifest.js` 生成。**冗余度先被打折、后按实测重建**：jsdelivr 对 `.exe` 返 403（清单却拿得到），所以「两条端点」从来不等于「两条下载源」—— 现在安装包由壳按候选源换源（`mirror::artifact_candidates`，见 §九） | `docs/RELEASE-STANDARD.md` §1 H6/H8；本文 §九 |
+> | **N2 Linux 主形态 = deb（放弃 AppImage）** | **采纳 deb，但不采纳「扩展」**：矩阵曾同时产 `deb,rpm`，现已**收窄为只产 `deb`** —— 支持面 = Ubuntu 一种形态，其它发行版不产不测不承诺（清单每平台只有一个槽位，多产一种形态就会让那种客户端的自动更新拿到别的包）。**AppImage 全仓已废弃**，任何文档再出现它都是残留 | `docs/RELEASE-STANDARD.md` §2 矩阵；`README.md` 的 Linux 那条 |
 > | **N3 内核本地预取 + 缓存加速** | **未采纳，且方向被推翻**：壳自更新链**没有预取、没有缓存、没有隐式回退**，账本只有 `pending -> confirmed` 两态。§六「加速侧」那段（含 `~/.dsh/shell/cache/` 路径）**从未落地，不要照它实现** | 内核 `src/domains/shell/journal.js`；紧急回退走 `rollback` dist-tag（内核仓 `RELEASE-CHANNEL-CONTRACT.md` RC-2 优先级 / RC-7 反降级下限）|
 >
 > §一 的实测网速是 2026-09-11 在**当时的开发机与当时的网络出口**上取样的，只用于解释「为什么不直连 GitHub」，
 > **不是当前带宽结论**。本仓的 GitHub Release 在 `1.2.0` 之前确实为空（签名密钥不可得，tag 构建被 workflow
 > 判红 —— 见 `docs/UPDATER-SIGNING-KEY.md` §〇），所以本文当时量的是旧账号仓库的 v0.1.0 资产、如今在本仓不可复现；
-> `v1.2.0` 起 Release 已有资产，但它仍然只是**手动下载点**，更新通道依旧是 npm CDN，本文结论不变。
+> `v1.2.0` 起 Release 已有资产。它**仍不是主通道**（清单与产物第一顺位都在 npm CDN），
+> 但按 §九 的实测它够格当**安装包的回退源** —— 这一条是 §一 那次取样给不出的结论。
 
 ---
 
@@ -32,6 +33,10 @@
 
 **推论**：77MB 的 AppImage 在 15–28 KB/s 下需 **约 45 分钟**。
 更致命的是——**Tauri updater 的传输超时会先触发，更新永远失败**，而不是只是慢。
+
+> 这条判据只对**主通道**成立（AppImage 早已不在支持面内）。09-21 在同一条出口上复测：
+> `v1.2.0` 的 Release 资产直连可取到全量字节、约 116KB/s，但会间歇性连不上 ——
+> 够格当回退源、不够格当主力。数字与判据见 §九。
 
 ### 为什么这恰好印证了内核既有机制的正确性
 
@@ -98,9 +103,10 @@ verify_signature(&buffer, &self.signature, &self.context.config.pubkey)?;
 
 ---
 
-## 四、重大修正：Tauri 支持 deb/rpm 自更新
+## 四、重大修正：Tauri 能自更新 deb（**我们只用 deb**）
 
-**我之前判断「Linux 只有 AppImage 是更新产物、deb 用户出局」是错的。** 源码证据：
+**我之前判断「Linux 只有 AppImage 是更新产物、deb 用户出局」是错的。** 源码证据（插件本身也认 rpm，
+但 rpm 不在支持面内，见 `RELEASE-STANDARD.md` §2 —— 下面这段只是能力取证，不是我们的产物清单）：
 
 ```rust
 fn install_inner(&self, bytes: &[u8]) -> Result<()> {
@@ -130,9 +136,10 @@ fn install_deb(&self, bytes: &[u8]) -> Result<()> {
 
 **deb 比 AppImage 小 20 倍**。这是之前未被考虑的选项。
 
-> 待实测项：Tauri 是否为 deb 自动生成 `.sig`（官方文档的 v2 产物列表只列了 AppImage/macOS/Windows，未提 deb）。
-> 若未自动生成，**我们自己用 minisign 签 deb 即可**（清单里的 `signature` 只需能用 pubkey 验证，与文件来源无关）。
-> 此项需 Rust 构建环境（本机当前无 cargo）才能最终确认。
+> 上面的「待实测：Tauri 是否为 deb 自动生成 `.sig`」**已确证，不必再等 Rust 环境**：
+> 线上清单 `@dsh-sup/shell-release@1.2.0` 的 `linux-x86_64` 条目 URL 与其签名的 trusted comment
+> 都是 `dsh-supervisor_1.2.0_amd64.deb` —— Tauri 自己为 deb 产出了 `.sig` 并写进了清单。
+> 复核口径见 `RELEASE-STANDARD.md` §5（含钥匙 id 的两层 base64 解法）。
 
 ---
 
@@ -160,14 +167,14 @@ fn install_deb(&self, bytes: &[u8]) -> Result<()> {
 
 ```
 【发布侧】
-  壳产物（AppImage / .app.tar.gz / -setup.exe / deb）
+  壳产物（deb / .app.tar.gz / -setup.exe —— Linux 只 deb 一种形态，见开头 N2 行）
       -> 发布为 npm 包：@dsh-sup/shell-<os>-<arch>@<version>
       -> 清单也作为包内文件：shell-manifest.json
 
 【获取侧】
-  壳启动 -> 读清单（unpkg / jsdelivr 直链）
+  壳启动 -> 读清单（unpkg / jsdelivr 直链，端点回退只覆盖这一步）
           -> 取 platforms[<os>-<arch>] = { url, signature }
-          -> url 指向 unpkg 上的产物文件
+          -> url 指向 unpkg 上的产物文件；该 URL 拿不到时由壳按实测候选换源（§九）
           -> tauri-plugin-updater：下载 -> minisign 验签 -> 平台安装
 
 【加速侧（可选）】                        ← 未采纳，从未落地（见开头 N3 行）
@@ -217,3 +224,81 @@ fn install_deb(&self, bytes: &[u8]) -> Result<()> {
 | **N2** | **Linux 更新主形态** | AppImage（77MB，免密码）/ **deb（3.8MB，需一次密码）** | 倾向 **deb**：体积差 20 倍、速度差 20 倍；提权是一次性成本 |
 | **N3** | 是否需要内核本地缓存加速 | 需要 / 不需要 | **需要**（热路径从 45 秒降到秒级；且是离线降级路径） |
 
+
+---
+
+## 九、复测：把「拿得到清单」与「拿得到安装包」分开量（2026-09-21）
+
+前八节量的都是**清单**能不能取到。但自更新真正要下载的是清单里那条**绝对产物 URL** 指向的安装包，
+而 Tauri 的 `Update::download_url` 在插件下载阶段**不会换源**（`endpoints` 的回退只覆盖清单请求）。
+所以「某镜像清单可达」推不出「该镜像能分发安装包」—— 这正是此前把 jsdelivr 记成
+「Windows 第二条 CDN」的出处。
+
+本轮唯一判据：**该源能否把本平台安装包的完整字节取回**（HTTP 200 + 全量）。
+清单 JSON、`.sig` 这类小包能取到不算数。取样 = 本机出口，直连与经代理各一遍，两遍判定一致；
+吞吐只作参考，**不代表用户网络**。产物取线上 `1.2.0`（win `.exe` = 3,272,190 字节）。
+
+| 候选源 | win `.exe` | linux `.deb` | mac `.app.tar.gz` | 清单 `.json` | 判定 |
+|---|---|---|---|---|---|
+| `unpkg.com/@dsh-sup/<pkg>@<ver>/artifact/…` | 200 全量 | 200 | 200 | 200 | **唯一四形态全通的公共 CDN** |
+| `cdn.jsdelivr.net/npm/…` | **403 Forbidden** | 200 | 200 | 200 | 安装包侧只覆盖 mac / linux；清单侧可用 |
+| `fastly` / `gcore` / `testingcf.jsdelivr.net`、`cdn.jsdmirror.com` | 403 | 200 | 200 | — | 同族同策略，换入口域名无效 |
+| `registry.npmmirror.com/<pkg>/<ver>/files/…` | 403 | 403 | 403 | 403 | 403 文案 = `"@dsh-sup/…" is not allow to unpkg files`：**按包**关闭 raw-file 路由，与扩展名无关 |
+| `unpkg.npmmirror.com` | DNS 不解析 | — | — | — | 主机不存在 |
+| `mirrors.cloud.tencent.com/npm`、`mirrors.huaweicloud.com/repository/npm` | 404 | 404 | 404 | 404 | 只有 registry 协议：`…/-/<pkg>-<ver>.tgz` **200 且快**（3,179KB），但 tgz 不是安装程序 |
+| `mirrors.aliyun.com/npm` | 404 | 404 | — | — | 连包元数据路径都非标准 |
+| `github.com/…/releases/download/v<ver>/<file>` | 200 全量 | 200 | 200（有同名坑，见下）| 无该资产 | 可作回退；直连约 116KB/s、经代理约 412KB/s，且**会间歇性连不上** |
+| `unpkg.net` | 503 `USAGE_EXCEEDED` | — | — | — | 不是镜像，是 unpkg 备用域且已限流 |
+| `gh-proxy.com`、`ghfast.top` | 200 | 200 | — | — | 能取到字节，但由**未审计第三方**中转 → 不进默认源表，只作排障手工出口 |
+| `mirror.ghproxy.com`、`hub.gitmirror.com` | 连接失败 | — | — | — | — |
+
+三条由此定案的事实：
+
+1. **国内 npm 镜像永远给不出 Windows 安装程序**：npmmirror 对整个 `@dsh-sup` scope 关闭 raw-file 路由，
+   腾讯 / 华为只有 registry 协议（tgz）。此前「npm CDN 多镜像」的想象，在 `.exe` 这一格是空的。
+2. **jsdelivr 家族按扩展名屏蔽 `.exe`**（不是我们包的问题，也不是某个入口域名的偶发），
+   因此任何把 jsdelivr 写成「Windows 的第二条 CDN」的表述都是错的，已全部清理。
+3. **GitHub Release 自 1.2.0 起确实在分发安装程序**（§一 那句「GitHub 直连不可用」是 09-11
+   那次出口的取样）。今天本机直连能到 116KB/s，但会间歇性连不上 —— 可作回退，不可当主力。
+
+**同名坑**：macOS 两架构的产物文件名都是 `dsh-supervisor.app.tar.gz`，挂进同一个 Release 会互相覆盖。
+换源换到错架构的包**不会装错**（清单里的签名对不上，验签必失败），但会把「直连失败」这种可懂的
+报错变成一句验签错误 —— 所以候选源只在**文件名带架构标识**时才挂 Release。
+
+### 落地
+
+| 位置 | 改动 |
+|---|---|
+| `src-tauri/src/mirror.rs` | 新增 `SHELL_ARTIFACT_NPM_CDNS` / `SHELL_ARTIFACT_RELEASE_BASE` 与 `artifact_candidates()`：清单声明源永远第一，其后按 npm 包内同路径换主机，最后退到同名 Release 资产 |
+| `src-tauri/src/commands/mod.rs` | `shell_update_apply` 按候选源逐个下载。**只有「这个源没把字节给全」**（`Network` / `Reqwest` / `Io` / 超时）才换源；验签类失败立即报出，换源掩盖它只会反复下载大包。全失败时把每个源的主机名与失败原因一起回显 |
+| 门禁 | `mirror.rs` 内联单测钉候选推导与「假镜像不得回流」的 deny-list；`commands/mod.rs` 内联单测钉换源判据**对着插件的错误形态**（`Update::download` 对非 2xx 统一返回 `Error::Network` ⇒ jsdelivr 屏蔽 `.exe` 的 403 会正常落到下一个源），判据不靠我们对「网络失败」的想象；`tests/bootstrap_flow.rs` B19 ③ 钉安装包链路确实接了候选源 |
+| `tauri.conf.json` 与 `SHELL_PRESETS` | **不动**：两条端点对**清单**都成立（本轮复测 200），只是不能再宣称它们分发 `.exe` |
+
+### 换源上线后按平台复算（同一天，线上 `1.2.0`，判据同上）
+
+把 `artifact_candidates()` 的推导在真实清单上重跑一遍，逐候选请求前 1MB（带 `Range`，故成功格是
+**206 + 1,048,576 字节**，不是 200；整包字节的判据见上表）：
+
+| 平台 | 候选（按尝试顺序） | 实测 |
+|---|---|---|
+| `windows-x86_64` | unpkg → jsdelivr → Release 同名 `.exe` | 206 取到 → **403**（预期，落到下一个）→ 206 取到（本机直连 ~82KB/s） |
+| `linux-x86_64` | unpkg → jsdelivr → Release 同名 `.deb` | 206 取到 → 206 → 206（~157KB/s） |
+| `darwin-arm64` / `darwin-x86_64` | unpkg → jsdelivr | 均取到（unpkg 对 `darwin-x64` 那格忽略了 `Range`，直接 200 给完整 4,139,411 字节）—— **不挂 Release**：`v1.2.0` 的资产表里 `dsh-supervisor.app.tar.gz` 只有一份，两架构共用，正是同名坑（由资产清单本身证实，不是推测） |
+
+Release 侧文件名与 npm `artifact/` 内的文件名逐字一致（`dsh-supervisor_1.2.0_x64-setup.exe`、
+`dsh-supervisor_1.2.0_amd64.deb`），所以同名回退成立。
+
+同日换一条出口（本机经代理）复算第二遍：**上表的判据结论逐格一致** —— 含 win 那格 jsdelivr 仍 403、
+mac 两格仍不挂 Release。变化的只有速度与 unpkg 的 `Range` 行为（win 的 Release 从 ~82KB/s 变 ~567KB/s；
+`darwin-x64` 那格这次给 206 而不是 200 全量）。⇒ 速度与 `Range` 支持是**取样属性**，随出口与 CDN 边缘节点变，
+不得当承诺引用；能当判据的只有「这一格取不取得到字节」。
+
+### 为什么不再往表里加源（「更多源」的天花板在哪）
+
+剩下的可用镜像只剩**腾讯 / 华为 / npmmirror 的 `.tgz`**（本轮实测 200 且快）。要接它就得
+下载 tgz → 解包 → 取出 `artifact/<file>` → **在壳侧自己验 minisign** —— 因为插件的验签发生在
+`download()` 内，绕过它就等于把签名校验从插件里搬进壳：`Cargo.toml` 里
+`minisign-verify` / `base64` 是**刻意只放 dev-dependencies**（验收门禁用的），运行时验签不是壳的职责，
+`tauri-plugin-updater` 那条依赖注释写的「壳侧不写任何平台分支」也在这里成立。
+所以 tgz 通道**不做**，除非哪天肯把「验签 + 解包」收进一个独立、可被同一门禁验的下载层 —— 那是
+更新通道设计，与 deb/rpm 槽位、mac 产物改名（`<name>_<arch>.app.tar.gz`，改完 mac 也能挂 Release）同批定案。

@@ -170,7 +170,7 @@ pub enum ShellError {
 | 服务定义（守卫）| systemd | LaunchAgent | schtasks | `platform/*::ServiceControl` |
 | 服务启停 | `systemctl --user` | `launchctl` | `schtasks` | 同上 |
 | 提权通道探测 | 有 `pkexec`/`sudo` 才算有 | 恒有（osascript）| 恒有（UAC）| `platform/*::has_privilege_channel` —— **只服务壳自更新** |
-| 壳自更新 | deb/rpm | .app 替换 | exe/msi | `update.rs` + `update_plan.rs` |
+| 壳自更新 | deb（支持面 = Ubuntu 一种形态）| .app 替换 | exe/msi | `update.rs` + `update_plan.rs` |
 
 **不变量 P1**：矩阵的每一格必须是「实现」或「显式不支持」。
 「显式不支持」在代码里表现为返回 `ShellError::Unsupported`，**绝不静默成功**。

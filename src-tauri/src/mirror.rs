@@ -67,6 +67,62 @@ pub const SHELL_PRESETS: [&str; 2] = [
     "https://cdn.jsdelivr.net/npm/@dsh-sup/shell-release@latest/shell-manifest.json",
 ];
 
+/// 安装包（清单里 `platforms.*.url` 指向的东西）的可换主机 npm CDN。
+///
+/// 入选判据：实测能把**本平台安装包的完整字节**取回（HTTP 200 + 全量），
+/// 只看清单或包元数据可达不算。逐源取样与全部排除理由见
+/// `docs/SHELL-UPDATE-CHANNEL-VERIFICATION.md` §九。
+pub const SHELL_ARTIFACT_NPM_CDNS: [&str; 2] = [
+    "https://unpkg.com",
+    "https://cdn.jsdelivr.net/npm",
+];
+
+/// 安装包的另一类源：CI 挂上 GitHub Release 的同名安装程序（`v<ver>/<文件名>`）。
+pub const SHELL_ARTIFACT_RELEASE_BASE: &str =
+    "https://github.com/lobbowen/dsh-supervisor-launcher/releases/download";
+
+/// 除清单声明的那一个 URL 外，安装包还该按序尝试哪些源（声明源永远第一）。
+///
+/// ## 为什么换源要在壳侧推
+///
+/// Tauri 的清单每平台**只有一个绝对产物 URL**，插件下载阶段不会自己换源 ——
+/// `endpoints`（含 `SHELL_PRESETS`）只覆盖**清单**那一次请求。声明的那台 CDN 一挂，
+/// 自动更新就只剩「下载失败」。`Update::download_url` 是公开字段，故壳可以在调用
+/// `download()` 前改写它；字节不变、验签仍在插件内按清单签名做，
+/// 所以**任何源都没有让 updater 装上篡改包的能力**（见 §二 的源码级验证）。
+///
+/// ## 两条已知形态差异（都是预期，不是缺陷）
+///
+/// · jsdelivr 对 `.exe` 按其自身的扩展名策略返 403 → Windows 上它必然落到下一个源；
+///   仍留在表里，因为 deb 与 app.tar.gz 它给得出，且哪天放开就自动多一条源。
+/// · 文件名不含架构标识时**不给** Release 候选：macOS 两架构的产物同名
+///   （`dsh-supervisor.app.tar.gz`），Release 上互相覆盖，换过去取到的是错架构的包 ——
+///   表现为验签失败，比直连失败更难排障。
+pub fn artifact_candidates(declared: &tauri::Url, ver: &str) -> Vec<tauri::Url> {
+    let mut out = vec![declared.clone()];
+    let path = declared.path().to_string();
+    let file = path.rsplit('/').next().unwrap_or("").to_string();
+    let mut add = |raw: String| {
+        if let Ok(u) = tauri::Url::parse(&raw) {
+            if !out.iter().any(|e| e == &u) {
+                out.push(u);
+            }
+        }
+    };
+    // 只有 npm 包内路径才能换主机（清单生成器用的就是这个形态）。
+    if let Some(tail) = path.strip_prefix("/@dsh-sup/") {
+        for base in SHELL_ARTIFACT_NPM_CDNS {
+            add(format!("{}/@dsh-sup/{}", base, tail));
+        }
+    }
+    if !ver.is_empty() && ARCH_TOKENS.iter().any(|a| file.contains(a)) {
+        add(format!("{}/v{}/{}", SHELL_ARTIFACT_RELEASE_BASE, ver, file));
+    }
+    out
+}
+
+const ARCH_TOKENS: [&str; 5] = ["x64", "amd64", "x86_64", "arm64", "aarch64"];
+
 /// 单次探测的总超时。
 ///
 /// 为什么不是 8 秒（2026-09-18 修）：index.json 单个就有 1.5~2MB（90+ 版本），
@@ -519,4 +575,65 @@ pub fn warmup_async() {
             }
             WARMING.store(false, std::sync::atomic::Ordering::SeqCst);
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::artifact_candidates;
+
+    fn url(s: &str) -> tauri::Url {
+        tauri::Url::parse(s).expect("测试内的 URL 必须是合法的")
+    }
+    fn strs(v: &[tauri::Url]) -> Vec<String> {
+        v.iter().map(|u| u.to_string()).collect()
+    }
+
+    /// 声明源永远第一，且不重复（换源是把「这一台没给到字节」接下去，不是替换主源）。
+    #[test]
+    fn declared_source_stays_first_and_deduped() {
+        let d = url("https://unpkg.com/@dsh-sup/shell-win-x64@1.2.0/artifact/dsh-supervisor_1.2.0_x64-setup.exe");
+        let got = artifact_candidates(&d, "1.2.0");
+        assert_eq!(got[0], d, "第一个候选必须是清单声明的那个 URL");
+        let all = strs(&got);
+        assert_eq!(all.len(), all.iter().collect::<std::collections::HashSet<_>>().len(),
+            "候选不能重复: {:?}", all);
+    }
+
+    /// Windows：npm 换主机 + 同名 Release 资产；且**绝不**出现实测不成立的源。
+    #[test]
+    fn windows_candidates_cover_measured_sources_only() {
+        let d = url("https://unpkg.com/@dsh-sup/shell-win-x64@1.2.0/artifact/dsh-supervisor_1.2.0_x64-setup.exe");
+        let all = strs(&artifact_candidates(&d, "1.2.0"));
+        assert!(all.iter().any(|u| u.starts_with("https://cdn.jsdelivr.net/npm/@dsh-sup/shell-win-x64@1.2.0/")),
+            "jsdelivr 的 npm 路径要在（它对 .exe 会给 403，换下一个源是预期）: {:?}", all);
+        assert!(all.contains(&"https://github.com/lobbowen/dsh-supervisor-launcher/releases/download/v1.2.0/dsh-supervisor_1.2.0_x64-setup.exe".to_string()),
+            "文件名带架构 → 同名 Release 资产要在: {:?}", all);
+        // 实测取不到安装包字节的，一律不许回到表里（判据与理由见 §九）。
+        for banned in [
+            "npmmirror", "jsdmirror", "fastly", "gcore", "testingcf",
+            "tencent", "aliyun", "huaweicloud", "unpkg.net", "gh-proxy", "ghfast", "gitmirror",
+        ] {
+            assert!(all.iter().all(|u| !u.contains(banned)),
+                "假镜像回流: {} 出现在 {:?}", banned, all);
+        }
+    }
+
+    /// macOS 两架构产物同名 → 不给 Release 候选（拿到的会是错架构的包）。
+    #[test]
+    fn ambiguous_asset_name_loses_the_release_candidate() {
+        let d = url("https://unpkg.com/@dsh-sup/shell-darwin-arm64@1.2.0/artifact/dsh-supervisor.app.tar.gz");
+        let all = strs(&artifact_candidates(&d, "1.2.0"));
+        assert!(all.iter().all(|u| !u.contains("releases/download")),
+            "文件名不含架构时不该挂 Release 候选: {:?}", all);
+    }
+
+    /// 非 npm 包路径（清单直接指向别处）时不得拼出垃圾候选；版本空则不挂 Release。
+    #[test]
+    fn foreign_or_missing_version_yields_only_the_declared_url() {
+        let d = url("https://example.com/files/shell-setup.exe");
+        assert_eq!(strs(&artifact_candidates(&d, "1.2.0")), vec![d.to_string()]);
+        let npm = url("https://unpkg.com/@dsh-sup/shell-linux-x64@1.2.0/artifact/dsh-supervisor_1.2.0_amd64.deb");
+        let nover = strs(&artifact_candidates(&npm, ""));
+        assert_eq!(nover.len(), 2, "无版本号时只保留 npm 同路径候选: {:?}", nover);
+    }
 }

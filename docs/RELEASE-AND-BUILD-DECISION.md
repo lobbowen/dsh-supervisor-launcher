@@ -20,7 +20,7 @@
 |---|---|---|
 | 职责 | 产品逻辑 + 守护：API/路由/relay/实例/插件/端口/更新编排 | **仅**桌面体验：引导页、托盘、安装程序、原生能力 |
 | 技术栈 | JS（CommonJS），运行时依赖 **0**、原生扩展 **0** | Rust（Tauri 2）+ 纯 HTML/CSS/JS 引导页（无构建步骤）|
-| 产物 | npm 平台子包 `@dsh-sup/dsh-core-*`（4 平台） | 安装程序 `deb/rpm`、`dmg/app`、`msi/nsis` + `@dsh-sup/shell-*` |
+| 产物 | npm 平台子包 `@dsh-sup/dsh-core-*`（4 平台） | 安装程序 `deb`（Ubuntu 单一形态）、`dmg/app`、`msi/nsis` + `@dsh-sup/shell-*` |
 | 分发 | npm registry | GitHub Release + npm（自更新产物） |
 | 节奏 | 高频、可单独 hotfix | 低频（安装程序） |
 | 构建负担 | 轻（纯 JS，一次构建派生四平台） | 重（Rust + 各平台系统库） |
@@ -104,14 +104,15 @@ git push origin main && git push origin v<ver>
 
 | 平台 | runner | 产物 |
 |---|---|---|
-| linux-x64 | `ubuntu-22.04`（**基座固定**，glibc 2.35）| `deb,rpm` |
+| linux-x64 | `ubuntu-22.04`（**基座固定**，glibc 2.35）| `deb`（**支持面只有 Ubuntu + deb**，见 `RELEASE-STANDARD.md` §2）|
 | darwin-arm64 | `macos-latest` | `app,dmg` |
 | darwin-x64 | `macos-15-intel`（**macos-14 已弃用**）| `app,dmg` |
 | win-x64 | `windows-latest` | `nsis,msi` |
 
-> Linux **必须**用 ubuntu-22.04 基座：在 24.04（glibc 2.39）构建的产物**无法**在
-> 22.04 / Debian 12 运行（Rust std 对 `pidfd_spawnp`/`pidfd_getpid` 的弱引用
-> 在 2.39 主机会被解析成硬性 `verneed`）。
+> Linux **必须**用 ubuntu-22.04 基座：在 24.04（glibc 2.39）构建的产物**无法**回到
+> 22.04 运行（Rust std 对 `pidfd_spawnp`/`pidfd_getpid` 的弱引用
+> 在 2.39 主机会被解析成硬性 `verneed`）。基座决定的是**下限**，不等于支持面 ——
+> 支持面由 `RELEASE-STANDARD.md` §2 那条「只支持 Ubuntu」界定。
 
 ---
 
@@ -135,7 +136,7 @@ git push origin main && git push origin v<ver>
     "strict": true,
     "contexts": [
       "version",
-      "build (ubuntu-22.04, linux-x64, deb,rpm, 2.35)",
+      "build (ubuntu-22.04, linux-x64, deb, 2.35)",
       "build (windows-latest, win-x64, nsis,msi)",
       "build (macos-latest, darwin-arm64, app,dmg)",
       "build (macos-15-intel, darwin-x64, app,dmg)"
@@ -158,6 +159,10 @@ git push origin main && git push origin v<ver>
 `required_pull_request_reviews` 必须**存在但审批数为 0**：这一条只是关掉「不经 PR 的直推」，
 不要求第二个人点头 —— 单人仓里审批数 ≥1 会让「CI 绿后合入」变成推不动的死锁。
 （早前本文写的是 `required_pull_request_reviews: null`，即允许直推主干，与「CI 是唯一放行裁决者」矛盾。）
+
+**语境名内嵌矩阵参数**，所以改矩阵就等于改分支保护：`bundles` 从 `deb,rpm` 收窄到 `deb` 那一次，
+Linux 腿的 job 名跟着变，**必须在同一个改动轮里把本表 PUT 上去**，否则保护仍在等一个永不产出的语境，
+所有 PR 从推上去那一秒起永久阻塞。（Linux 腿只出 deb 的理由见 §2 与支持面条目。）
 
 重设步骤（保护被误删或误改时，按上表原样恢复；2026-09-21 首次写入即用此调用）。
 **不要把令牌拼进命令行**（会落进 shell 历史与进程参数），也不要用 `$HOME` 直接推路径

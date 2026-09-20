@@ -122,11 +122,22 @@ fn r3_matrix_matches_workflow() {
         assert!(wf.contains(bundles),
             "R-3 失败：workflow 缺少 bundles {}", bundles);
     }
-    // Linux 基座必须是 22.04（glibc 2.35），否则产物无法在 22.04/Debian 12 运行
+    // Linux 基座必须是 22.04（glibc 2.35），否则产物在 22.04 上就跑不起来
     assert!(wf.contains("os: ubuntu-22.04"), "R-3 失败：Linux 基座不是 ubuntu-22.04");
     assert!(wf.contains("glibc_max: '2.35'") || wf.contains("glibc_max: \"2.35\"")
         || wf.contains("2.35"), "R-3 失败：workflow 未声明 glibc 2.35 上限");
-    eprintln!("R-3 PASS 四平台矩阵与 workflow 一致");
+    // Linux 支持面 = Ubuntu + deb 一种形态。R-3 上面只做「规范里的 bundles 出现在 workflow」
+    // 的正向包含，`deb` 是 `deb,rpm` 的子串，所以扩矩阵的人把 rpm 加回去时它照绿 ——
+    // 于是这里钉反向：产线与打包配置里都不许再出现 rpm（清单每平台一个槽位，
+    // 多出来的形态永远拿不到自己的更新包）。
+    assert!(!wf.contains("rpm"), "R-3 失败：workflow 又出现 rpm 产物（Linux 只支持 Ubuntu/deb）");
+    let conf: serde_json::Value =
+        serde_json::from_str(&read(&repo_root().join("src-tauri").join("tauri.conf.json")))
+            .expect("tauri.conf.json 必须是合法 JSON");
+    let targets = conf["bundle"]["targets"].as_array().cloned().unwrap_or_default();
+    assert!(!targets.iter().any(|t| t.as_str() == Some("rpm")),
+        "R-3 失败：tauri.conf.json 的 bundle.targets 仍列 rpm");
+    eprintln!("R-3 PASS 四平台矩阵与 workflow 一致，Linux 只出 deb");
 }
 
 #[test]

@@ -53,11 +53,10 @@ fn verify_like_tauri(data: &[u8], signature_b64: &str, pubkey_b64: &str) -> Resu
 
 /// Locate an updatable artifact plus its .sig in the build output.
 fn find_artifact() -> Option<(PathBuf, PathBuf)> {
-    // 跨平台覆盖：deb/rpm（Linux）、macos/*.app.tar.gz（macOS）、nsis/*.exe（Windows）。
-    // 若只列 deb/rpm，macOS/Windows 的 V1-V5 会静默 SKIP —— 等于这些平台根本没被验收。
+    // 跨平台覆盖：deb（Linux，支持面只有 Ubuntu/deb）、macos/*.app.tar.gz（macOS）、nsis/*.exe（Windows）。
+    // 若只列 Linux，macOS/Windows 的 V1-V5 会静默 SKIP —— 等于这些平台根本没被验收。
     let dirs = [
         repo_root().join("target/release/bundle/deb"),
-        repo_root().join("target/release/bundle/rpm"),
         repo_root().join("target/release/bundle/macos"),
         repo_root().join("target/release/bundle/nsis"),
     ];
@@ -68,7 +67,6 @@ fn find_artifact() -> Option<(PathBuf, PathBuf)> {
             let p = e.path();
             let name = p.file_name().and_then(|s| s.to_str()).unwrap_or("");
             let updatable = name.ends_with(".deb")
-                || name.ends_with(".rpm")
                 || name.ends_with(".app.tar.gz")
                 || (name.ends_with(".exe") && !name.ends_with(".sig"));
             if updatable {

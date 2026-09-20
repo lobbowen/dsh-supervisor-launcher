@@ -85,8 +85,14 @@ dsh-supervisor self-check                      # guardVersion / node / platform 
 
 | 通道 | 位置 | 用途 |
 |---|---|---|
-| GitHub Releases | 本仓 `Releases` 页（`softprops/action-gh-release` 在 tag 构建挂上各平台安装程序与对应 `.sig`） | 手动下载安装 |
-| npm + CDN | 安装程序 `@dsh-sup/shell-<platform>@<ver>/artifact/…`（unpkg 可直取；jsdelivr 屏蔽 `.exe`，见 `CHANGELOG.md` `[1.2.0]` 的缺口条目）；自更新清单 `@dsh-sup/shell-release@latest/shell-manifest.json` | **自动更新走的这条** |
+| GitHub Releases | 本仓 `Releases` 页（`softprops/action-gh-release` 在 tag 构建挂上各平台安装程序与对应 `.sig`） | 手动下载安装；**也是自动更新的一条回退来源**（见下） |
+| npm + CDN | 安装程序 `@dsh-sup/shell-<platform>@<ver>/artifact/…`；自更新清单 `@dsh-sup/shell-release@latest/shell-manifest.json` | **自动更新走的这条** |
+
+> 自动更新取**安装包**时的真实可选源（按 1.2.0 产物实测，逐源明细见 `docs/SHELL-UPDATE-CHANNEL-VERIFICATION.md` §九）：
+> 清单里每条只写一个 payload URL（unpkg），拿不到时壳按候选源依次换源 —— `unpkg` → `cdn.jsdelivr.net/npm`
+> → GitHub Release 同名资产。**jsdelivr 按扩展名屏蔽 `.exe`**，所以 Windows 上第二条会 403 并落到第三条；
+> deb 与 mac 的 `app.tar.gz` 两条 CDN 都拿得到。未审计的第三方加速镜像（gh-proxy 之类）**不放进候选**。
+> 换源不影响完整性：验签在下载之后、对着内置公钥按字节验，签不过就拒。
 
 > 两条通道的时间线不同：npm + CDN 从 `1.0.1` 起就在出货（旧账号 CI 签名，清单一直有更新）；
 > GitHub Releases 在 `1.2.0` 之前一直是 0 条 —— 迁仓后新账号没有签名密钥，tag 构建缺
@@ -99,9 +105,9 @@ dsh-supervisor self-check                      # guardVersion / node / platform 
 > 旧客户端内置旧公钥，永不接受新钥签的清单 —— 对它们自动更新等于失效。1.2.0 起自动更新恢复正常。
 > （内核自更新不经 minisign，不受影响。）
 >
-> **Linux 请装 `.deb`。** 构建矩阵同时产 `deb` 与 `rpm`，但更新清单每平台只有一个槽位、放的是 deb，
-> 因此 rpm 装上的客户端在自动更新时会拿到 deb 包。该缺口已登记（`CHANGELOG.md` 的 `[1.2.0]` 段），
-> 真正的修法待定案。
+> **Linux 只支持 Ubuntu，只出 `.deb` 一种形态。** 矩阵不再产非 deb 系的包（Fedora / openSUSE / RHEL
+> 与 AppImage 都不在支持面内）：更新清单每平台只有一个槽位，多产一种形态就会让装那种形态的客户端
+> 在自动更新时拿到别的包 —— 收窄支持面是这个缺口唯一的收口方式。见 `docs/RELEASE-STANDARD.md` §2。
 
 **没有「本机先把壳跑起来」这一步。** `docs/RELEASE-STANDARD.md` §0 的硬标准：构建、无头冒烟
 （`cargo build` + `--node-plan`）与全部测试都是 CI `build` job 的步骤，本机执行既产不出可验收的包，

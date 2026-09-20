@@ -108,7 +108,7 @@
 |---|---|
 | 执行器 | **两份**（不可合并）|
 | 理由 | 装的是**不同对象**、活在**不同约束**里：壳装**内核**要在 GUI 里同步回传结构化证据（命令/prefix/源/两次输出），并按壳持有的镜像 catalog 选源；内核装 **DSH/插件**必须**无人值守**（壳可能根本没开）—— R2 决定它不能反过来调壳 |
-| 提权 | **两条安装链都不主动提权**：Node 安装是用户级零权限（`platform/*.rs::install_node`，门禁 A-2）；内核 `npm install -g` 若落在只读前缀（如系统 Node 目录）只回传证据、**不擅自换前缀**（`core.rs::is_node_install_prefix`）。全仓唯一的提权消费者是**壳自更新**（deb/rpm 落系统位置），由 tauri-plugin-updater 承担 |
+| 提权 | **两条安装链都不主动提权**：Node 安装是用户级零权限（`platform/*.rs::install_node`，门禁 A-2）；内核 `npm install -g` 若落在只读前缀（如系统 Node 目录）只回传证据、**不擅自换前缀**（`core.rs::is_node_install_prefix`）。全仓唯一的提权消费者是**壳自更新**（deb 落系统位置），由 tauri-plugin-updater 承担 |
 | 共享部分 | npm 参数形态、registry 注入、超时、输出捕获 —— 写进**规格**（文档 + 测试向量）|
 
 ### D3 环境探测 —— **规格统一，代码各自保留**
