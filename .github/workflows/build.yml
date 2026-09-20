@@ -166,6 +166,10 @@ jobs:
               exit 1
             fi
             echo "::warning::TAURI_SIGNING_PRIVATE_KEY 未配置 —— 不生成 .sig，产物不可用于自动更新（非 tag 构建不阻断）"
+            # 必须 unset：secret 未配置时这里展开成空字符串，而 Tauri v2 CLI 把「传了但为空」
+            # 判为一把非法私钥（incorrect updater private key password）直接失败，
+            # 只在 echo 层面承诺「不阻断」并不成立。
+            unset TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD
           fi
           npx --yes @tauri-apps/cli@2 build --bundles "${{ matrix.bundles }}"
 
@@ -182,20 +186,23 @@ jobs:
 
       # ── 组装可发布的 npm 包（产物 + .sig + 清单条目）──
       # 说明：Tauri 的 {{target}}/{{arch}} 取值与 npm 命名不同，故用静态清单解耦；
-      #       组装器负责把「安装包 + .sig」成对收拢，并在缺 .sig 时**直接失败**
-      #       （缺签名 = 自动更新不可用，必须早失败而非静默发布）。
+      #       组装器负责把「安装包 + .sig」成对收拢。
+      #       缺 .sig 的判罚按场景分：tag 发布必须成对（缺则早失败，绝不静默发布）；
+      #       非 tag 构建只是验证产线，本就没有密钥，不能因缺 .sig 而红。
       - name: 组装 npm 包（更新产物 + 签名）
         shell: bash
         run: |
-          node shell-release/assemble-shell-pkg.js             --platform "${{ matrix.artifact }}"             --ver "${{ needs.version.outputs.ver }}"             --bundle-dir src-tauri/target/release/bundle             --out dist/npm-shell
+          REQ_SIG="--require-sig"; [[ "${GITHUB_REF}" == refs/tags/v* ]] || REQ_SIG=""
+          node shell-release/assemble-shell-pkg.js             --platform "${{ matrix.artifact }}"             --ver "${{ needs.version.outputs.ver }}"             --bundle-dir src-tauri/target/release/bundle             --out dist/npm-shell ${REQ_SIG}
 
       # ── 产物验收（本地端到端预演的 CI 化）──
       # 用 **Tauri 自己的依赖** 验证我们产出的东西正是 Tauri 会接受的东西：
       #   · minisign-verify —— tauri-plugin-updater 内部使用的同一个 crate
       #   · tauri_plugin_updater::RemoteRelease —— Tauri 自己的清单解析器
       # 覆盖：清单可解析 / 签名与配置公钥匹配 / 篡改必失败 / 换公钥必失败。
-      # 这一步失败 = 产物不可用于自动更新 → 必须早失败，绝不静默发布。
+      # 这一步失败 = 产物不可用于自动更新 → tag 发布必须早失败，绝不静默发布。
       - name: 产物验收（Tauri 同源验签 + 清单契约）
+        if: startsWith(github.ref, 'refs/tags/v')
         shell: bash
         env:
           # 必须绝对路径：本步骤 working-directory=src-tauri，相对路径会解析到 src-tauri/ 下

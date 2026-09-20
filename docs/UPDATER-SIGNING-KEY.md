@@ -1,7 +1,24 @@
 # 桌面壳自更新签名密钥（minisign）管理手册
 
-> **本文档不含私钥内容**（私钥仅存在于本机与离线备份，绝不入库）。
+> **本文档不含私钥内容**（私钥绝不入库）。
 > 密钥生成于 2026-09-11，用于桌面壳（Tauri）自更新产物签名。
+
+## 〇、当前状态（2026-09-20 实测，先读这段）
+
+| 事实 | 证据 |
+|---|---|
+| 两仓 GitHub Secrets 只有 `NPM_TOKEN`，没有任何 `TAURI_SIGNING_*` | REST `/repos/…/actions/secrets` 列举（core 与 launcher 各一） |
+| 本机已无 `~/.tauri/`，全盘 `*.key` / `*.key.pub` 无命中 | 2026-09-20 `find /home/bowen -maxdepth 6`；本文档原§二/§四 的本机路径与备份已不可核 |
+| 壳仓从未产出过签名产物，也从未发布过 GitHub Release | `/releases` 返回 0 条；main 上最近一次 run 结论 failure |
+| 公钥仍在仓内并生效 | `src-tauri/tauri.conf.json` `plugins.updater.pubkey`，key id `96DE3EF26F389F70` |
+
+**推论**：2026-09-19 的同机凭据事故（旧库 `~/.dsh/credentials`、`~/.ssh` 部署密钥全丢）很可能把
+`~/.tauri/` 一并带走；若离线介质另有副本，恢复前先按 §五 比对 key id 与 sha256 前缀。
+在私钥重新可用之前，**tag 发布会被 workflow 主动拦下**（这是设计，不是缺陷）；
+非 tag 构建不再因缺密钥而红（CI 会撤掉空的签名环境变量）。
+
+公钥与私钥的配对是单向可验证的：任何新公钥都要重新内置进 `tauri.conf.json`，
+而旧客户端只认旧公钥，见 §六。
 
 ## 一、这是什么、为什么必需
 
@@ -22,12 +39,17 @@ Tauri updater 在下载更新包后，**强制用公钥验证 minisign 签名，
 | 公钥（验签用） | `~/.tauri/dsh-supervisor.key.pub` | `644` | 可（已在 `tauri.conf.json` 公开） |
 | 本地备份 | `~/.tauri/backup/dsh-supervisor.key.<时间戳>` | `600` | **绝不** |
 
+> 上表是 2026-09-11 建档时的设计位置；**当前本机这三处都已不存在**（见 §〇）。恢复或重建后再按表核对。
+
 **指纹**（用于校验备份一致性；可安全记录）：
 
-| 文件 | sha256（前 16 位） |
-|---|---|
-| 私钥 | `92e3ae43ed4dea58` |
-| 公钥 | `d5ffd60103af390a` |
+| 文件 | sha256（前 16 位） | 2026-09-20 可核性 |
+|---|---|---|
+| 私钥 | `92e3ae43ed4dea58` | 不可核（本机文件已不存在，见 §〇） |
+| 公钥 | `d5ffd60103af390a` | **已核**：对 `tauri.conf.json` 内 pubkey 字符串（无换行）取 sha256 前 16 位即此值 |
+
+minisign key id（公钥解码后的注释）：`96DE3EF26F389F70`。恢复私钥副本后，先比对该 key id
+是否等于公钥注释，再比对私钥 sha256 前缀，两者都过才可用于发布。
 
 **公钥**（公开信息，与 `tauri.conf.json` 的 `plugins.updater.pubkey` 一致，152 字符）：
 
@@ -42,9 +64,16 @@ dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDk2REUzRUYyNkYzODlGNzAKUldS
 | `TAURI_SIGNING_PRIVATE_KEY` | 私钥**内容**或文件路径 | 构建时签名 |
 | `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | 密码 | **必须设置**（即使为空也要提供） |
 
-> ⚠ **实测结论**：本密钥为 `rsign encrypted secret key` 格式，**不设 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` 会签名失败**：
-> `failed to decode secret key: incorrect updater private key password`。
-> CI 中请显式提供该 secret（空字符串亦可），**不要遗漏**。
+> **纠错（2026-09-20 实测）**：原文把 `failed to decode secret key: incorrect updater private key password`
+> 归因成「密钥已加密但漏填密码」，这是错误引导。同一个报错在**密钥根本没配置**时也会出现：
+> secret 缺失时 Actions 把变量展开成空字符串，Tauri v2 CLI 于是拿空串去解码（`Missing comment in secret key`）。
+> 正确的做法分两种：
+> 1. 确实没有密钥（日常构建、PR）：CI 必须让该变量**不存在**而非为空（`build.yml` 的打包步骤已 `unset`），
+>    并且组装/验收步骤对 `.sig` 的强校验只在 tag 上生效；
+> 2. 有密钥（发布）：`TAURI_SIGNING_PRIVATE_KEY` 给内容或绝对路径，
+>    `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` 给该密钥**真实的**口令（未加密的密钥才可给空串）。
+>
+> 判据提示：报错文本里的 `Missing comment in secret key` 说明解码输入根本不是合法 minisign 私钥。
 
 `NPM_TOKEN` 亦需配置（发布 `@dsh-sup/shell-*` 与清单包 `@dsh-sup/shell-release`）。
 
