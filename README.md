@@ -81,8 +81,9 @@ dsh-supervisor self-check                      # guardVersion / node / platform 
 
 ### 壳（本仓库）
 
-> **当前 Releases 是空的**：产线尚未跑通发布（签名私钥未配置 + 分支保护未定案，见
-> `docs/UPDATER-SIGNING-KEY.md`），安装包只在 CI 每次构建的 artifacts 里，没有面向用户的下载点。
+> **当前 Releases 是空的**：产线尚未跑通发布。唯一阻塞项是**签名私钥未配置**（tag 构建缺
+> `TAURI_SIGNING_PRIVATE_KEY` 即报错退出，见 `docs/UPDATER-SIGNING-KEY.md`）；分支保护已于
+> 2026-09-21 写入 `main`，不再是未决项。安装包只在 CI 每次构建的 artifacts 里，没有面向用户的下载点。
 
 **没有「本机先把壳跑起来」这一步。** `docs/RELEASE-STANDARD.md` §0 的硬标准：构建、无头冒烟
 （`cargo build` + `--node-plan`）与全部测试都是 CI `build` job 的步骤，本机执行既产不出可验收的包，

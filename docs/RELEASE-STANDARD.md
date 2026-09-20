@@ -109,11 +109,16 @@ GitHub **永远不会执行**它；但 `docs/RELEASE-AND-BUILD-DECISION.md` 与 
 > `pull_request` 触发器于 2026-09-13 补入：此前 PR **完全不跑 CI**，
 > 若直接设 required status check 会让 PR **永久等待一个永不出现的状态**。
 
-分支保护（服务器端放行条件）**设计为**：**`version` + 4 条 `build (...)`**，strict + enforce_admins。
+分支保护（服务器端放行条件）**已启用**（2026-09-21 `PUT` 后 `GET` 读回）：required =
+**`version` + 4 条 `build (...)`**，`strict` + `enforce_admins` + `required_conversation_resolution`，
+必须走 PR 且**审批数 0**（单人仓设 ≥1 会让「CI 绿后合入」死锁；这条的作用是关掉直推主干），
+禁止 force push 与删除分支。`publish` 在 PR 事件上 `skipped`，**不在** required 里。
 
-> **当前实测未生效**（2026-09-20 REST `/repos/lobbowen/dsh-supervisor-launcher/branches/main/protection`
-> 返回 404 `Branch not protected`）：迁仓到 `lobbowen` 后未恢复，服务器端目前**没有任何放行条件**，
-> PR 可以不经 CI 直接合入。上表描述的是**应当恢复成的状态**，恢复属仓库管理员决策，不是产线缺陷。
+> **服务器端配置不随仓迁移**：2026-09-19 迁到 `lobbowen` 后本仓 `main` 一度 `404 Branch not protected`
+> （2026-09-20 实测），合入约束退化为本地纪律，直到 09-21 重新写入。**换账号 / 迁仓后必须重设**，
+> 且任何文档里的保护描述都不算依据 —— 以 `GET /repos/lobbowen/dsh-supervisor-launcher/branches/main/protection` 为准。
+> 精确 payload 与逐字 contexts、PUT/GET 的字段结构差异、误删后的恢复调用：
+> 见 `RELEASE-AND-BUILD-DECISION.md` 的「把 CI 设为合并门禁」附录。
 
 > 注意 required 的 context **内嵌矩阵参数**（如 `build (ubuntu-22.04, linux-x64, deb,rpm, 2.35)`）。
 > **改平台矩阵时必须同步更新分支保护**，否则旧语境永不出现 → 所有 PR 阻塞。
