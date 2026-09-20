@@ -1,9 +1,10 @@
 # 桌面壳真机验收（手工清单）
 
 > 本清单属**壳仓**（原误置于内核仓，2026-09-16 移交）。
-> 前置：Linux 可本机验证；macOS / Windows 需对应平台构建（见 §5）。
+> 前置：验收对象是 **CI 产出的安装包**（四平台矩阵，见 §5）；本机的 `cargo build` 只用于
+> 快速复现问题，**不作为验收依据**。
 >
-> ⚠ 本节命令仅供**本机验收构建**；**发布产物一律经 GitHub CI 产出**（`RELEASE-STANDARD.md` §0/§1，本地不得产生发布产物）。
+> ⚠ `RELEASE-STANDARD.md` §0 硬标准：**所有平台构建与发布必须经 GitHub CI 完成，本地不得产生任何发布产物**。
 
 ## 1. 构建产物
 ```bash
@@ -35,7 +36,7 @@ npx @tauri-apps/cli@2 build
 > 并经服务管理器重启守卫），或走壳启动门 2。守卫侧只可 `GET /self-update/status` 读状态。
 
 ## 5. 构建矩阵
-| 平台 | 命令（对应平台执行） | 产物 |
+| 平台 | 命令（由 CI 的对应 runner 执行，见 `RELEASE-STANDARD.md` §0）| 产物 |
 |---|---|---|
 | Linux | `npx @tauri-apps/cli@2 build` | deb + rpm（**AppImage 已废弃**，见 `RELEASE-STANDARD.md`）|
 | macOS | 同上 | dmg |
