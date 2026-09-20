@@ -43,12 +43,17 @@ bash scripts/bump-shell.sh <ver>        # 同号写入 Cargo.toml / tauri.conf.j
 node scripts/verify-shell-versions.js   # 自洽校验（不一致即失败）
 ```
 
-### 2.2 本地自证（发布前）
+### 2.2 本机自查（可选，**不构成验收依据**）
 
 ```bash
 cd src-tauri && cargo test            # 全部门禁（含跨平台导入门禁、CI 覆盖性门禁）
 cargo check --all-targets             # 0 警告
 ```
+
+> 这两条只是开发机上提前发现问题的手段，**验收只由 CI 的四平台矩阵裁决**（§0 硬标准：
+> 单平台跑绿证明不了另三个）。本机若与别的会话共享（同一工作树可能被并行改动），
+> 按内核仓 `ACCEPTANCE-STANDARD.md` 的口径**不在本机跑测试套件**，上限为
+> `cargo fmt --check` / `node --check` / `bash -n` 这类静态自查。
 
 ### 2.3 发布
 
@@ -109,12 +114,12 @@ git push origin main && git push origin v<ver>
 
 ## 附：把 CI 设为**合并门禁**（required status checks）
 
-### 现状（2026-09-13）
+### 现状（条目按 2026-09-20 实测校准）
 
 | 项 | 状态 |
 |---|---|
-| `pull_request` 触发器 | **已加**（本次）：此前 PR **完全不跑 CI**，若直接设 required 会让 PR 永远等不到状态 |
-| 分支保护 | **未设**（需仓库 **admin** 权限；自动化令牌属另一账号，无该仓 admin -> `Resource not accessible by personal access token`）|
+| `pull_request` 触发器 | **已加**：此前 PR **完全不跑 CI**，若直接设 required 会让 PR 永远等不到状态 |
+| 分支保护 | **未设**（`GET /repos/lobbowen/dsh-supervisor-launcher/branches/main/protection` 实测 404 Branch not protected）。旧文档把原因写成「自动化令牌属另一账号、无该仓 admin」—— 该前提已不成立：现用 PAT 属 `lobbowen` 本人，且对两仓都带 `Administration: Read and write`，**API 已具备设置能力**。保持未设是因为恢复保护属共享状态变更（会同时限制直推与管理员），按内核仓 `AUDIT-REPORT-2026-09-19.md` §K-1 待定案 |
 
 ### 该设什么（version + 4 平台，共 5 个语境）
 
@@ -140,15 +145,24 @@ git push origin main && git push origin v<ver>
 }
 ```
 
-执行（需仓库 admin 的令牌）：
+执行（令牌须对目标仓有 `Administration: Read and write`；本仓现用 PAT 已具备）。
+**不要把令牌拼进命令行**（会落进 shell 历史与进程参数），也不要用 `$HOME` 直接推路径
+（沙箱会重定向 `$HOME`）—— 路径由内核仓的凭据入口解析，值在进程内读：
 
 ```bash
-curl -X PUT \
-  -H "Authorization: Bearer ADMIN_TOKEN" \
-  -H "Accept: application/vnd.github+json" \
-  -d @protection.json \
-  https://api.github.com/repos/lobbowen/dsh-supervisor-launcher/branches/main/protection
+# 在壳仓根执行；CRED_FILE 只放路径不放值
+export CRED_FILE="$(bash <内核仓>/release/scripts/cred.sh path github-pat)"
+node -e '
+const fs=require("fs");
+const tok=fs.readFileSync(process.env.CRED_FILE,"utf8").trim();
+fetch("https://api.github.com/repos/lobbowen/dsh-supervisor-launcher/branches/main/protection",{
+  method:"PUT",
+  headers:{authorization:"Bearer "+tok,accept:"application/vnd.github+json","content-type":"application/json"},
+  body:fs.readFileSync("protection.json")}).then(async(r)=>console.log(r.status, await r.text()));
+'
 ```
+
+> 走不开命令行时，等价操作是 GitHub UI 的 Settings → Branches → branch protection。
 
 > **context 字符串必须与 job 名逐字一致**（含括号内矩阵参数）。
 > 取法：跑一次 CI 后查 `GET /repos/{owner}/{repo}/actions/runs/{run_id}/jobs` 的 `jobs[].name`。
@@ -162,5 +176,8 @@ curl -X PUT \
 
 ### 与内核仓的差异
 
-内核仓 `build` 是**条件 job**（`need_build==true` 才跑），故**不可**设 required，只设 `precheck`/`test`；
-壳仓 `build` 无条件，故**应该**把它设为 required —— 这正是「跨平台构建能力不被业务开发破坏」的服务器端保障。
+两仓的 `build` **如今都是无条件矩阵**（内核仓 2026-09-14 起移除了 job 级 `if:`，
+`need_build` 只门控 `release` job 与 `--publish` 步骤），所以两侧都有资格把 `build` 设为 required。
+差别在 required 集合本身：内核仓现有口径只设 `precheck` + `test`（见内核仓 `DEVELOPMENT-TRACK.md` §7），
+壳仓按本节表格设 `version` + 4 条 `build (...)` —— 这正是「跨平台构建能力不被业务开发破坏」的
+服务器端保障。**两仓当前都还没设**（见上文现状），因此现阶段合入约束只剩本地纪律 + PR 上的 CI 状态。
