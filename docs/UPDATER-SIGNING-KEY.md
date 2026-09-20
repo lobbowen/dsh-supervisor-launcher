@@ -7,9 +7,9 @@
 
 | 事实 | 证据 |
 |---|---|
-| **签名产物在线上、且是在用的更新通道**：清单 `@dsh-sup/shell-release@latest` 在该轮实测时指 1.1.11（`pub_date` 2026-09-18），四平台各带一份 minisign 签名。现值随每次发布变化，重核：`npm view @dsh-sup/shell-release version` | `GET https://unpkg.com/@dsh-sup/shell-release@latest/shell-manifest.json`，逐条解码 `platforms.*.signature` |
-| **全部已发布版本共用一把钥匙**：抽验 1.0.1 / 1.0.5 / 1.1.0 / 1.1.5 / 1.1.9 / 1.1.10 / 1.1.11，key id 均为 `96DE3EF26F389F70`，与 `tauri.conf.json` 内置公钥逐字一致 | 同上取各版本 manifest；签名 blob 第 2..10 字节（小端转 hex）即 key id |
-| **通道不是 GitHub Release**：`/repos/lobbowen/dsh-supervisor-launcher/releases` 为 0 条，但清单与产物托管在 npm（unpkg + jsdelivr 两个端点写在 `tauri.conf.json`）。**本节此前写「壳仓从未产出过签名产物，也从未发布过 GitHub Release」是错误引导** —— 后半句真、前半句假，且它足以诱导「换钥无害」的结论 | `releases` 返回 `[]`；`npm view @dsh-sup/shell-release versions` = 22 个版本，实测时点 latest 为 `1.1.11` |
+| **签名产物在线上、且是在用的更新通道**：清单 `@dsh-sup/shell-release@latest` 现指 `1.2.0`（换钥后首版，`pub_date` 2026-09-20），四平台各带一份 minisign 签名。现值随每次发布变化，重核：`npm view @dsh-sup/shell-release version` | `GET https://unpkg.com/@dsh-sup/shell-release@latest/shell-manifest.json`，按 `docs/RELEASE-STANDARD.md` §5 的解法逐条取 key id |
+| **1.1.11 及更早版本共用一把钥匙**：抽验 1.0.1 / 1.0.5 / 1.1.0 / 1.1.5 / 1.1.9 / 1.1.10 / 1.1.11，key id 均为 `96DE3EF26F389F70`，与该轮 `tauri.conf.json` 内置公钥逐字一致 → 存量客户端只认这一把。**1.2.0 起换成新钥**，两把不通用 | 同上取各版本 manifest；签名 blob 第 2..10 字节（小端转 hex）即 key id |
+| **通道不是 GitHub Release**：该轮取证时 `/repos/…/releases` 为 0 条，而清单与产物一直托管在 npm（unpkg + jsdelivr 两个端点写在 `tauri.conf.json`；回退冗余对 win 不成立，见 `CHANGELOG.md` `[1.2.0]` 缺口条目）。**本节此前写「壳仓从未产出过签名产物，也从未发布过 GitHub Release」是错误引导** —— 后半句在当时真、前半句假，且它足以诱导「换钥无害」的结论。**现状**：`v1.2.0` 起 Release 有资产（手动下载点），但自动更新仍只走 npm + CDN | `releases/tags/v1.2.0` 返回 12 项资产；`npm view @dsh-sup/shell-release versions` 含 `1.2.0` |
 | **旧钥判不可得，用户 2026-09-21 裁决：轮换而非继续等待** —— 新钥对已生成、新公钥已内置 `tauri.conf.json`、两枚签名 secret 已配置 | 新 minisign key id `54A15461E39C8AEF`；私钥与口令按 §四 布局落在 `~/.tauri/`；`GET /repos/lobbowen/dsh-supervisor-launcher/actions/secrets` 现列 `NPM_TOKEN` + `TAURI_SIGNING_PRIVATE_KEY` + `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` |
 | **§〇 此前写的「冻结」已解除**：不再等待找回旧钥，也不再禁止建钥 —— 但旧钥的取证结论仍然成立，是本次换钥代价的来源 | 上表前三行（清单在产线、28 条签名同 key id、通道是 npm + CDN）为 2026-09-21 实测 |
 
@@ -56,7 +56,9 @@ Tauri updater 在下载更新包后，**强制用公钥验证 minisign 签名，
 | 公钥（= `tauri.conf.json` 的 pubkey 整串，无换行） | `9084f65cdc138bea` | 2026-09-21 已核 |
 
 现用 minisign key id（公钥解码后首行注释）：`54A15461E39C8AEF`。核对某份产物是否出自现用钥匙：
-取清单 `platforms.*.signature` 解码后的第 2..10 字节按小端转 hex，应等于该 id。
+把 `platforms.*.signature` **外层 base64 解成文本，取其第二行**（签名 blob）再 base64 解码，
+取该 blob 的第 2..10 字节按小端转 hex，应等于该 id —— 只解外层会得到 `"trusted "` 这类 ASCII，
+解到最后一行会得到 global signature，两种错法的输出都像 hex 且**每平台都不同**，不足以定性。
 
 **现用公钥**（公开信息，与 `tauri.conf.json` 的 `plugins.updater.pubkey` 一致，152 字符）：
 
@@ -158,3 +160,7 @@ minisign **不支持密钥轮换对旧用户生效**：公钥固化在客户端�
 本机 / git 历史 / 现账号三处均不可得（§〇），继续等待找回 = 壳自更新通道无限期停摆。
 用户裁决承担代价换通道恢复：`≤1.1.11` 的存量客户端不再接受自动更新，需手动重装 1.2.0 一次；
 公告与下载点写在 `README.md`，新钥匙身份见 §二。
+
+出厂后的验收证据（线上可复算，口径见 `docs/RELEASE-STANDARD.md` §5）：tag run 的 H7 同源验签四平台全绿，
+`@latest` 清单四条签名的 key id 均为 `54A15461E39C8AEF`，同期 `@1.1.11` 清单复算仍为旧 id
+—— 两把钥匙各管各的版本区间，没有混用。逐条记录见 `CHANGELOG.md` 的 `[1.2.0]` 段。

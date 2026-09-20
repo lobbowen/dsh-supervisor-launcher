@@ -24,6 +24,24 @@
 - 产线证据（本 PR 的 CI，非本机）：四平台各产出**成对**的 `<安装程序>` + `<安装程序>.sig`，
   且组装 npm 包步骤无 `TAURI_SIGNING_PRIVATE_KEY 未配置` 告警；tag 轮另加 H7 同源验签。
 
+### 发布后验证（H9）实测：1.2.0 确已按新钥出厂
+
+判据全部取自线上（本机不构建、不发布），口径见 `docs/RELEASE-STANDARD.md` §5。
+
+- tag run `35533127291`：`version` + 四平台 `build` + `publish` 六 job 全绿；`publish` 日志内
+  npm 自认的确认行齐五条 —— `+ @dsh-sup/shell-{darwin-arm64,darwin-x64,linux-x64,win-x64,release}@1.2.0`。
+- H7 同源验签（`产物验收（Tauri 同源验签 + 清单契约）`，即 `cargo test --test updater_artifacts`）
+  在**四个平台的 tag 构建里都绿** —— 它用 updater 插件内部同一个 minisign 实现按 `tauri.conf.json`
+  的新 pubkey 验，过则证明客户端会接受这份产物（换钥的决定性证据，非本机可得）。
+- registry：五个包的 `1.2.0` 均在，`dist-tags.latest` 全部指到 `1.2.0`（含清单包 `shell-release`）。
+- 清单（`unpkg` 与 `jsdelivr`、`@1.2.0` 与 `@latest` 四种组合一致）：`version=1.2.0`，
+  四条 `platforms.*.signature` 解出的 key id **全为 `54A15461E39C8AEF`**（新钥）；
+  同期取 `@1.1.11` 清单复算得 `96DE3EF26F389F70`（旧钥）→ 换钥在产物侧成立，且解法本身可信。
+- GitHub Release `v1.2.0`：12 项资产 = 7 个安装形态 + 5 个 `.sig`（deb / rpm / nsis exe / msi /
+  mac app.tar.gz 各一份签名），两个 `.dmg` 无 `.sig` —— Tauri 只给它认的更新产物签名，与清单无关。
+- **≤1.1.11 客户端的实测预期**：`@latest` 已是新钥清单，旧客户端拉到后验签报错而**不会**装上半个更新，
+  这正是换钥公告里承诺的行为；恢复自动更新只能手动装 1.2.0（`README.md` 下载点）。
+
 ### 已知缺口（本版未修，如实登记）：Linux 更新清单只有 deb 一个槽位
 
 Linux job 的 `bundles` 是 `deb,rpm` —— 两种形态一起产，但清单每平台只有一个槽位，放的是 **deb**。
@@ -31,17 +49,36 @@ Linux job 的 `bundles` 是 `deb,rpm` —— 两种形态一起产，但清单�
 `README.md` 明确「Linux 请装 .deb」。真正的修法（rpm 独立槽位 / 停发 rpm / 按包形态分流）属更新通道设计，
 待定案，不在本版顺手改。
 
+### 第二个已知缺口（本版未修，如实登记）：jsdelivr 屏蔽 `.exe`，Windows 只剩单一 CDN
+
+1.2.0 出厂后按端点分平台复测（`tauri.conf.json` 的 `plugins.updater.endpoints` 是 unpkg → jsdelivr 两条）：
+
+| 端点 | 清单 | deb | app.tar.gz | win `.exe` |
+|---|---|---|---|---|
+| unpkg | 200 | 200 | 200 | 200 |
+| jsdelivr | 206 | 206 | 206 | **403 Forbidden** |
+
+`.exe` 的 403 在 `1.1.11` 上同样复现，故与本版无关，是 jsdelivr 侧对可执行文件的处置；
+同包的 `manifest-entry.json` 与 `.exe.sig` 在 jsdelivr 都取到 200，说明不是整包缺失。
+
+后果：**Windows 客户端实际只有 unpkg 一条路** —— 主端点排在前面所以正常更新不受影响，
+但清单里承诺的「多 CDN 回退」对 win 不成立，unpkg 故障时 win 用户会停在旧版。
+修法（加第三方镜像 / 自建镜像 / 换 win 产物形态）属更新通道设计，与上一条同批待定案，
+本版只把「两 CDN 皆可直取」的错误概括改掉，不动 `endpoints`。
+
 ### 签名密钥的现状纠正：已签名产物一直在产线，换钥不是无害
 
 `docs/UPDATER-SIGNING-KEY.md` §〇 原写「壳仓从未产出过签名产物，也从未发布过 GitHub Release」。
 后半句真、前半句**假**，而且危害直接：读的人会判定「既然从没签过，换把钥匙无所谓」，而 §四/§六
 自己写的正是「换钥 = 已安装用户永久收不到更新」。实测（2026-09-21，取 npm 上的线上清单逐条解码）：
 
-- 更新通道是 **npm + CDN**，不是 GitHub Release：清单 `@dsh-sup/shell-release@latest` 现指
-  `1.1.11`（`pub_date` 2026-09-18），四平台各带一份 minisign 签名；安装程序本身在
-  `@dsh-sup/shell-<platform>@<ver>/artifact/…`，unpkg / jsdelivr 可直取（win setup 3.27 MB、
-  darwin app.tar.gz 3.93 MB 均 HTTP 200）。故 `README.md` 原写「安装包只在 CI artifacts 里，
-  没有面向用户的下载点」也一并纠正。
+- 更新通道是 **npm + CDN**，不是 GitHub Release：清单 `@dsh-sup/shell-release@latest` 该轮实测指
+  `1.1.11`（`pub_date` 2026-09-18；现值以 `npm view @dsh-sup/shell-release dist-tags` 为准），
+  四平台各带一份 minisign 签名；安装程序本身在 `@dsh-sup/shell-<platform>@<ver>/artifact/…`，
+  **unpkg 可直取**（win setup 3.27 MB、darwin app.tar.gz 3.93 MB 均 HTTP 200）。故 `README.md`
+  原写「安装包只在 CI artifacts 里，没有面向用户的下载点」也一并纠正。
+  > 该轮把结论写成「unpkg / jsdelivr 均可直取」，是**没逐端点分平台取证**的过度概括：1.2.0 出厂后
+  > 复测，jsdelivr 对 `.exe` 一律 403（`1.1.11` 与 `1.2.0` 同），见下方「第二个已知缺口」。
 - 抽验 `1.0.1 / 1.0.5 / 1.1.0 / 1.1.5 / 1.1.9 / 1.1.10 / 1.1.11` 七个版本共 28 条签名，
   key id **全部** 是 `96DE3EF26F389F70`，与 `tauri.conf.json` 内置公钥一致 → 全体存量客户端只认这一把钥匙。
 - **旧**私钥四处不可得（该轮取证的时点结论；本机现有 `~/.tauri/` 是新钥，见上方轮换条目）：

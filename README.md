@@ -85,13 +85,14 @@ dsh-supervisor self-check                      # guardVersion / node / platform 
 
 | 通道 | 位置 | 用途 |
 |---|---|---|
-| GitHub Releases | 本仓 `Releases` 页（`softprops/action-gh-release` 在 tag 构建挂上四平台安装程序 + `.sig`） | 手动下载安装 |
-| npm + CDN | 安装程序 `@dsh-sup/shell-<platform>@<ver>/artifact/…`（unpkg / jsdelivr 可直取）；自更新清单 `@dsh-sup/shell-release@latest/shell-manifest.json` | **自动更新走的这条** |
+| GitHub Releases | 本仓 `Releases` 页（`softprops/action-gh-release` 在 tag 构建挂上各平台安装程序与对应 `.sig`） | 手动下载安装 |
+| npm + CDN | 安装程序 `@dsh-sup/shell-<platform>@<ver>/artifact/…`（unpkg 可直取；jsdelivr 屏蔽 `.exe`，见 `CHANGELOG.md` `[1.2.0]` 的缺口条目）；自更新清单 `@dsh-sup/shell-release@latest/shell-manifest.json` | **自动更新走的这条** |
 
 > 两条通道的时间线不同：npm + CDN 从 `1.0.1` 起就在出货（旧账号 CI 签名，清单一直有更新）；
-> GitHub Releases 则一直是 0 条 —— 迁仓后新账号没有签名密钥，tag 构建缺 `TAURI_SIGNING_PRIVATE_KEY`
-> 即报错退出（这是设计，见 `docs/UPDATER-SIGNING-KEY.md` §〇），`1.1.11`（2026-09-18）之后
-> 两条通道都没有新版本。**`1.2.0`（本版）发布后两条通道同时恢复，且改用新钥匙签名。**
+> GitHub Releases 在 `1.2.0` 之前一直是 0 条 —— 迁仓后新账号没有签名密钥，tag 构建缺
+> `TAURI_SIGNING_PRIVATE_KEY` 即报错退出（这是设计，见 `docs/UPDATER-SIGNING-KEY.md` §〇）。
+> **`1.2.0` 起两条通道同时在线，且改用新钥匙签名**：`Releases/v1.2.0` 有资产，
+> `@dsh-sup/shell-release@latest` 的清单四条签名都是新钥（复核口径见 `docs/RELEASE-STANDARD.md` §5）。
 > 日常构建的 CI artifacts 只是未发布的中间产物，不是下载点。
 
 > **≤1.1.11 的客户端必须手动重装 1.2.0 一次。** 签名钥匙在 1.2.0 换过：Tauri 强制验签、无降级路径，
