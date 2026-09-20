@@ -1,6 +1,6 @@
 # Changelog（桌面壳）
 
-本文件记录桌面壳（`dsh-supervisor-gui`，公开仓 `wasi7mglns/dsh-supervisor-launcher`）的重要变更。
+本文件记录桌面壳（`dsh-supervisor-gui`，公开仓 `lobbowen/dsh-supervisor-launcher`）的重要变更。
 
 ## [未发布]
 
@@ -27,6 +27,25 @@
   （新增不变量 T-1b/T-1c/T-7b/T-8/T-9），并纠正两处错误引导：`npmOk === false` 应为 `!== true`、
   `node_status` 契约漏记 `npmVersion`。
 - 删除 `10-ui.js` 中重复声明的 `wait` / `hideFail`（合并残留；行为不变，但会让人读错出口）。
+
+### 修复：产线承诺与执行不符 —— 无签名密钥的构建被误判为代码红
+
+`build.yml` 的打包步骤注释写着「未配置 secret 时为空，不阻断」，但这句话没有实现：secret 缺失时
+Actions 把变量展开成空字符串继续导出，Tauri v2 CLI 拿空串去解码并报
+`failed to decode secret key: ... Missing comment in secret key`；紧接着组装步骤对缺 `.sig` 无条件
+`exit 1`，验签验收步骤也无条件跑。结果是**任何没有签名密钥的构建必然全红**（mac/win/linux 四平台
+一起红），而这红与当次代码改动无关，等价于完整构建矩阵不可用。
+
+- 打包步骤：key 缺失分支内 `unset TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD`，
+  让 CLI 真正走「无私钥」路径；tag 构建仍先拦后报（缺密钥不可发布）。
+- 组装步骤：`--require-sig` 仅在 `refs/tags/v*` 上传入；`assemble-shell-pkg.js` 的缺 `.sig` 早失败
+  挂到该开关上（发布路径的强校验一字不放宽），并修 `parseArgs` 使末尾布尔开关不被当成取值
+  （旧实现会让 `--require-sig` 得到 `undefined` 且其后参数整体错位）。
+- 验签验收步骤加步骤级 tag `if:`；**不给** `build` job 加 job 级 `if:`（那会违反 C-c/C-d）。
+- 门禁：新增 C-f（无密钥构建不阻断的三处语义）、C-g（组装器保留发布强校验 + 布尔开关解析）、
+  C-h（三条判据的旧形态反向夹具），全部为纯函数判据。
+- 文档：`docs/UPDATER-SIGNING-KEY.md` 纠正把同一报错归因成「漏填密码」的错误引导，并如实登记
+  当前无私钥、无 GitHub Release、公钥指纹可核而私钥指纹不可核的实测状态。
 
 ## [1.1.11]（2026-09-18）
 
