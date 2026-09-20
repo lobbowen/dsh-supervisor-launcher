@@ -129,24 +129,28 @@ GitHub **永远不会执行**它；但 `docs/RELEASE-AND-BUILD-DECISION.md` 与 
 |---|---|---|
 | npm 壳包四平台 | `npm view @dsh-sup/shell-<platform>@<ver> version` ×4 | 四者皆等于目标版本 |
 | 清单包 | `npm view @dsh-sup/shell-release dist-tags` | 指向新版本 |
+| 清单签名钥匙 | 取清单，逐条把 `platforms.*.signature` base64 解出文本，再解其中**第二行**（签名 blob）的第 2..10 字节按小端转 hex | 四条**全等于** `tauri.conf.json` 内置公钥的 key id |
 | GitHub Release | tag `v<ver>` | 四平台安装包附件齐备 |
 | CI 结论 | tag run | version + 四平台 build + publish 全绿 |
 | 安装冒烟 | 各平台安装包 | 能装、能起、能更新 |
 
+> **清单是嵌套两层编码**：`signature` 字段本身是 base64，解出来是 minisign 的**四行文本**
+> （untrusted comment / 签名 blob / trusted comment / global signature），钥匙 id 只在**第二行**那个 blob 里。
+> 直接对外层 base64 取第 2..10 字节会解出 `"trusted "` 之类的 ASCII，看着像 hex 却不是钥匙 id；
+> 取最后一行则拿到 global signature 的字节，每平台都不同 —— 两种错法都会**假绿**（判不出钥匙错配）。
+
 > **执行位置与判据顺序**（与内核仓 `RELEASE-STANDARD.md` §5 同规）：本机没有 `gh` / `curl`，
-> 且 registry 查询有**传播延迟** —— 刚发布就 `npm view` 可能返回 E404 或旧版本，这**不是发布失败**。
-> 判据顺序：先看 CI 的 `publish` 日志里 npm 自己的确认行（`+ @dsh-sup/<pkg>@<ver>`），
-> 再重试查询（45s 间隔、最多 4 次）。查询需要凭据时在**进程内**读取凭据库里的 `github-pat`
-> （库在内核仓 `release/scripts/cred.sh path github-pat` 所指位置，本仓不携带凭据工具），
+> 且 registry 与 CDN 查询都有**传播延迟** —— 刚发布就 `npm view` 可能返回 E404 或旧版本，unpkg /
+> jsdelivr 也可能仍在服务旧的文件列表，这**不是发布失败**。判据顺序：**先看 CI 的 `publish` 日志**
+> （`+ @dsh-sup/<pkg>@<ver>` 是 npm 自己的确认行），再重试查询（建议 45s 间隔、最多 4 次；
+> 2026-09-21 实测 unpkg 侧滞后约 3 分钟，比 registry 更久）。查询需要凭据时在**进程内**读取凭据库里的
+> `github-pat`（库在内核仓 `release/scripts/cred.sh path github-pat` 所指位置，本仓不携带凭据工具），
 > 不把令牌拼进命令行参数。
 >
-> **GitHub Release 一行的现状**：tag 发布会被 workflow 主动拦下，直到 minisign 私钥重新可用
-> （见 `docs/UPDATER-SIGNING-KEY.md` §〇）；在此之前 Release 恒为空是**设计**，不是产物丢失。
-
-> **注意：查询 npm 必须容忍传播延迟**（2026-09-14 实测）：刚发布后立即查询可能返回 E404 或旧版本列表 ——
-> 这是 **registry / CDN 传播延迟**，不代表发布失败。判据顺序：**先看 CI 的 publish 日志**
-> （`+ @dsh-sup/<pkg>@<ver>` 是 npm 的确认），再重试查询（建议 45s 间隔、最多 4 次）。
-> 本次发布即因此出现过一次假警报（两个包被误判为漏发，实为传播延迟）。
+> **GitHub Release 一行的判据来源**：tag 构建在无密钥时会被 workflow 主动判红
+> （`.github/workflows/build.yml` 的 `::error::TAURI_SIGNING_PRIVATE_KEY 未配置`），所以
+> 「tag run 绿但 Release 为空」是不可能状态；反过来，**Release 为空即等于密钥丢失**，
+> 按 `docs/UPDATER-SIGNING-KEY.md` §〇 处置，不要当成打包失败。
 
 ## 6. 失败处置与回滚
 | 情形 | 处置 |

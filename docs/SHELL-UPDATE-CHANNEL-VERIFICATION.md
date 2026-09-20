@@ -7,13 +7,14 @@
 >
 > | 建议 | 后来怎样 | 现在的事实源 |
 > |---|---|---|
-> | **N1 通道 = npm CDN（unpkg/jsdelivr）** | **已采纳**：`tauri.conf.json` 的 `plugins.updater.endpoints` 就是这两条直链，清单由 CI 的 `shell-release/make-manifest.js` 生成 | `docs/RELEASE-STANDARD.md` §1 H6/H8 |
+> | **N1 通道 = npm CDN（unpkg/jsdelivr）** | **已采纳**：`tauri.conf.json` 的 `plugins.updater.endpoints` 就是这两条直链，清单由 CI 的 `shell-release/make-manifest.js` 生成。**冗余度打折**：1.2.0 出厂后分端点复测，jsdelivr 对 `.exe` 返 403（unpkg 200），故 Windows 实际只有单一 CDN | `docs/RELEASE-STANDARD.md` §1 H6/H8；`CHANGELOG.md` `[1.2.0]` 缺口条目 |
 > | **N2 Linux 主形态 = deb（放弃 AppImage）** | **已采纳并扩展**：Linux bundles = `deb,rpm`；**AppImage 全仓已废弃**，任何文档再出现它都是残留 | `docs/RELEASE-STANDARD.md` §2 矩阵 |
 > | **N3 内核本地预取 + 缓存加速** | **未采纳，且方向被推翻**：壳自更新链**没有预取、没有缓存、没有隐式回退**，账本只有 `pending -> confirmed` 两态。§六「加速侧」那段（含 `~/.dsh/shell/cache/` 路径）**从未落地，不要照它实现** | 内核 `src/domains/shell/journal.js`；紧急回退走 `rollback` dist-tag（内核仓 `RELEASE-CHANNEL-CONTRACT.md` RC-2 优先级 / RC-7 反降级下限）|
 >
 > §一 的实测网速是 2026-09-11 在**当时的开发机与当时的网络出口**上取样的，只用于解释「为什么不直连 GitHub」，
-> **不是当前带宽结论**；GitHub Release 本身现在也是空的（见 `docs/UPDATER-SIGNING-KEY.md` §〇），
-> 所以那批资产如今在本仓已不可复现。
+> **不是当前带宽结论**。本仓的 GitHub Release 在 `1.2.0` 之前确实为空（签名密钥不可得，tag 构建被 workflow
+> 判红 —— 见 `docs/UPDATER-SIGNING-KEY.md` §〇），所以本文当时量的是旧账号仓库的 v0.1.0 资产、如今在本仓不可复现；
+> `v1.2.0` 起 Release 已有资产，但它仍然只是**手动下载点**，更新通道依旧是 npm CDN，本文结论不变。
 
 ---
 
@@ -204,7 +205,7 @@ fn install_deb(&self, bytes: &[u8]) -> Result<()> {
 | P4 发布链 | CI 产出更新产物 + 挂 GitHub Release | **产物发布为 npm 包**（复用已有 npm 发布流程）；GitHub Release 仅作人工下载 / 备用 |
 | P5 分发形态 | Linux「AppImage 主通道 / deb 由 apt」 | **新增选项：deb 可自更新（3.8MB，pkexec 提权）**；体积差 20 倍，需重新决策 |
 | 风险 K3 | 回环 HTTP vs TLS 强制 | 已消除（HTTPS 原生满足） |
-| 新增 | — | **K13：npm CDN 可用性**（unpkg / jsdelivr 均为第三方；缓解：多 CDN 回退 + 内核本地缓存） |
+| 新增 | — | **K13：npm CDN 可用性**（unpkg / jsdelivr 均为第三方）。该条设想的两个缓解**都打了折扣**：多 CDN 回退对 Windows 不成立（jsdelivr 屏蔽 `.exe`，见 `CHANGELOG.md` `[1.2.0]`），内核本地缓存**从未落地**（N3 已被推翻）。风险仍在，只是不再有「已经 mitigated」的假象 |
 
 ---
 
