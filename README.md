@@ -81,11 +81,26 @@ dsh-supervisor self-check                      # guardVersion / node / platform 
 
 ### 壳（本仓库）
 
-> **当前 GitHub Releases 是空的**：tag 构建缺 `TAURI_SIGNING_PRIVATE_KEY` 即报错退出（这是设计，
-> 见 `docs/UPDATER-SIGNING-KEY.md` §〇），故自 2026-09-18 的 `1.1.11` 之后没有再出过新壳。
-> **这不等于没有下载点**：面向用户的产物走 npm + CDN —— 安装程序在
-> `@dsh-sup/shell-<platform>@<ver>/artifact/…`（unpkg / jsdelivr 可直取），自更新清单在
-> `@dsh-sup/shell-release@latest/shell-manifest.json`。CI 每次构建的 artifacts 只是未发布的中间产物。
+壳有**两条**面向用户的分发路径，都由 CI 在 `v*` tag 上产出（本机一律不产发布物）：
+
+| 通道 | 位置 | 用途 |
+|---|---|---|
+| GitHub Releases | 本仓 `Releases` 页（`softprops/action-gh-release` 在 tag 构建挂上四平台安装程序 + `.sig`） | 手动下载安装 |
+| npm + CDN | 安装程序 `@dsh-sup/shell-<platform>@<ver>/artifact/…`（unpkg / jsdelivr 可直取）；自更新清单 `@dsh-sup/shell-release@latest/shell-manifest.json` | **自动更新走的这条** |
+
+> 两条通道的时间线不同：npm + CDN 从 `1.0.1` 起就在出货（旧账号 CI 签名，清单一直有更新）；
+> GitHub Releases 则一直是 0 条 —— 迁仓后新账号没有签名密钥，tag 构建缺 `TAURI_SIGNING_PRIVATE_KEY`
+> 即报错退出（这是设计，见 `docs/UPDATER-SIGNING-KEY.md` §〇），`1.1.11`（2026-09-18）之后
+> 两条通道都没有新版本。**`1.2.0`（本版）发布后两条通道同时恢复，且改用新钥匙签名。**
+> 日常构建的 CI artifacts 只是未发布的中间产物，不是下载点。
+
+> **≤1.1.11 的客户端必须手动重装 1.2.0 一次。** 签名钥匙在 1.2.0 换过：Tauri 强制验签、无降级路径，
+> 旧客户端内置旧公钥，永不接受新钥签的清单 —— 对它们自动更新等于失效。1.2.0 起自动更新恢复正常。
+> （内核自更新不经 minisign，不受影响。）
+>
+> **Linux 请装 `.deb`。** 构建矩阵同时产 `deb` 与 `rpm`，但更新清单每平台只有一个槽位、放的是 deb，
+> 因此 rpm 装上的客户端在自动更新时会拿到 deb 包。该缺口已登记（`CHANGELOG.md` 的 `[1.2.0]` 段），
+> 真正的修法待定案。
 
 **没有「本机先把壳跑起来」这一步。** `docs/RELEASE-STANDARD.md` §0 的硬标准：构建、无头冒烟
 （`cargo build` + `--node-plan`）与全部测试都是 CI `build` job 的步骤，本机执行既产不出可验收的包，

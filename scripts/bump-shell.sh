@@ -20,5 +20,6 @@ NEW="$NEW" node -e "const fs=require('fs');const p='src-tauri/tauri.conf.json';c
 node scripts/verify-shell-versions.js
 echo "=== 壳版本已提升: $CUR → $NEW ==="
 echo "  1) 更新 CHANGELOG.md"
-echo "  2) git add -A && git commit && git tag v$NEW && git push origin main && git push origin v$NEW"
+echo "  2) git add -A && git commit && git push origin HEAD（走 PR：主干有分支保护，直推会被拒）"
+echo "  3) CI 全绿后合并，再从主干打 tag 并推送：git tag v\$NEW && git push origin v\$NEW"
 echo "  公开仓 tag 触发 .github/workflows/build.yml → 四平台 bundle + npm 壳包"
