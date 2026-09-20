@@ -137,7 +137,7 @@ ManagedRegistry.heartbeat(5000)                objects.js:289-324
 | 契约 | 类型 | 方向 | 格式/语义 |
 |---|---|---|---|
 | `~/.dsh/supervisor/config.json` | 文件 | 内核写 / **壳读** | `apiPort`、`closeAction`(hide\|exit)、`apiAccessKey`、`shellWatchdog`…（**壳读内核配置的唯一入口**：`env.rs:229 config_json()`，一律真 JSON 解析，禁字符串扫描）|
-| `~/.dsh/supervisor/runtime.json` | 文件 | **壳写** / 内核读 | `{nodeVersion,nodePath,installedAt,source}`（`node.rs:378`；`settings-view.js:40` 读）|
+| `~/.dsh/supervisor/runtime.json` | 文件 | **壳写** / 内核读 | schema 2 工具链契约：node（path/binDir/version）+ npm（path/**args**/**version**）+ 旧键 `nodePath`/`nodeVersion`/`minNode`。唯一写入方 `runtime_contract::write`（`record_runtime_meta` 已删除，见 §30.2 现状）|
 | `~/.dsh/supervisor/registry.json` | 文件 | **壳写** / 内核读 | 镜像源 `{mode,origins,manualOrigin}`（`mirror.rs:191 export_to_kernel`；`supervisor.js:192` 读）|
 | `~/.dsh/shell/identity.json` | 文件 | **壳写** / 内核读 | `{version,platform,arch,installKind,selfUpdateCapable,phase,pid,startedAt,lastSeenAt,exe}`（`update.rs::init_identity` 写；`domains/shell/index.js` 读）|
 | `~/.dsh/shell/update-journal.json` | 文件 | 内核写 / 内核读（面板与 CLI 经 `/shell/status`）| 壳更新账本 `{from,to,confirmed}`；**不含隐式回退/拉黑/冷却字段**（紧急回退走发布通道契约的 `rollback` dist-tag，不经此账本）（`domains/shell/index.js`）|
@@ -826,6 +826,10 @@ let meta = serde_json::json!({
     "minNode": MIN_NODE,          // ← 新增："v22.12.0"
 });
 ```
+
+**现状（勿照抄上面的代码块）**：`record_runtime_meta` 已删除 —— 它与 `runtime_contract::write`
+是**两个写者**写同一个文件，且它不写 npm 那半边，会把 npm 事实整体覆盖掉。契约现在由
+`runtime_contract::write` 单一写入，键映射集中在 `runtime_contract::meta`（见 §6）。
 
 **内核侧（M4-b）**：`env-catalog.js` 的 node/npm 条目增加 `requiredVersion` 判定：
 

@@ -297,20 +297,24 @@ pub fn npm_manual_hint(version: &str) -> String {
 /// 复用**已下载且 SHA256 校验通过**的同一产物，不重新下载：网络下载已在管线前段完成，
 ///   再下一遍只会把「补 npm」拖成一次完整重装，并让用户多等一个 30~50MB 的下载。
 /// 失败一律归 npm 步骤（调用方据此发 `install_error { kind: "npm" }`），不报成 node 失败。
-pub fn reinstall_for_npm(local: &Path) -> Result<crate::runtime_contract::NodeRuntime, String> {
+///
+/// `version` 由调用方（`finalize_install`）传入**已校验**的 Node 版本：产物是同一个经 SHA256
+///   核对的归档，其版本在管线前段就确认过了。这里不再 `unwrap_or_default()` 兜一个空版本 ——
+///   空版本一旦被写进契约，下游每一条「已就绪」播报都会念出一个看不见的号。
+pub fn reinstall_for_npm(local: &Path, version: &str) -> Result<crate::runtime_contract::NodeRuntime, String> {
     // 重装可能把「另一个旧 Node」留在 PATH/记录里，故用安装器返回的路径直接复探，
     //   而不是再问一次 PATH（否则可能拿到旧版本，与目标版本不一致 → 永不收敛）。
     let node = install(local)?;
-    let version = crate::env::node_version(&node)
-        .or_else(|| probe_after().map(|(_, v)| v))
-        .unwrap_or_default();
-    let rt = crate::runtime_contract::derive_usable(&node, &version)
-        .ok_or_else(|| npm_manual_hint(&version))?;
+    let rt = crate::runtime_contract::derive_usable(&node, version)
+        .ok_or_else(|| npm_manual_hint(version))?;
     crate::runtime_contract::write(&rt);
     Ok(rt)
 }
 
 /// npm 在给定 node 目录下是否**真实可用**（文件存在 != 可用，不变量 T-1b）。
+///
+/// 只判可用性、不返回事实；需要 npm 路径/版本时用 `runtime_contract::derive_usable`
+///   （它一次探测同时给出路径、前置参数与版本，别处不得再探一遍来拼同一结论）。
 pub fn npm_usable_at(node_bin: &Path) -> bool {
     node_bin
         .parent()
@@ -319,7 +323,10 @@ pub fn npm_usable_at(node_bin: &Path) -> bool {
 }
 
 /// 安装收尾（SSOT §2.2 步骤 2/3）：校验 node（版本 + 最低门槛）→ 校验 npm →
-/// 不可用则重装补 npm（幂等）。返回 (node_path, version)；
+/// 不可用则重装补 npm（幂等）。
+/// 成功返回**运行期契约本身**（node 路径/版本 + npm 路径/参数/版本），
+///   而不是再拼一份字段子集：管线外层的每一条播报都必须出自这份事实，
+///   否则就会出现「拿 node 版本当 npm 版本念出去」那类无从校验的口径分叉。
 /// 失败以 bool 区分归属（true=npm / false=node），供调用方发对应 install_error。
 ///
 /// 为什么这段必须在 node.rs 而不是 main.rs：G3 门禁要求 main.rs 只做组装
@@ -328,7 +335,7 @@ pub fn finalize_install(
     node_bin: &Path,
     target: &str,
     local: &Path,
-) -> Result<(String, String), (bool, String)> {
+) -> Result<crate::runtime_contract::NodeRuntime, (bool, String)> {
     let v = crate::env::node_version(node_bin)
         .ok_or_else(|| (false, "安装后未能检测到 Node.js".to_string()))?;
     if v != target {
@@ -337,16 +344,16 @@ pub fn finalize_install(
     if !meets_minimum(Some(&v)) {
         return Err((false, format!("安装到的 Node.js {} 低于最低要求 {}", v, MIN_NODE)));
     }
-    if npm_usable_at(node_bin) {
-        // 成功即写运行期契约（单一写入方）：内核/守卫据此绑定该绝对 node/npm 路径。
-        if let Some(rt) = crate::runtime_contract::derive_usable(node_bin, &v) {
-            crate::runtime_contract::write(&rt);
-        }
-        return Ok((node_bin.display().to_string(), v));
+    // derive_usable 内部就是一次真实执行 npm（T-1b）：None 即「npm 不可用」，
+    //   不需要先 npm_usable_at 再 derive_usable —— 那会把同一个 npm 探测执行两遍。
+    if let Some(rt) = crate::runtime_contract::derive_usable(node_bin, &v) {
+        crate::runtime_contract::write(&rt);
+        return Ok(rt);
     }
     crate::update::log("官方分发包未提供可用 npm，正在重新执行官方安装（幂等）…");
-    reinstall_for_npm(local).map_err(|e| (true, e))?;
-    Ok((node_bin.display().to_string(), v))
+    // 直接返回重装后的契约：路径/版本以安装器**这次**给出的为准（旧实现把重装前的 node_bin
+    //   报出去，一旦重装换了落点，外层拿到的就是一个不再存在的路径）。
+    reinstall_for_npm(local, &v).map_err(|e| (true, e))
 }
 
 /// 安装后复探（PATH 优先，其次已知落点）。

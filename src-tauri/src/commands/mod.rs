@@ -184,19 +184,32 @@ pub fn start_node_install(state: tauri::State<Mutex<RunState>>, app: tauri::AppH
         let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
         s.busy = false;
         match out {
-            Ok((node_path, version)) => {
-                s.installed = Some(version.clone());
+            Ok(rt) => {
+                s.installed = Some(rt.version.clone());
                 s.progress = 1.0;
-                s.status = format!("Node.js {} 就绪，正在启动守卫…", version);
-                s.logs.push(format!("安装完成: {} @ {}", version, node_path));
+                s.status = format!(
+                    "运行环境就绪（Node {} · npm {}），正在启动守卫…",
+                    rt.version,
+                    rt.npm_version_label()
+                );
+                s.logs.push(format!("安装完成: {} @ {}", rt.version, rt.node.display()));
                 // 探测缓存必须失效：新装的 Node 只有重新探测才会被发现
                 // （否则引导页会在「已装好」之后仍报未检测到）。
                 crate::nodeprobe::invalidate();
-                // 成功事件的 kind 固定为 npm：管线**只在 npm 校验通过后**才返回 Ok，
-                //   故走完的最后一步必是 npm（node 装好但 npm 缺时是 Err，绝不报 done）。
+                // 完成播报按 kind 各发一条，version 各归各的（SSOT §2.4：`install_done { kind,
+                //   version }` 里的 version 就是该 kind 自己的版本）。旧实现只发一条 kind=npm
+                //   却带 node 版本，于是引导页念出的「npm 已就绪（v22.x）」从来不是 npm 的版本。
+                // npm 未回读版本号时发 null：事实层不写「未知」的文案变体，怎么念由 UI 唯一出口决定。
                 let _ = handle.emit(
                     "install_done",
-                    serde_json::json!({ "kind": crate::InstallKind::Npm.as_str(), "version": version }),
+                    serde_json::json!({ "kind": crate::InstallKind::Node.as_str(), "version": rt.version }),
+                );
+                let _ = handle.emit(
+                    "install_done",
+                    serde_json::json!({
+                        "kind": crate::InstallKind::Npm.as_str(),
+                        "version": rt.npm_version
+                    }),
                 );
             }
             Err(f) => {

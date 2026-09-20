@@ -149,11 +149,12 @@ pub(crate) fn push_status(app: &tauri::AppHandle, kind: InstallKind, status: Str
 
 /// 完整工具链安装管线（SSOT §2.2）：**node 与 npm 顺序执行，缺一不可**。
 ///
-/// 返回值 `(node_path, version)` 形状保持不变，但语义收紧：npm 补不上时**必须** Err ——
-///   原实现只校验 node 版本，于是「node 在、npm 缺」也被判成功（SSOT §1 根因①），
-///   前端随后用不存在的 npm 去装内核，必然失败。
+/// 返回**运行期契约本身**（node 路径/版本 + npm 路径/参数/版本）：外层每一条播报都从它取，
+///   于是「某个 kind 的版本」在管线里只存在一份事实。
+/// 语义收紧：npm 补不上时**必须** Err —— 原实现只校验 node 版本，于是「node 在、npm 缺」也被判
+///   成功（SSOT §1 根因①），前端随后用不存在的 npm 去装内核，必然失败。
 /// 失败经 `InstallFailure` 带上归属步骤（node/npm），供 IPC 边界发 `install_error { kind, error }`。
-fn run_install(app: &tauri::AppHandle) -> Result<(String, String), InstallFailure> {
+fn run_install(app: &tauri::AppHandle) -> Result<runtime_contract::NodeRuntime, InstallFailure> {
     push_status(app, InstallKind::Node, "获取官方最新 LTS 版本…".into(), 0.1);
     // ① 解析并安装/修复 node（现有 latest_lts → download_verified → install 链路不变）。
     let choice = node::latest_lts().map_err(InstallFailure::node)?;
@@ -178,10 +179,12 @@ fn run_install(app: &tauri::AppHandle) -> Result<(String, String), InstallFailur
     //   校验/补 npm 的完整收尾在 node.rs（G3：main.rs 只做组装）。
     crate::nodeprobe::invalidate();
     push_status(app, InstallKind::Npm, "正在校验 npm…".into(), 0.85);
-    let (node_path, installed) = node::finalize_install(&node_bin, &version, &local)
+    // 收尾返回**运行期契约**（node 与 npm 的路径/版本都出自一次真实探测）。
+    //   这里不再自行拼「npm 已就绪（…）」：完成播报的唯一出口是 install_done（SSOT §2.4），
+    //   而该处曾把 Node 版本号当 npm 版本号念出去 —— 同一句话有两个作者时就没人能对账。
+    let rt = node::finalize_install(&node_bin, &version, &local)
         .map_err(|(is_npm, e)| if is_npm { InstallFailure::npm(e) } else { InstallFailure::node(e) })?;
-    push_status(app, InstallKind::Npm, format!("npm 已就绪（{}）", version), 1.0);
-    Ok((node_path, installed))
+    Ok(rt)
 }
 
 // 此处原有孤立文档注释「内核可执行名候选（跨平台）…」+ 6 行空行（2026-09-12 清理）：

@@ -4,7 +4,29 @@
 
 ## [未发布]
 
-（下一版本待记）
+### 修复：装了 npm 却看不见 npm —— 工具链版本贯穿契约 / 事件 / 文案
+
+用户实测：环境检测与安装全流程走通后，界面上没有任何 npm 的痕迹。npm 确实被安装并校验过
+（1.1.10 起的工具链契约），但它的**版本**在源头就没有落脚点：`runtime.json` 只记 npm 路径，
+安装管线返回 `(node_path, version)` 元组，于是完成事件 `install_done { kind: "npm", version }`
+只能填 node 的版本号 —— 引导页念出的「npm 已就绪（v22.x）」从来不是 npm 的版本。
+
+- 运行期契约（schema 2）新增 `npm.version`：只在真实执行过 `npm --version` 时写入，未执行为
+  null，`derive`（只解析路径，服务启动路径）与 `derive_usable`（执行过）因此可区分。
+  写与读改为共用同一处键映射（`meta` / `from_meta`），加字段不再会漏一侧。
+- 安装管线（`run_install` / `node::finalize_install` / `reinstall_for_npm`）返回**契约本身**，
+  不再返回字段子集。顺带修三处同源缺陷：重装后仍上报重装前的 node 路径、node 版本可能以空串
+  写进契约、一次收尾把 npm 探测执行两遍。
+- `install_done` 按 kind 各发一条，version 各归各的；npm 版本未回读时发 null，怎么念由 UI 决定。
+- 引导层把 `NS.nodeVer` / `NS.npmVer` 两个散装字段收成 `NS.toolchain` 快照：唯一写入点
+  `applyToolchain`、唯一读取口 `readEnv`（三个轮询点各写一遍的 15s 超时预算与文案一并收口）。
+  「环境就绪 · Node x · npm y」与诊断串同时含 node 与 npm，缺失如实说「版本未回读」。
+- 门禁：新增 G-7（按 `handle.emit(...)` 调用切块对账 kind 与 version 归属）、G-8（快照只有一个
+  所有者与一个读取口），各带旧形态反向夹具；G-2 改为只按**函数体的代码行**取证，注释不再能
+  让门禁转绿。SSOT `docs/ENV-TOOLCHAIN-INSTALL-STANDARD.md` §1/§2.1/§2.2/§2.4/§3.1/§3.2/§5 同步
+  （新增不变量 T-1b/T-1c/T-7b/T-8/T-9），并纠正两处错误引导：`npmOk === false` 应为 `!== true`、
+  `node_status` 契约漏记 `npmVersion`。
+- 删除 `10-ui.js` 中重复声明的 `wait` / `hideFail`（合并残留；行为不变，但会让人读错出口）。
 
 ## [1.1.11]（2026-09-18）
 

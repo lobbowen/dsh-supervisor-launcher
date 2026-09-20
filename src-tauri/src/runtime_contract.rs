@@ -42,6 +42,18 @@ pub struct NodeRuntime {
     pub npm_prefix: Vec<String>,
     /// Node 版本（形如 `v22.12.0`）。
     pub version: String,
+    /// npm 版本（形如 `10.9.2`，来自真实执行 `npm --version`）。
+    /// `None` = 本轮只解析了路径、没执行过 npm（见 `derive`）—— 不得用空串冒充「已知版本」，
+    ///   否则下游（面板播报、install_done）会把「未知」显示成一个可念出去的版本号。
+    pub npm_version: Option<String>,
+}
+
+impl NodeRuntime {
+    /// 播报用的 npm 版本号。缺失时如实说「未回读」，**绝不**回落到 Node 版本 ——
+    ///   拿 Node 版本当 npm 版本念出去正是这条链的根因；旧壳写的契约没有这个键，读回即为 None。
+    pub fn npm_version_label(&self) -> String {
+        self.npm_version.clone().unwrap_or_else(|| "版本未回读".into())
+    }
 }
 
 /// 契约文件路径（与内核读取路径一致：<产品状态根>/supervisor/runtime.json —— 该路径由 env::supervisor_dir() 解析）。
@@ -77,6 +89,9 @@ pub fn probe_npm(node: &Path, bin_dir: &Path) -> Option<(PathBuf, Vec<String>)> 
 
 /// 由 Node 路径 + 版本推导 npm 路径与 bin 目录（npm 与 node 同目录）。
 /// npm 缺失 → None（环境不就绪，由壳安装/修复，绝不伪造）。
+///
+/// 只做**路径解析**、不执行 npm：本函数服务启动路径（`ensure`），在那里执行外部进程一旦挂住
+///   就把「拉起守卫」变成不可恢复的停顿。代价是 npm_version 只能留 None（不猜版本号）。
 pub fn derive(node: &Path, version: &str) -> Option<NodeRuntime> {
     let node_bin_dir = node.parent()?.to_path_buf();
     let (npm, npm_prefix) = probe_npm(node, &node_bin_dir)?;
@@ -86,6 +101,7 @@ pub fn derive(node: &Path, version: &str) -> Option<NodeRuntime> {
         npm,
         npm_prefix,
         version: version.to_string(),
+        npm_version: None,
     })
 }
 
@@ -117,17 +133,17 @@ pub fn derive_usable(node: &Path, version: &str) -> Option<NodeRuntime> {
         npm: u.path,
         npm_prefix: u.args,
         version: version.to_string(),
+        npm_version: Some(u.version),
     })
 }
 
-/// 原子写契约（tmp + rename；Unix 0600）。保留旧键供内核兼容读取。
-pub fn write(rt: &NodeRuntime) {
-    let dir = crate::env::supervisor_dir();
-    let _ = std::fs::create_dir_all(&dir);
+/// 契约的 JSON 形态。**写与读共用这一处键映射**：两处各列一遍键名，历史上就出现过
+///   「写了 npmArgs、读回只看 npm」那类不对称，加字段时必然漏一侧。
+fn meta(rt: &NodeRuntime) -> serde_json::Value {
     let node_s = rt.node.display().to_string();
     let bin_s = rt.node_bin_dir.display().to_string();
     let npm_s = rt.npm.display().to_string();
-    let meta = serde_json::json!({
+    serde_json::json!({
         "schema": SCHEMA,
         "writtenBy": format!("dsh-supervisor-gui@{}", env!("CARGO_PKG_VERSION")),
         // ── 新键（本契约消费面）──
@@ -136,7 +152,8 @@ pub fn write(rt: &NodeRuntime) {
         // 当 npm 只有包内 JS 时，npmPath=node、npmArgs=[npm-cli.js]（消费者必须带上 args）。
         "npmArgs": rt.npm_prefix,
         "node": { "path": node_s, "binDir": bin_s, "version": rt.version },
-        "npm": { "path": npm_s, "args": rt.npm_prefix },
+        // npm 版本只有在真实执行过 npm 时才有；未执行为 null（与空串严格区分）。
+        "npm": { "path": npm_s, "args": rt.npm_prefix, "version": rt.npm_version },
         // ── 旧键（内核 env-catalog 已在读；不得删除）──
         "nodePath": node_s,
         "nodeVersion": rt.version,
@@ -144,9 +161,50 @@ pub fn write(rt: &NodeRuntime) {
         "source": "official-lts",
         "installedAt": crate::node::now_iso(),
         "updatedAt": crate::node::now_iso(),
-    });
+    })
+}
+
+/// 契约 JSON → `NodeRuntime`（`meta` 的读回侧）。必需项缺失 → None，绝不猜路径。
+fn from_meta(v: &serde_json::Value) -> Option<NodeRuntime> {
+    let node = v.get("nodePath").and_then(|x| x.as_str()).map(PathBuf::from)?;
+    let node_bin_dir = v
+        .get("nodeBinDir")
+        .and_then(|x| x.as_str())
+        .map(PathBuf::from)
+        .or_else(|| node.parent().map(|p| p.to_path_buf()))?;
+    let npm = v
+        .get("npmPath")
+        .and_then(|x| x.as_str())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| node_bin_dir.join(crate::platform::current().npm_exe_name()));
+    let npm_prefix: Vec<String> = v
+        .get("npmArgs")
+        .and_then(|x| x.as_array())
+        .map(|a| a.iter().filter_map(|s| s.as_str().map(|s| s.to_string())).collect())
+        .unwrap_or_default();
+    let version = v.get("nodeVersion").and_then(|x| x.as_str()).unwrap_or("").to_string();
+    let npm_version = v
+        .get("npm")
+        .and_then(|n| n.get("version"))
+        .and_then(|x| x.as_str())
+        .map(String::from);
+    Some(NodeRuntime {
+        node,
+        node_bin_dir,
+        npm,
+        npm_prefix,
+        version,
+        npm_version,
+    })
+}
+
+/// 原子写契约（tmp + rename）。保留旧键供内核兼容读取。
+/// 权限：契约只有路径、无机密，且所在目录已 0700 —— 顶层模块因此不做平台权限分支（G1）。
+pub fn write(rt: &NodeRuntime) {
+    let dir = crate::env::supervisor_dir();
+    let _ = std::fs::create_dir_all(&dir);
     let p = path();
-    let body = serde_json::to_string_pretty(&meta).unwrap_or_default();
+    let body = serde_json::to_string_pretty(&meta(rt)).unwrap_or_default();
     let tmp = p.with_extension("json.tmp");
     if std::fs::write(&tmp, body + "\n").is_ok() {
         // 契约不含机密（只有路径），且目录已是 0700 —— 不再做平台权限分支
@@ -161,24 +219,7 @@ pub fn write(rt: &NodeRuntime) {
 pub fn read_node() -> Option<NodeRuntime> {
     let s = std::fs::read_to_string(path()).ok()?;
     let v: serde_json::Value = serde_json::from_str(&s).ok()?;
-    let node = v.get("nodePath").and_then(|x| x.as_str()).map(PathBuf::from)?;
-    let bin = v
-        .get("nodeBinDir")
-        .and_then(|x| x.as_str())
-        .map(PathBuf::from)
-        .or_else(|| node.parent().map(|p| p.to_path_buf()))?;
-    let npm = v
-        .get("npmPath")
-        .and_then(|x| x.as_str())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| bin.join(crate::platform::current().npm_exe_name()));
-    let npm_prefix: Vec<String> = v
-        .get("npmArgs")
-        .and_then(|x| x.as_array())
-        .map(|a| a.iter().filter_map(|s| s.as_str().map(|s| s.to_string())).collect())
-        .unwrap_or_default();
-    let version = v.get("nodeVersion").and_then(|x| x.as_str()).unwrap_or("").to_string();
-    Some(NodeRuntime { node, node_bin_dir: bin, npm, npm_prefix, version })
+    from_meta(&v)
 }
 
 /// 确保契约存在且指向**可执行**的 Node：先读；缺失/失效则经 nodeprobe 解析并写入。
@@ -286,6 +327,42 @@ mod toolchain_tests {
             probe_npm_usable(&node, &d).is_none(),
             "空/不可执行的 npm 不得判为可用（T-1b）"
         );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn contract_roundtrip_carries_npm_version() {
+        // npm 版本必须能写出也能读回：它一旦在往返中丢失，安装管线就只能拿 node 版本冒充 npm 版本。
+        let d = tmp("roundtrip");
+        let rt = NodeRuntime {
+            node: d.join("node"),
+            node_bin_dir: d.clone(),
+            npm: d.join(crate::platform::current().npm_exe_name()),
+            npm_prefix: vec!["/x/npm-cli.js".into()],
+            version: "v22.12.0".into(),
+            npm_version: Some("10.9.2".into()),
+        };
+        let back = from_meta(&meta(&rt)).expect("契约写读必须对称");
+        assert_eq!(back.npm_version.as_deref(), Some("10.9.2"));
+        assert_eq!(back.npm, rt.npm);
+        assert_eq!(back.npm_prefix, rt.npm_prefix);
+        assert_eq!(back.node_bin_dir, rt.node_bin_dir);
+        assert_eq!(back.version, rt.version);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn derive_does_not_fabricate_npm_version() {
+        // 只解析路径时版本必须是 null：空串会被下游当作「已知版本号」念给用户。
+        let d = tmp("noexec");
+        let node = d.join("node");
+        std::fs::write(&node, b"").unwrap();
+        let npm = d.join(crate::platform::current().npm_exe_name());
+        std::fs::write(&npm, b"").unwrap();
+        let rt = derive(&node, "v22.12.0").expect("node 与 npm 路径齐全 → derive 成功");
+        assert!(rt.npm_version.is_none(), "未执行 npm 探测不得给出版本");
+        assert!(meta(&rt)["npm"]["version"].is_null(), "落盘必须是 null 而非 \"\"");
+        assert!(from_meta(&meta(&rt)).unwrap().npm_version.is_none());
         let _ = std::fs::remove_dir_all(&d);
     }
 }

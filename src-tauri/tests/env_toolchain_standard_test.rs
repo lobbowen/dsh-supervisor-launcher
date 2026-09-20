@@ -67,6 +67,27 @@ fn fn_body(src: &str, sig: &str) -> String {
     src[open..=end].to_string()
 }
 
+/// 同 fn_body，但签名不存在时返回 None。
+/// 为什么：G-8 要对**旧形态样本**跑判据，旧形态本来就没有 readEnv / applyToolchain，
+///   辅助函数不能先把测试炸掉 —— 找不到归属函数就意味着没有任何一行是合法的。
+fn fn_body_opt(src: &str, sig: &str) -> Option<String> {
+    if src.contains(sig) {
+        Some(fn_body(src, sig))
+    } else {
+        None
+    }
+}
+
+/// 去掉行注释，只留代码。
+/// 为什么：结构判据要在**函数体**里找证据 token，而函数体连着注释一起返回 ——
+///   一段提到 `npm_usable_at` 的注释就能让 G-2 转绿，于是门禁校验的是「写过说明」而不是「调用了它」。
+fn code_only(body: &str) -> String {
+    body.lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// G-1：node_status 必须回传 npm 两字段，且来源是**真实探测**（probe_npm）。
 /// 不变量 T-1：npmOk 不得伪造 —— 字段存在还不够，必须能追溯到 probe_npm。
 #[test]
@@ -79,24 +100,26 @@ fn g1_node_status_exposes_real_npm_probe() {
     assert!(rt.contains("fn probe_npm"), "runtime_contract 缺 probe_npm（npm 真实探测的唯一实现）");
 }
 
+/// npm「可用」的证据 token：三者内部都会真实执行 `npm --version`（不变量 T-1b）。
+/// 为什么不含 `probe_npm`：它只判断文件存在，而「存在 != 可用」正是本条链的根因形态。
+const NPM_USABLE_TOKENS: [&str; 3] = ["derive_usable", "probe_npm_usable", "npm_usable_at"];
+
+fn has_npm_usable_call(body: &str) -> bool {
+    NPM_USABLE_TOKENS.iter().any(|t| body.contains(t))
+}
+
 /// G-2：run_install 函数体内必须校验 npm —— 否则「安装成功」只保证 node，
 /// 干净机器上 npm 仍缺失却 emit done（SSOT §1 的根因正是它）。
 #[test]
 fn g2_run_install_validates_npm_inside_body() {
     let main = read("src/main.rs");
-    let body = fn_body(&main, "fn run_install");
-    // 2026-09-18：校验逻辑下沉 node.rs::finalize_install（G3 要求 main.rs 只做组装）。
-    //   判据随之接受「run_install 委派给 finalize_install，且该函数体真的校验 npm」。
-    let node_src = read("src/node.rs");
-    let final_body = fn_body(&node_src, "fn finalize_install");
-    let delegated_ok = body.contains("finalize_install")
-        && (final_body.contains("npm_usable_at") || final_body.contains("probe_npm"));
-    let has_npm = body.contains("probe_npm")
-        || body.contains("npmOk")
-        || body.contains("npm_exe_name")
-        || delegated_ok;
+    let body = code_only(&fn_body(&main, "fn run_install"));
+    let final_body = code_only(&fn_body(&read("src/node.rs"), "fn finalize_install"));
+    // 校验可以下沉到 node::finalize_install（G-3 要求 main.rs 只做组装），
+    //   但下沉后必须在**被委派的那一侧**真实发生 —— 注释不算证据。
     assert!(
-        has_npm,
+        has_npm_usable_call(&body)
+            || (body.contains("finalize_install") && has_npm_usable_call(&final_body)),
         "run_install 未校验 npm（本地或经 node::finalize_install 委派）—— \
          装完 node 即报成功，npm 缺失会被误判为环境就绪"
     );
@@ -188,6 +211,224 @@ fn g6_ui_js_exports_unified_install_api() {
             "NS.install 缺 {} 方法（统一入口须含 begin/text/done/fail 四项）：\n{}",
             key,
             region
+        );
+    }
+}
+
+/// 抽出每个 `handle.emit(` 调用（到与之配平的右括号为止）。
+/// 为什么按调用切块：kind 与 version 必须在**同一次 emit 内**对账。按字符窗口取会串到下一条
+///   事件，于是「npm 的事件带 node 版本」这种串位永远查不出来。
+fn emit_calls(src: &str) -> Vec<String> {
+    let chars: Vec<char> = src.chars().collect();
+    let sig: Vec<char> = "handle.emit(".chars().collect();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i + sig.len() <= chars.len() {
+        if chars[i..i + sig.len()] == sig[..] {
+            let mut depth = 0usize;
+            let mut j = i + sig.len() - 1; // 指向 sig 末尾的 '('
+            while j < chars.len() {
+                match chars[j] {
+                    '(' => depth += 1,
+                    ')' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                j += 1;
+            }
+            if j < chars.len() {
+                out.push(chars[i..=j].iter().collect());
+                i = j + 1;
+                continue;
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+/// run_install 签名 + 完成事件的版本归属，返回违规项（空 = 通过）。
+/// 抽成纯函数是为了能对**旧形态样本**跑一遍：判据认不出旧形态就是空转。
+fn g7_violations(main: &str, cmd: &str) -> Vec<String> {
+    let mut v: Vec<String> = Vec::new();
+    let head = main
+        .lines()
+        .find(|l| l.contains("fn run_install"))
+        .unwrap_or("")
+        .to_string();
+    if !head.contains("NodeRuntime") {
+        v.push("run_install 未返回运行期契约：node 与 npm 的事实被拆成字段子集，npm 版本无处可来".into());
+    }
+    let body = code_only(&fn_body(cmd, "pub fn start_node_install"));
+    let done: Vec<String> = emit_calls(&body)
+        .into_iter()
+        .filter(|c| c.contains("\"install_done\""))
+        .collect();
+    if done.len() < 2 {
+        v.push("install_done 未覆盖 node 与 npm 两个 kind（SSOT §2.4：完成事件按 kind 各发一条）".into());
+    }
+    let owns = |kind: &str, ver: &str| done.iter().any(|c| c.contains(kind) && c.contains(ver));
+    if !owns("InstallKind::Node", "rt.version") {
+        v.push("node 的完成事件未播报契约里的 node 版本".into());
+    }
+    if !owns("InstallKind::Npm", "npm_version") {
+        v.push("npm 的完成事件没有 npm 自己的版本来源（只能拿 node 版本冒充）".into());
+    }
+    if done
+        .iter()
+        .any(|c| c.contains("InstallKind::Npm") && c.contains("rt.version"))
+    {
+        v.push("npm 的完成事件混入了 node 版本（kind 与 version 归属不一致）".into());
+    }
+    v
+}
+
+/// G-7：完成播报的 kind 与 version 必须归属一致。
+/// 失效模式：管线只发一条 kind=npm 却带 node 的版本号 —— 引导页念出的
+///   「npm 已就绪（v22.x）」从来不是 npm 的版本，而字符串拼接对类型系统完全合法，没人能发现。
+#[test]
+fn g7_install_done_events_carry_their_own_kind_version() {
+    let main = read("src/main.rs");
+    let cmd = read("src/commands/mod.rs");
+    let hits = g7_violations(&main, &cmd);
+    assert!(
+        hits.is_empty(),
+        "G-7 失败：\n{}\n",
+        hits.join("\n")
+    );
+
+    // 反向 1：旧形态（返回 (String, String)、只发一条 kind=npm 带 node 版本）必须逐条判红。
+    let old_main = "fn run_install(app: &H) -> Result<(String, String), Failure> {\n    Ok((p, v))\n}\n";
+    let old_cmd = "pub fn start_node_install() -> R {\n    let _ = handle.emit(\"install_done\", json!({ \"kind\": Npm.as_str(), \"version\": version }));\n}\n";
+    let old = g7_violations(old_main, old_cmd);
+    for want in [
+        "未返回运行期契约",
+        "两个 kind",
+        "npm 自己的版本来源",
+    ] {
+        assert!(
+            old.iter().any(|s| s.contains(want)),
+            "G-7 判据对旧形态的 {} 无反应（空转）：{:?}",
+            want,
+            old
+        );
+    }
+
+    // 反向 2：两条事件都发、但 npm 那条串的仍是 node 版本 —— 串位必须单独被查出来。
+    let mixed = "pub fn start_node_install() -> R {\n\
+         let _ = handle.emit(\"install_done\", json!({ \"kind\": InstallKind::Node.as_str(), \"version\": rt.version }));\n\
+         let _ = handle.emit(\"install_done\", json!({ \"kind\": InstallKind::Npm.as_str(), \"version\": rt.version, \"note\": rt.npm_version }));\n\
+         }\n";
+    let mv = g7_violations("fn run_install() -> Result<NodeRuntime, E> { }\n", mixed);
+    assert!(
+        mv.iter().any(|s| s.contains("混入了 node 版本")),
+        "G-7 对 kind/version 串位无反应：{:?}",
+        mv
+    );
+}
+
+/// 引导层工具链快照的结构性判据，返回违规项（空 = 通过）。
+/// 同样对旧形态样本跑一遍，见 g8_toolchain_snapshot_has_single_owner 的反向断言。
+fn g8_violations(files: &[(String, String)]) -> Vec<String> {
+    let mut v = Vec::new();
+    // 判定锚点是**归属函数的函数体**，不是行形状。
+    //   为什么：旧形态同样带 withTimeout / 同样在 20-env.js 里，按形状放行等于放过它 ——
+    //   判据要认的是「谁拥有这件事」，快照的拥有者是 applyToolchain，读取口的拥有者是 readEnv。
+    let env_src = files
+        .iter()
+        .find(|(p, _)| p.ends_with("20-env.js"))
+        .map(|(_, text)| text.clone())
+        .unwrap_or_default();
+    let owner = fn_body_opt(&env_src, "function applyToolchain").unwrap_or_default();
+    let reader = fn_body_opt(&env_src, "function readEnv").unwrap_or_default();
+    let mut writes = 0usize;
+    let mut reads = 0usize;
+    for (p, text) in files {
+        for (i, line) in text.lines().enumerate() {
+            let t = line.trim();
+            if t.starts_with("//") {
+                continue;
+            }
+            let tag = format!("{}:{} {}", p, i + 1, t);
+            if t.contains("invoke('node_status')") {
+                reads += 1;
+                if !reader.contains(t) {
+                    v.push(format!("node_status 的读取口不在 readEnv 内：{}", tag));
+                }
+            }
+            if t.contains("NS.toolchain =") && !t.contains("emptyToolchain()") {
+                writes += 1;
+                if !owner.contains(t) {
+                    v.push(format!("快照事实在 applyToolchain 之外被写入：{}", tag));
+                }
+            }
+            if t.contains("NS.nodeVer") || t.contains("NS.npmVer") {
+                v.push(format!("散装版本字段复活（应由 NS.toolchain 快照承载）：{}", tag));
+            }
+        }
+    }
+    if reads != 1 {
+        v.push(format!("node_status 应有且只有一个读取口（超时预算与快照写入各写一遍即源于此），实为 {}", reads));
+    }
+    if writes != 1 {
+        v.push(format!("快照事实应有且只有一个写入点（漏写一处不报错，只让「已就绪」少一半），实为 {}", writes));
+    }
+    v
+}
+
+/// G-8：工具链快照只有一个所有者、一个读取口，且就绪行同时含 node 与 npm。
+/// 失效模式：版本字段散成 NS.nodeVer / NS.npmVer 两个字段、三个轮询点各读各的
+///   —— 漏写一处不报错，只让「已就绪」少一半，并在重试时残留上一轮的值。
+#[test]
+fn g8_toolchain_snapshot_has_single_owner() {
+    let files: Vec<(String, String)> = walk("bootstrap")
+        .into_iter()
+        .map(|(p, text)| (p.display().to_string(), text))
+        .collect();
+    let hits = g8_violations(&files);
+    assert!(hits.is_empty(), "G-8 失败：\n{}\n", hits.join("\n"));
+
+    let env_js = read("bootstrap/js/20-env.js");
+    let apply = fn_body(&env_js, "function applyToolchain");
+    assert!(
+        apply.contains("st.npmVersion") && apply.contains("st.installed"),
+        "applyToolchain 必须同时登记 node 与 npm 两个版本字段：\n{}",
+        apply
+    );
+    let line = fn_body(&env_js, "function toolchainLine");
+    assert!(
+        line.contains("Node") && line.contains("npm")
+            && line.contains("t.node") && line.contains("t.npm"),
+        "就绪行必须同时念出 node 与 npm，且两者都取自快照：\n{}",
+        line
+    );
+    // T-7b：诊断串与就绪行同源 —— 排障时「npm 探到了没有」不该再靠读代码猜。
+    let diag = fn_body(&read("bootstrap/js/10-ui.js"), "function diagText");
+    assert!(
+        diag.contains("'node='") && diag.contains("'npm='"),
+        "diagText 未同时输出 node 与 npm（不变量 T-7b）：\n{}",
+        diag
+    );
+
+    // 反向：旧形态（散装字段 + 轮询点各读 node_status + 分支自行改写快照）必须逐条判红。
+    let old = vec![(
+        "x/20-env.js".to_string(),
+        "NS.nodeVer = st.installed;\n\
+         NS.withTimeout(NS.core.invoke('node_status'), 15000, 'q')\n\
+         NS.toolchain = { node: st.installed };\n"
+            .to_string(),
+    )];
+    let oh = g8_violations(&old);
+    for want in ["散装版本字段", "读取口", "applyToolchain 之外"] {
+        assert!(
+            oh.iter().any(|s| s.contains(want)),
+            "G-8 判据对旧形态的 {} 无反应（空转）：{:?}",
+            want,
+            oh
         );
     }
 }

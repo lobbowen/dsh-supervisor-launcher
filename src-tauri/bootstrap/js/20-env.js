@@ -1,6 +1,36 @@
-// 20-env —— 5 个函数（拆分自 bootstrap.html，2026-09-11）。
+// 20-env —— 9 个函数（拆分自 bootstrap.html，2026-09-11）。
 // 共享状态与跨模块调用经 NS（window.__BOOT_NS）。
 (function (NS) {
+  // 工具链快照的**唯一写入点**，且只由 readEnv 调用：快照描述的是「最后一次真实探测读到了什么」，
+  //   而不是「某个分支决定放行」—— 散装两字段时代每个分支各写一遍，漏写一处不报错，
+  //   只让就绪文案少一半，并在重试时残留上一轮的值。
+  function applyToolchain(st) {
+    // 未完成的读取不覆盖已知事实：超时项没有事实，probing/busy 是中间态（T-2）。
+    if (!st || st.__timeout || st.probing || st.busy) return;
+    var t = NS.emptyToolchain();
+    t.node = st.installed || null;
+    t.npm = st.npmVersion || null;
+    NS.toolchain = t;
+  }
+
+  // node_status 的**唯一读取口**：查询超时预算与快照写入都只在这里发生一次。
+  //   三个轮询点各写一遍 15000/超时文案，改一处就会漏两处（快照与探测脱节即由此而来）。
+  function readEnv() {
+    return NS.withTimeout(NS.core.invoke('node_status'), 15000, '环境查询无响应').then(function (st) {
+      var o = st || {};
+      applyToolchain(o);
+      return o;
+    });
+  }
+
+  // 就绪行：Node 与 npm **同形并列** —— 工具链两半都是必需项，只报一半就是「npm 隐身」。
+  //   npm 版本号缺失时如实说「未回读」，绝不拿 Node 的版本号顶替。
+  function toolchainLine() {
+    var t = NS.toolchain || NS.emptyToolchain();
+    return '环境就绪 · Node ' + (NS.versionLabel(t.node) || '版本未回读') +
+      ' · npm ' + (NS.versionLabel(t.npm) || '版本未回读');
+  }
+
   function stepEnv() {
     NS.setStep(0);
     NS.phase('env');
@@ -16,16 +46,15 @@
         //   界面永久停在「正在检测系统环境…」。
         //   这正是用户实测到的「卡住且不报错」：不是探测慢，而是轮询自己停摆了。
         //   （轮询循环与单次调用不同：它**必须**有独立于被调方的心跳。）
-        NS.withTimeout(NS.core.invoke('node_status'), 15000, '环境查询无响应').then(function (st) {
+        NS.readEnv().then(function (st) {
           if (settled) return;
-          if (st && st.__timeout) {
+          if (st.__timeout) {
             // 单次查询无响应：不就此放弃，继续轮询到总预算耗尽再给出口。
             if (Date.now() >= deadline) { settled = true; NS.failEnvTimeout(NS.lastEnv || {}); resolve(null); return; }
             NS.status('正在检测系统环境…（查询无响应，重试中）');
             setTimeout(poll, 400);
             return;
           }
-          st = st || {};
           NS.lastEnv = st;
           // Rust 侧硬上限触发的**明确失败**：立即给出可操作结论，
           // 不等前端预算耗尽（那只会得到一句没有信息量的「超时」）。
@@ -112,7 +141,7 @@
         return NS.core.invoke('start_node_install').then(function () { return NS.stepNodeWait('npm'); });
       });
     }
-    NS.nodeVer = st.installed;
+    // 工具链快照已由 readEnv 在读取那一刻写好（本函数不再自行登记版本字段）。
     return NS.stepNodeDone();
   }
 
@@ -124,14 +153,13 @@
       var done = false;
       // 同样包超时：等待安装完成期间也不能因单次查询无响应而永久静默。
       var t = setInterval(function () {
-        NS.withTimeout(NS.core.invoke('node_status'), 15000, '环境查询无响应').then(function (st) {
-          st = st || {};
+        NS.readEnv().then(function (st) {
           if (st.__timeout) return;   // 下次 tick 重试
           // 失败前置检查（SSOT §3.1 不变量 T-5）：安装器报错后它不再 busy，若只看 busy 会一路
           //   轮询到兜底超时并被当作成功、直奔内核步骤 —— 而 npm 仍缺失，装内核必失败。
           if (!st.busy && st.error) { if (!done) { done = true; clearInterval(t); resolve(failOnMissingNpm(kind, st.error)); } return; }
           // 就绪 = node **且** npm **且**达门槛（npm 缺失时安装器可能先出 node，必须继续等）。
-          if (!st.busy && st.installed && st.minOk !== false && st.npmOk === true) { if (!done) { done = true; clearInterval(t); NS.nodeVer = st.installed; NS.npmVer = st.npmVersion || null; resolve(NS.stepNodeDone()); } }
+          if (!st.busy && st.installed && st.minOk !== false && st.npmOk === true) { if (!done) { done = true; clearInterval(t); resolve(NS.stepNodeDone()); } }
         }).catch(function () {});
       }, 700);
       // 兜底：Node 安装可能长达数分钟。此处**绝不**默认成功（SSOT §3.1 不变量 T-5）——
@@ -140,9 +168,8 @@
       setTimeout(function () {
         if (done) return;
         clearInterval(t);
-        NS.withTimeout(NS.core.invoke('node_status'), 15000, '环境查询无响应').then(function (st) {
-          st = st || {};
-          if (!st.busy && st.installed && st.minOk !== false && st.npmOk === true) { done = true; NS.nodeVer = st.installed; NS.npmVer = st.npmVersion || null; resolve(NS.stepNodeDone()); return; }
+        NS.readEnv().then(function (st) {
+          if (!st.busy && st.installed && st.minOk !== false && st.npmOk === true) { done = true; resolve(NS.stepNodeDone()); return; }
           if (!done) { done = true; resolve(failOnMissingNpm(kind, st.error || '安装超时未完成')); }
         }).catch(function () { if (!done) { done = true; resolve(failOnMissingNpm(kind, '安装超时未完成')); } });
       }, 600000);
@@ -160,12 +187,13 @@
 
   function stepNodeDone() {
     NS.setStep(0);
-    NS.status('Node.js ' + (NS.nodeVer || '') + (NS.npmVer ? ' · npm ' + NS.npmVer : '') + ' 已就绪');
+    NS.status(toolchainLine());
     // 环境就绪后**才**进入桌面版本（网络步骤，带超时与跳过出口）
     return NS.wait(350).then(NS.stepShellUpdate);
   }
 
   // ── 导出到 NS（跨模块可调用）──
+  NS.readEnv = readEnv;
   NS.stepEnv = stepEnv;
   NS.failEnvTimeout = failEnvTimeout;
   NS.afterEnv = afterEnv;
