@@ -4,6 +4,22 @@
 
 ## [未发布]
 
+### 分支保护落成服务端事实（2026-09-21）
+
+用户定案「分支保护必须做」。此前 `main` 自 2026-09-19 迁仓后一直是 `404 Branch not protected`
+（服务端配置不随仓迁移），合入约束只剩本地纪律。现已 `PUT` 写入并 `GET` 读回：
+
+- required = `version` + 4 条 `build (...)`（逐字含矩阵参数）；`publish` 在 PR 上 `skipped`，故**不在**
+  required 里 —— 一旦写入永不出现的语境，所有 PR 会永久阻塞。
+- `strict` / `enforce_admins` / `required_conversation_resolution` 开启，必须走 PR 且**审批数 0**
+  （作用是关掉不经 PR 的直推；单人仓设 ≥1 会让「CI 绿后合入」死锁），禁 force push 与删除分支。
+- 本文档侧纠正：`docs/RELEASE-STANDARD.md` §4 由「设计为 / 当前未生效」改为现值；
+  `docs/RELEASE-AND-BUILD-DECISION.md` 附录的 payload 把 `required_pull_request_reviews: null`
+  （＝允许直推主干，与「CI 是唯一放行裁决者」矛盾）改为存在但审批数 0，并补 PUT 后必须 GET 读回的
+  两处字段结构差异；`README.md` 的「Releases 为空」原因收敛为**唯一阻塞项 = 签名私钥未配置**
+  （已核 `build.yml`：tag 构建缺 `TAURI_SIGNING_PRIVATE_KEY` 即报错退出，非 tag 不阻断）。
+- 维护规则登记：**改 `build.yml` 平台矩阵必须在同一次变更里同步 required contexts**。
+
 ### 文档纠正：以现在时态写着的假现状（第 3 轮残留清扫）
 
 等 CI 的窗口里把两仓又扫了一遍。判据只有一条：**这句话会不会让人去做一件仓库里不存在的事**。
