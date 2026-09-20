@@ -3,24 +3,33 @@
 > **本文档不含私钥内容**（私钥绝不入库）。
 > 密钥生成于 2026-09-11，用于桌面壳（Tauri）自更新产物签名。
 
-## 〇、当前状态（2026-09-20 实测，先读这段）
+## 〇、当前状态（2026-09-21 实测，先读这段）
 
 | 事实 | 证据 |
 |---|---|
-| 两仓 GitHub Secrets 只有 `NPM_TOKEN`，没有任何 `TAURI_SIGNING_*` | REST `/repos/…/actions/secrets` 列举（core 与 launcher 各一） |
-| 本机已无 `~/.tauri/`，全盘 `*.key` / `*.key.pub` 无命中 | 2026-09-20 `find /home/bowen -maxdepth 6`；本文档原§二/§四 的本机路径与备份已不可核 |
-| 壳仓从未产出过签名产物，也从未发布过 GitHub Release | `/releases` 返回 0 条；main 上最近一次 run 结论 failure |
-| 公钥仍在仓内并生效 | `src-tauri/tauri.conf.json` `plugins.updater.pubkey`，key id `96DE3EF26F389F70` |
+| **签名产物在线上、且是在用的更新通道**：清单 `@dsh-sup/shell-release@latest` 现指 1.1.11（`pub_date` 2026-09-18），四平台各带一份 minisign 签名 | `GET https://unpkg.com/@dsh-sup/shell-release@latest/shell-manifest.json`，逐条解码 `platforms.*.signature` |
+| **全部已发布版本共用一把钥匙**：抽验 1.0.1 / 1.0.5 / 1.1.0 / 1.1.5 / 1.1.9 / 1.1.10 / 1.1.11，key id 均为 `96DE3EF26F389F70`，与 `tauri.conf.json` 内置公钥逐字一致 | 同上取各版本 manifest；签名 blob 第 2..10 字节（小端转 hex）即 key id |
+| **通道不是 GitHub Release**：`/repos/lobbowen/dsh-supervisor-launcher/releases` 为 0 条，但清单与产物托管在 npm（unpkg + jsdelivr 两个端点写在 `tauri.conf.json`）。**本节此前写「壳仓从未产出过签名产物，也从未发布过 GitHub Release」是错误引导** —— 后半句真、前半句假，且它足以诱导「换钥无害」的结论 | `releases` 返回 `[]`；`npm view @dsh-sup/shell-release versions` = 22 个版本，latest `1.1.11` |
+| **私钥在本机 / 本仓 / 现账号都不可得** | `~/.tauri/` 不存在；`find /home/bowen -maxdepth 6` 无 `*.key`；`git log --all -S"minisign secret key"` 无命中；`lobbowen` 两仓 secrets 只有 `NPM_TOKEN` |
+| **唯一可能残存处 = 旧账号仓的 Actions secret** | 1.1.11 于 2026-09-18 由迁仓前的 `wasi7mglns/dsh-supervisor-launcher` CI 签出。该仓仍公开（末次 push 09-18），但现 PAT 取其 `/actions/secrets` 返回 **403**（无 admin）→ 连「是否还在」都无法由 agent 核实 |
 
-**推论**：2026-09-19 的同机凭据事故（旧库 `~/.dsh/credentials`、`~/.ssh` 部署密钥全丢）很可能把
-`~/.tauri/` 一并带走；若离线介质另有副本，恢复前先按 §五 比对 key id 与 sha256 前缀。
-在私钥重新可用之前，**tag 发布会被 workflow 主动拦下**（这是设计，不是缺陷）；
-非 tag 构建不再因缺密钥而红：CI 在同一分支撤掉空的签名变量，并用 `--config` 把
-`bundle.createUpdaterArtifacts` 关掉（配置里内置了 pubkey 时，Tauri 见「有公钥无私钥」
-会直接失败，只撤变量仍红）。
+**结论：换钥会立即切断全部存量客户端的壳自更新。** §四 / §六 写的后果不再是假想，而是当前状态：
+1.1.11 之后我们**签不出任何存量客户端会接受的新产物**。因此在找回 2026-09-11 那把私钥之前：
 
-公钥与私钥的配对是单向可验证的：任何新公钥都要重新内置进 `tauri.conf.json`，
-而旧客户端只认旧公钥，见 §六。
+- **不要生成新密钥对、不要改 `tauri.conf.json` 的 `pubkey`、不要向 `@dsh-sup/shell-release` 发新版本**。
+  一旦 `@latest` 上是新钥签的清单，装了 ≤1.1.11 的客户端下载后验签必然失败并报错（Tauri 强制验签，
+  没有降级路径），而不是「拿不到更新」这么轻。
+- **内核自更新不受影响**：壳装内核走 `npm install -g @dsh-sup/dsh-core-<platform>-<arch>`（`src-tauri/src/core.rs`），
+  完整性由 npm registry 的 `integrity` 保障，**不经 minisign**。所以壳冻结期间内核仍可正常滚动更新，
+  面板与模型侧不受这把钥匙牵制。
+
+**恢复动作（按代价排序；均需用户本人执行，agent 不代做）**
+
+| # | 路径 | 判据 |
+|---|---|---|
+| 1 | 找当初 `tauri signer generate` 的输出文件（可能在另一台机器 / 口令管理器 / 邮件 / 网盘） | 按 §二 比 key id `96DE3EF26F389F70`，再按 §五 第 1 步比私钥 sha256 前缀 `92e3ae43ed4dea58` |
+| 2 | 登录旧账号 `wasi7mglns` → `dsh-supervisor-launcher` → Settings → Secrets → Actions，看 `TAURI_SIGNING_PRIVATE_KEY` 是否仍在 | secrets **只可覆盖写、不可读**；若需在，只能在该仓临时跑一次 workflow 把它取成 artifact（用户在自己账号下操作），取回后写入新仓 secret |
+| 3 | 前两条都失败 → 才谈轮换：新钥 + 新 pubkey + 手动安装过渡版，并公告「≤1.1.11 需重装一次」 | 属发布决策，**待用户定案**；见 §六 |
 
 ## 一、这是什么、为什么必需
 

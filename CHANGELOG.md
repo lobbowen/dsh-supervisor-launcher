@@ -4,6 +4,30 @@
 
 ## [未发布]
 
+### 签名密钥的现状纠正：已签名产物一直在产线，换钥不是无害
+
+`docs/UPDATER-SIGNING-KEY.md` §〇 原写「壳仓从未产出过签名产物，也从未发布过 GitHub Release」。
+后半句真、前半句**假**，而且危害直接：读的人会判定「既然从没签过，换把钥匙无所谓」，而 §四/§六
+自己写的正是「换钥 = 已安装用户永久收不到更新」。实测（2026-09-21，取 npm 上的线上清单逐条解码）：
+
+- 更新通道是 **npm + CDN**，不是 GitHub Release：清单 `@dsh-sup/shell-release@latest` 现指
+  `1.1.11`（`pub_date` 2026-09-18），四平台各带一份 minisign 签名；安装程序本身在
+  `@dsh-sup/shell-<platform>@<ver>/artifact/…`，unpkg / jsdelivr 可直取（win setup 3.27 MB、
+  darwin app.tar.gz 3.93 MB 均 HTTP 200）。故 `README.md` 原写「安装包只在 CI artifacts 里，
+  没有面向用户的下载点」也一并纠正。
+- 抽验 `1.0.1 / 1.0.5 / 1.1.0 / 1.1.5 / 1.1.9 / 1.1.10 / 1.1.11` 七个版本共 28 条签名，
+  key id **全部** 是 `96DE3EF26F389F70`，与 `tauri.conf.json` 内置公钥一致 → 全体存量客户端只认这一把钥匙。
+- 私钥四处不可得：本机无 `~/.tauri/`、`find -maxdepth 6` 无 `*.key`、git 历史从未入库
+  （`-S"minisign secret key"` 无命中）、`lobbowen` 两仓 secrets 只有 `NPM_TOKEN`。
+  唯一可能残存处是迁仓前的 `wasi7mglns/dsh-supervisor-launcher` Actions secret（1.1.11 在那里签出），
+  而现 PAT 取其 `/actions/secrets` 返回 403（无 admin），连存在性都无法由 agent 核实。
+
+据此把 §〇 重写为「事实 + 证据」两列，并登记冻结规则与恢复动作排序：**找回旧私钥前不得生成新钥、
+不得改 `pubkey`、不得向 `@dsh-sup/shell-release` 发新版本**（新钥清单会让存量客户端验签报错，
+不是「拿不到更新」这么轻）。同时明确一条边界以免误判影响面：**内核自更新不经 minisign**
+（`src-tauri/src/core.rs` 走 `npm install -g @dsh-sup/dsh-core-*`，完整性由 registry `integrity` 保障），
+壳冻结期间内核照常滚动。轮换（第 3 条恢复路径）属发布决策，待用户定案，本 PR 不执行任何发布动作。
+
 ### 分支保护落成服务端事实（2026-09-21）
 
 用户定案「分支保护必须做」。此前 `main` 自 2026-09-19 迁仓后一直是 `404 Branch not protected`
