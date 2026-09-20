@@ -86,7 +86,7 @@ dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDk2REUzRUYyNkYzODlGNzAKUldS
 >
 > 原因：公钥已固化在用户端的程序内；换新密钥对旧用户无效——他们只能手动重装。
 
-**当前采用的方案（本机）**：
+**设计上的本机方案**（下表三处**当前均不存在**，见 §〇；恢复或重建私钥后按此布局落位）：
 
 | 位置 | 内容 | 权限 |
 |---|---|---|
@@ -94,7 +94,8 @@ dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDk2REUzRUYyNkYzODlGNzAKUldS
 | `~/.tauri/backup/dsh-supervisor.key.<时间戳>` | 本机备份副本 | `600` |
 | `~/.tauri/backup/README.txt` | 指纹与说明（不含私钥） | `600` |
 
-**已完成的校验**：备份与原件 `cmp` 一致；并做过一次恢复演练（解出后指纹相同）。
+**2026-09-11 建档时做过的校验**（记录，非当前状态）：备份与原件 `cmp` 一致；并做过一次恢复演练
+（解出后指纹相同）。该演练结论随本机目录一并失效，只能作为「当时确实可用」的证据。
 
 **必须遵守**：
 
@@ -106,6 +107,9 @@ dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDk2REUzRUYyNkYzODlGNzAKUldS
 > 若后续要加保险，最低成本做法是把 `~/.tauri/backup/` 复制一份到任意离线介质（U 盘即可）。
 
 ## 五、验证备份是否可用
+
+> **前置**：本机已无这些文件（见 §〇）。下面两段只在**从离线介质找回副本后**执行，
+> 且必须先过 §二 的 key id 比对，再拿它去签名。
 
 ```bash
 # 1) 指纹比对（应等于 92e3ae43ed4dea58）
