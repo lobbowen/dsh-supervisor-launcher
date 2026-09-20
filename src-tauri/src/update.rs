@@ -59,11 +59,12 @@ pub fn log(line: &str) {
 }
 
 /// 运行时安装形态（判断「能否自更新」与诊断用）。
+///
+/// Linux 只有 `deb` 一条支持面（矩阵不产 rpm，AppImage 早已废弃），
+/// 故这两类不必占分支：落到 `_` 即「未知形态 → 不自称能自更新」。
 pub fn install_kind() -> String {
     match tauri::utils::platform::bundle_type() {
         Some(tauri::utils::config::BundleType::Deb) => "deb",
-        Some(tauri::utils::config::BundleType::Rpm) => "rpm",
-        Some(tauri::utils::config::BundleType::AppImage) => "appimage",
         Some(tauri::utils::config::BundleType::Msi) => "msi",
         Some(tauri::utils::config::BundleType::Nsis) => "nsis",
         Some(tauri::utils::config::BundleType::App) => "app",
@@ -72,7 +73,7 @@ pub fn install_kind() -> String {
     .to_string()
 }
 
-/// 是否存在可用的提权通道（Linux deb/rpm 更新需要）。只探测，不执行。
+/// 是否存在可用的提权通道（Linux deb 更新要落系统目录）。只探测，不执行。
 fn has_privilege_channel() -> bool {
     crate::platform::current().has_privilege_channel()
 }
@@ -80,8 +81,8 @@ fn has_privilege_channel() -> bool {
 /// 能否自更新：形态受支持 且（Linux）有提权通道。
 pub fn self_update_capable() -> bool {
     match install_kind().as_str() {
-        "deb" | "rpm" => has_privilege_channel(),
-        "appimage" | "nsis" | "msi" | "app" => true,
+        "deb" => has_privilege_channel(),
+        "nsis" | "msi" | "app" => true,
         _ => false,
     }
 }

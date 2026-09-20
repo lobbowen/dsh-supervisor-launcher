@@ -712,6 +712,17 @@ pub async fn shell_update_check(app: tauri::AppHandle) -> ShellResult<serde_json
     }
 }
 
+/// 换源重试的判据：**只有「这个源没把字节给全」才换下一个源**。
+///
+/// 验签类失败（Minisign / Base64 / SignatureUtf8）说明拿到的东西不对，
+/// 换源重试只会反复下载大包并掩盖真实故障，必须立刻报出来。
+/// 其余（安装/解压/环境）失败与源无关，同样不重试。
+/// `Error` 是 `#[non_exhaustive]`，故新变体默认落到「不重试」—— 保守方向正确。
+fn worth_next_source(err: &tauri_plugin_updater::Error) -> bool {
+    use tauri_plugin_updater::Error as E;
+    matches!(err, E::Network(_) | E::Reqwest(_) | E::Io(_))
+}
+
 /// 下载并安装更新（minisign 验签在插件内强制执行）。
 /// 成功后**不自动重启**——由引导页统一调用 shell_restart（便于先告知用户）。
 #[tauri::command]
@@ -733,52 +744,77 @@ pub async fn shell_update_apply(app: tauri::AppHandle) -> ShellResult<serde_json
     };
     let target = u.version.clone();
 
-    crate::update::log(&format!("桌面更新开始下载 {}", target));
-
-    // on_chunk 给的是本块大小（增量）与**可选**总量，此处自行累加。
-    let mut got: u64 = 0;
-    let dl = tokio::time::timeout(
-        SHELL_DOWNLOAD_TIMEOUT,
-        u.download(
-            |chunk, total| {
-                got += chunk as u64;
-                // 统一安装事件（SSOT §2.4）：壳更新与 node/npm/内核同一形态，kind="shell"。
-                //   进度只以**文字**表达（MB），不再下发 downloaded/total —— 前端已按规范删除进度条，
-                //   再传字节数只会诱导消费方重新画条。
-                // total 为 Option：服务端未给 Content-Length 时只报已下载量（文字仍然可用）。
-                let text = match total.filter(|t| *t > 0) {
-                    Some(t) => format!(
-                        "正在下载桌面版本 {:.1} / {:.1} MB…",
-                        got as f64 / 1048576.0,
-                        t as f64 / 1048576.0
-                    ),
-                    None => format!("正在下载桌面版本 {:.1} MB…", got as f64 / 1048576.0),
-                };
-                let pct = total
-                    .filter(|t| *t > 0)
-                    .map(|t| (got as f32 / t as f32).min(1.0))
-                    .unwrap_or(0.0);
-                let _ = app.emit(
-                    "install_progress",
-                    serde_json::json!({ "kind": "shell", "status": text, "progress": pct }),
-                );
-            },
-            || {},
-        ),
-    )
-    .await;
-    let bytes = match dl {
-        Err(_) => {
-            let msg = format!("下载超时（{} 分钟未完成）", SHELL_DOWNLOAD_TIMEOUT.as_secs() / 60);
-            crate::update::log(&format!("桌面更新{}", msg));
-            return Ok(serde_json::json!({ "ok": false, "error": msg }));
+    // 清单每平台只有一个绝对产物 URL，而插件下载阶段不会自己换源 → 由壳按
+    // `mirror::artifact_candidates` 逐个试（换源不换字节，验签仍在插件内做）。
+    let candidates = crate::mirror::artifact_candidates(&u.download_url, &u.version);
+    crate::update::log(&format!("桌面更新开始下载 {}（{} 个候选源）", target, candidates.len()));
+    let mut failures: Vec<String> = Vec::new();
+    let mut downloaded: Option<Vec<u8>> = None;
+    for url in &candidates {
+        let host = url.host_str().unwrap_or("?").to_string();
+        let mut attempt = u.clone();
+        attempt.download_url = url.clone();
+        // on_chunk 给的是本块大小（增量）与**可选**总量，此处自行累加；
+        //   每个候选源重新计数，否则换源后进度会从半程继续跳。
+        let mut got: u64 = 0;
+        let dl = tokio::time::timeout(
+            SHELL_DOWNLOAD_TIMEOUT,
+            attempt.download(
+                |chunk, total| {
+                    got += chunk as u64;
+                    // 统一安装事件（SSOT §2.4）：壳更新与 node/npm/内核同一形态，kind="shell"。
+                    //   进度只以**文字**表达（MB），不再下发 downloaded/total —— 前端已按规范删除进度条，
+                    //   再传字节数只会诱导消费方重新画条。
+                    // total 为 Option：服务端未给 Content-Length 时只报已下载量（文字仍然可用）。
+                    let text = match total.filter(|t| *t > 0) {
+                        Some(t) => format!(
+                            "正在下载桌面版本 {:.1} / {:.1} MB…",
+                            got as f64 / 1048576.0,
+                            t as f64 / 1048576.0
+                        ),
+                        None => format!("正在下载桌面版本 {:.1} MB…", got as f64 / 1048576.0),
+                    };
+                    let pct = total
+                        .filter(|t| *t > 0)
+                        .map(|t| (got as f32 / t as f32).min(1.0))
+                        .unwrap_or(0.0);
+                    let _ = app.emit(
+                        "install_progress",
+                        serde_json::json!({ "kind": "shell", "status": text, "progress": pct }),
+                    );
+                },
+                || {},
+            ),
+        )
+        .await;
+        match dl {
+            Err(_) => failures.push(format!(
+                "{}：下载超时（{} 分钟未完成）",
+                host,
+                SHELL_DOWNLOAD_TIMEOUT.as_secs() / 60
+            )),
+            Ok(Err(e)) => {
+                if !worth_next_source(&e) {
+                    let msg = format!("下载失败: {}", e);
+                    crate::update::log(&format!("桌面更新{}（源 {}）", msg, host));
+                    return Ok(serde_json::json!({ "ok": false, "error": msg }));
+                }
+                failures.push(format!("{}：{}", host, e));
+            }
+            Ok(Ok(bytes)) => {
+                if !failures.is_empty() {
+                    crate::update::log(&format!("桌面更新改由 {} 取回（前面 {} 个源失败）", host, failures.len()));
+                }
+                downloaded = Some(bytes);
+                break;
+            }
         }
-        Ok(Err(e)) => {
-            let msg = format!("下载失败: {}", e);
-            crate::update::log(&format!("桌面更新{}", msg));
-            return Ok(serde_json::json!({ "ok": false, "error": msg }));
-        }
-        Ok(Ok(b)) => b,
+        crate::update::log(&format!("桌面更新换下一个源：{}", failures.last().unwrap_or(&String::new())));
+    }
+    let Some(bytes) = downloaded else {
+        let msg = format!("下载失败（{} 个源都没取到安装包）：{}", candidates.len(), failures.join("；"));
+        crate::update::log(&format!("桌面更新{}", msg));
+        return Ok(serde_json::json!({ "ok": false, "error": msg }));
     };
 
     let total = bytes.len() as u64;
