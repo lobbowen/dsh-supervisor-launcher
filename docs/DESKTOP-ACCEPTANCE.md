@@ -55,7 +55,7 @@
 
 | runner | artifact | 安装程序（= 本清单的验收对象）|
 |---|---|---|
-| `ubuntu-22.04` | `linux-x64` | `deb` + `rpm`（**AppImage 已废弃**）|
+| `ubuntu-22.04` | `linux-x64` | `deb`（Linux 支持面 = **Ubuntu + deb 一种形态**，AppImage 与其它发行版形态都不在验收范围）|
 | `macos-latest` | `darwin-arm64` | `app` + `dmg` |
 | `macos-15-intel` | `darwin-x64` | `app` + `dmg` |
 | `windows-latest` | `win-x64` | `nsis` + `msi` |
@@ -75,4 +75,4 @@ Linux `pkexec tar 到 /usr/local`（tar.xz）」），那套形态 2026-09-18 �
 - Node **达标但低于官方最新 LTS**：无升级入口（判定只看 `minNode`，见 §3 的缺口说明）；
 - 内核更新由桌面壳执行（守卫不自更新）：面板「更新」经壳 `kernel_update_apply` 装内核并由所有者重启守卫；
 - GUI 真机手动项（引导页交互/托盘/关窗隐藏）需桌面环境逐个核对，**且只能装 CI 产物来核**（§1）；
-- ~~AppImage 打包需可达 GitHub 下载 extern 工具~~：**AppImage 已废弃**，改为标准 `deb` / `rpm`（`RELEASE-STANDARD.md`）。
+- ~~AppImage 打包需可达 GitHub 下载 extern 工具~~：**AppImage 已废弃**，Linux 只按 `deb` 一种形态验收（`RELEASE-STANDARD.md` §2）。

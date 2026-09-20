@@ -71,15 +71,18 @@ GitHub **永远不会执行**它；但 `docs/RELEASE-AND-BUILD-DECISION.md` 与 
 
 | runner | artifact | bundles | glibc 上限 |
 |---|---|---|---|
-| `ubuntu-22.04` | `linux-x64` | `deb,rpm` | `2.35` |
+| `ubuntu-22.04` | `linux-x64` | `deb` | `2.35` |
 | `windows-latest` | `win-x64` | `nsis,msi` | — |
 | `macos-latest` | `darwin-arm64` | `app,dmg` | — |
 | `macos-15-intel` | `darwin-x64` | `app,dmg` | — |
 
 约束：
 
-- Linux **必须** ubuntu-22.04 基座（glibc 2.35）—— 在 24.04 构建的产物无法在 22.04 / Debian 12 运行；
-- Linux 已**废弃 AppImage**，改用标准 `deb` / `rpm`；
+- Linux **必须** ubuntu-22.04 基座（glibc 2.35）—— 在 24.04 构建的产物无法在 22.04 运行；
+- **Linux 支持面 = Ubuntu + `deb` 一种形态**：`rpm`（Fedora / openSUSE / RHEL 系）与 AppImage
+  都**不在支持面内** —— 不产、不测、不承诺。此前矩阵同时产 `deb,rpm`，但更新清单每平台只有一个
+  槽位、放的是 deb，于是 rpm 客户端的自动更新会拿到 deb 包（缺口已登记过）；收口方式就是**不产 rpm**。
+  谁要扩支持面（rpm 或 apt/yum 仓库），先改本节矩阵与本条，再按 §4 同步 required context；
 - darwin-x64 用 **`macos-15-intel`**（原生 Intel；`macos-13` 已弃用）；
 - 壳**必须四平台** —— 缺任一平台则桌面安装程序不全。
 
@@ -120,8 +123,8 @@ GitHub **永远不会执行**它；但 `docs/RELEASE-AND-BUILD-DECISION.md` 与 
 > 精确 payload 与逐字 contexts、PUT/GET 的字段结构差异、误删后的恢复调用：
 > 见 `RELEASE-AND-BUILD-DECISION.md` 的「把 CI 设为合并门禁」附录。
 
-> 注意 required 的 context **内嵌矩阵参数**（如 `build (ubuntu-22.04, linux-x64, deb,rpm, 2.35)`）。
-> **改平台矩阵时必须同步更新分支保护**，否则旧语境永不出现 → 所有 PR 阻塞。
+> 注意 required 的 context **内嵌矩阵参数**（Linux 腿 = `build (ubuntu-22.04, linux-x64, deb, 2.35)`）。
+> **改平台矩阵（含 bundles）时必须同步更新分支保护**，否则旧语境永不出现 → 所有 PR 阻塞。
 
 ## 5. 发布后验证（H9）
 
@@ -146,6 +149,21 @@ GitHub **永远不会执行**它；但 `docs/RELEASE-AND-BUILD-DECISION.md` 与 
 > 2026-09-21 实测 unpkg 侧滞后约 3 分钟，比 registry 更久）。查询需要凭据时在**进程内**读取凭据库里的
 > `github-pat`（库在内核仓 `release/scripts/cred.sh path github-pat` 所指位置，本仓不携带凭据工具），
 > 不把令牌拼进命令行参数。
+>
+> **但「刚发布就 404」不能一律记成传播延迟**（2026-09-21 取证，触发点是同一清单包出厂 42 分钟后
+> `@latest` 已给 200、`@<ver>` 仍稳定 404，而同一路径在 jsdelivr 是 200、unpkg 的
+> **版本文件列表 API** 也已列出该文件）：
+>
+> - unpkg 按 URL 缓存**未命中**，且这个负缓存与文件是否入库无关 —— 「列出文件的 API 有它」
+>   与「取文件的 URL 404」可以同时成立，所以后者推不出「产物没发出去」。
+> - 结论口径：**H6-④ 只判客户端真正走的 URL** —— `tauri.conf.json` 的两条 `endpoints` 都写 `@latest`，
+>   安装包 URL 是清单里的 `@<ver>/artifact/<文件>`。两者各自直取（本机实测四条 payload 全 200/206）；
+>   `@<ver>/shell-manifest.json` 这一格没有任何客户端会走，404 不改变发布是否成立。
+> - 想主动清掉负缓存：重写该包的 dist-tag 让描述符换掉（`npm dist-tag rm <pkg> beta && npm dist-tag add
+>   <pkg>@<ver> beta`），**不重发、不改产物**。本轮实测它对 `@latest` 生效、对旧的 `@<ver>` 失败 URL
+>   没立刻生效 —— 所以这是排障手段，不是判据。
+> - 判据顺序不变：**先看 CI 的 `publish` 日志**（npm 自认的 `+ @dsh-sup/<pkg>@<ver>`），
+>   再看 registry 的 `versions` / `dist-tags`，最后才动 CDN 结论。
 >
 > **GitHub Release 一行的判据来源**：tag 构建在无密钥时会被 workflow 主动判红
 > （`.github/workflows/build.yml` 的 `::error::TAURI_SIGNING_PRIVATE_KEY 未配置`），所以
@@ -212,7 +230,7 @@ GitHub **永远不会执行**它；但 `docs/RELEASE-AND-BUILD-DECISION.md` 与 
     {
       "os": "ubuntu-22.04",
       "artifact": "linux-x64",
-      "bundles": "deb,rpm",
+      "bundles": "deb",
       "glibcMax": "2.35"
     },
     {

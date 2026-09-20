@@ -4,6 +4,46 @@
 
 ## [未发布]
 
+### Linux 支持面收窄为「Ubuntu + deb 一种形态」，旁路产物从产线源头停掉
+
+上面第一条缺口不是靠补文案收口的，而是把「多形态」这条旁路整个拆掉：
+
+- 产线源头（`build.yml` 的 linux 臂 `bundles`）与 `tauri.conf.json` 的 `bundle.targets` 都去掉 `rpm`，
+  安装程序只产 `.deb`；上传产物与 GitHub Release 资产清单同步删掉 rpm 一项，装系统依赖的步骤不再装 `rpm` 包。
+  起点停掉才算止血 —— 只改文档而矩阵照产，下一版又会产出一个没人支持、也没人测的形态。
+- 诊断层跟着收窄：`update.rs` 的 `install_kind()` 去掉 `Rpm`/`AppImage` 分支，
+  这两类落到「未知形态 → 不自称能自更新」；`self_update_capable()` 对 deb 仍要看有没有提权通道。
+- 验收层：`updater_artifacts.rs` 不再找 rpm 产物；R-3 一致性门禁加**反向**断言（workflow 与 `targets`
+  里出现 `rpm` 即红）。反向断言是必需的 —— `deb` 是 `deb,rpm` 的子串，只断言「有 deb」时 rpm 回潮照样绿。
+- 连带改动（**必须同批**，否则所有 PR 卡住）：矩阵参数进到了 required status check 的名字里，
+  job 名从 `build (ubuntu-22.04, linux-x64, deb,rpm, 2.35)` 变成 `build (ubuntu-22.04, linux-x64, deb, 2.35)`，
+  分支保护的必需上下文要在这轮里一起改。
+- 基座与支持面是两件事，文档里此前混着说：`ubuntu-22.04` 定的是 glibc **下限**（产物能在更新的发行版上跑），
+  它不构成「我们支持 Debian / Fedora」的承诺。支持面现在只有一个名字：**Ubuntu**。
+  以后要扩（rpm 槽位、AppImage、按包形态分流）得先改更新清单的每平台单槽位设计，见
+  `docs/RELEASE-STANDARD.md` §2 与 `docs/SHELL-UPDATE-CHANNEL-VERIFICATION.md` §九。
+
+### 安装包换源：Windows 不再只剩 unpkg 一条路，且候选源全部按实测挑选
+
+上面第二条缺口的定案：**清单可达 ≠ 安装包可分发**，此前所有「多 CDN 冗余」的说法都是把前者当成后者。
+
+- 实测（本机对 1.2.0 真实产物逐源取包，明细表在 `docs/SHELL-UPDATE-CHANNEL-VERIFICATION.md` §九）：
+  jsdelivr 家族按扩展名屏蔽 `.exe`（deb / app.tar.gz / 清单照给 206）；npmmirror 把整个 `@dsh-sup` scope
+  挡在 raw-file 路由外（与扩展名无关）；tencent / aliyun / huawei 的 npm 镜像没有 raw-file 路由（404）；
+  unpkg.net 回 503 USAGE_EXCEEDED；gh-proxy.com / ghfast.top 能取但是未审计的第三方 ⇒ **一律不放进代码里的候选**。
+- 落地的只有实测拿得到的：新增 `mirror::artifact_candidates()`，把清单声明的那一条 payload URL
+  展开成有序候选（声明源永远第一，去重），npm CDN 家族换 base 同路径复用，
+  再补一条 GitHub Release 同名资产作为独立来源回退。
+- 换源之所以安全：Tauri 的 `endpoints` 只覆盖**取清单**这一步，`Update::download_url` 是公开可改字段，
+  壳在 `download()` 前重写它；验签发生在 `download()` 内部、按下载到的字节对着 `tauri.conf.json` 内置公钥验，
+  所以换的是来源、不是内容，签不过照样拒。
+- 只在网络/传输类错误上换下一个源（`worth_next_source`），验签与安装类错误立刻返回、不重试；
+  全部候选都拿不到才报错，错误里逐项带来源与原因。
+- 一个真实陷阱写进门禁：GitHub Release 的 mac 资产名不带 arch token，跨架构同名 ⇒
+  按架构名匹配才生成 Release 候选，否则会把 arm64 的包递到 x64 客户端上，表现为一句看不懂的验签失败。
+  另有单测断言候选集**只含**实测源（对未审计镜像按名字拒绝），防止有人再往里填假镜像。
+- `plugins.updater.endpoints` 不改：两条端点都发得出清单，改它解决不了 payload 单点，只会让清单也单点。
+
 ## [1.2.0]（2026-09-21）
 
 本版做一件事：**把自更新签名链换到新一把 minisign 钥匙上**，并据此承担一次强制重装。

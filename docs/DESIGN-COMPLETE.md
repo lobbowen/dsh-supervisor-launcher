@@ -435,7 +435,7 @@ pub enum ShellError {
 | 服务定义（守卫）| systemd | LaunchAgent | schtasks | `platform/*::ServiceControl` |
 | 服务启停 | `systemctl --user` | `launchctl` | `schtasks` | 同上 |
 | 提权通道探测 | | （恒有）| | `platform/*::has_privilege_channel` |
-| 壳自更新 | deb/rpm | app | exe/msi | `domain/update` |
+| 壳自更新 | deb（Ubuntu 单一形态）| app | exe/msi | `domain/update` |
 | 壳崩溃自愈 | 守卫看护 | 守卫看护 | 守卫看护 | 内核 `domains/shell/watchdog` |
 | 壳开机自启 | XDG | LaunchAgent gui | schtasks GUI | `platform/os/autostart`（内核）|
 
