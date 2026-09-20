@@ -80,7 +80,7 @@ fn fn_body_opt(src: &str, sig: &str) -> Option<String> {
 
 /// 去掉行注释，只留代码。
 /// 为什么：结构判据要在**函数体**里找证据 token，而函数体连着注释一起返回 ——
-///   一段提到 `npm_usable_at` 的注释就能让 G-2 转绿，于是门禁校验的是「写过说明」而不是「调用了它」。
+///   一段提到 `derive_usable` 的注释就能让 G-2 转绿，于是门禁校验的是「写过说明」而不是「调用了它」。
 fn code_only(body: &str) -> String {
     body.lines()
         .filter(|l| !l.trim_start().starts_with("//"))
@@ -102,7 +102,7 @@ fn g1_node_status_exposes_real_npm_probe() {
 
 /// npm「可用」的证据 token：三者内部都会真实执行 `npm --version`（不变量 T-1b）。
 /// 为什么不含 `probe_npm`：它只判断文件存在，而「存在 != 可用」正是本条链的根因形态。
-const NPM_USABLE_TOKENS: [&str; 3] = ["derive_usable", "probe_npm_usable", "npm_usable_at"];
+const NPM_USABLE_TOKENS: [&str; 2] = ["derive_usable", "probe_npm_usable"];
 
 fn has_npm_usable_call(body: &str) -> bool {
     NPM_USABLE_TOKENS.iter().any(|t| body.contains(t))

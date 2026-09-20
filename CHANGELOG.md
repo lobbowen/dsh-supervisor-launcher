@@ -37,10 +37,15 @@ Actions 把变量展开成空字符串继续导出，Tauri v2 CLI 拿空串去�
 一起红），而这红与当次代码改动无关，等价于完整构建矩阵不可用。
 
 - 打包步骤：key 缺失分支内 `unset TAURI_SIGNING_PRIVATE_KEY TAURI_SIGNING_PRIVATE_KEY_PASSWORD`，
-  让 CLI 真正走「无私钥」路径；tag 构建仍先拦后报（缺密钥不可发布）。
+  并在同一分支关掉 updater 产物（`--config` 覆盖 `bundle.createUpdaterArtifacts=false`）。
+  两步都是必需的：配置里内置了 pubkey，Tauri 见「有公钥无私钥」会直接失败
+  （`A public key has been found, but no private key`），只撤变量仍红。
+  tag 构建仍先拦后报（缺密钥不可发布）。
 - 组装步骤：`--require-sig` 仅在 `refs/tags/v*` 上传入；`assemble-shell-pkg.js` 的缺 `.sig` 早失败
   挂到该开关上（发布路径的强校验一字不放宽），并修 `parseArgs` 使末尾布尔开关不被当成取值
   （旧实现会让 `--require-sig` 得到 `undefined` 且其后参数整体错位）。
+  macOS 在关闭 updater 产物时不产 `.app.tar.gz`，组装器加「主形态零命中才用 `.dmg`」的备用形态；
+  tag 构建主形态必命中，产物集合与既往一致。
 - 验签验收步骤加步骤级 tag `if:`；**不给** `build` job 加 job 级 `if:`（那会违反 C-c/C-d）。
 - 门禁：新增 C-f（无密钥构建不阻断的三处语义）、C-g（组装器保留发布强校验 + 布尔开关解析）、
   C-h（三条判据的旧形态反向夹具），全部为纯函数判据。

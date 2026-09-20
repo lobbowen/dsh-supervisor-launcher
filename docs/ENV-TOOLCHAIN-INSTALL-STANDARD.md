@@ -205,7 +205,7 @@ NS.versionLabel(v)             // 版本号形态归一（唯一实现）；null
 | 门禁 | 断言 |
 |---|---|
 | G-1 | `node_status` 含 `npmOk`/`npmPath`/`npmVersion`，且来源是真实探测（`probe_npm` / `probe_npm_usable`） |
-| G-2 | `run_install` **函数体**（或被委派的 `node::finalize_install` 函数体）里真实调用 npm 可用性探测（`derive_usable`/`probe_npm_usable`/`npm_usable_at`）；行注释不算证据 |
+| G-2 | `run_install` **函数体**（或被委派的 `node::finalize_install` 函数体）里真实调用 npm 可用性探测（`derive_usable`/`probe_npm_usable`）；行注释不算证据 |
 | G-3 | 全仓无 `showProgress`/`hideProgress`/`progBar`/`id="prog"` |
 | G-4 | 全仓无旧事件名（`env_progress`/`env_done`/`env_error`/`shell_update_progress`） |
 | G-5 | `20-env.js` 存在独立的 `npmOk !== true` 分支且**不得**与 node 分支共用安装文案 |

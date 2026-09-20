@@ -15,7 +15,9 @@
 **推论**：2026-09-19 的同机凭据事故（旧库 `~/.dsh/credentials`、`~/.ssh` 部署密钥全丢）很可能把
 `~/.tauri/` 一并带走；若离线介质另有副本，恢复前先按 §五 比对 key id 与 sha256 前缀。
 在私钥重新可用之前，**tag 发布会被 workflow 主动拦下**（这是设计，不是缺陷）；
-非 tag 构建不再因缺密钥而红（CI 会撤掉空的签名环境变量）。
+非 tag 构建不再因缺密钥而红：CI 在同一分支撤掉空的签名变量，并用 `--config` 把
+`bundle.createUpdaterArtifacts` 关掉（配置里内置了 pubkey 时，Tauri 见「有公钥无私钥」
+会直接失败，只撤变量仍红）。
 
 公钥与私钥的配对是单向可验证的：任何新公钥都要重新内置进 `tauri.conf.json`，
 而旧客户端只认旧公钥，见 §六。
@@ -69,6 +71,7 @@ dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDk2REUzRUYyNkYzODlGNzAKUldS
 > secret 缺失时 Actions 把变量展开成空字符串，Tauri v2 CLI 于是拿空串去解码（`Missing comment in secret key`）。
 > 正确的做法分两种：
 > 1. 确实没有密钥（日常构建、PR）：CI 必须让该变量**不存在**而非为空（`build.yml` 的打包步骤已 `unset`），
+>    且必须关掉 `bundle.createUpdaterArtifacts`（否则报 `A public key has been found, but no private key`），
 >    并且组装/验收步骤对 `.sig` 的强校验只在 tag 上生效；
 > 2. 有密钥（发布）：`TAURI_SIGNING_PRIVATE_KEY` 给内容或绝对路径，
 >    `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` 给该密钥**真实的**口令（未加密的密钥才可给空串）。

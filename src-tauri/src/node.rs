@@ -311,17 +311,6 @@ pub fn reinstall_for_npm(local: &Path, version: &str) -> Result<crate::runtime_c
     Ok(rt)
 }
 
-/// npm 在给定 node 目录下是否**真实可用**（文件存在 != 可用，不变量 T-1b）。
-///
-/// 只判可用性、不返回事实；需要 npm 路径/版本时用 `runtime_contract::derive_usable`
-///   （它一次探测同时给出路径、前置参数与版本，别处不得再探一遍来拼同一结论）。
-pub fn npm_usable_at(node_bin: &Path) -> bool {
-    node_bin
-        .parent()
-        .and_then(|b| crate::runtime_contract::probe_npm_usable(node_bin, b))
-        .is_some()
-}
-
 /// 安装收尾（SSOT §2.2 步骤 2/3）：校验 node（版本 + 最低门槛）→ 校验 npm →
 /// 不可用则重装补 npm（幂等）。
 /// 成功返回**运行期契约本身**（node 路径/版本 + npm 路径/参数/版本），
@@ -345,7 +334,7 @@ pub fn finalize_install(
         return Err((false, format!("安装到的 Node.js {} 低于最低要求 {}", v, MIN_NODE)));
     }
     // derive_usable 内部就是一次真实执行 npm（T-1b）：None 即「npm 不可用」，
-    //   不需要先 npm_usable_at 再 derive_usable —— 那会把同一个 npm 探测执行两遍。
+    //   不需要先单独判可用再 derive_usable —— 那会把同一个 npm 探测执行两遍。
     if let Some(rt) = crate::runtime_contract::derive_usable(node_bin, &v) {
         crate::runtime_contract::write(&rt);
         return Ok(rt);

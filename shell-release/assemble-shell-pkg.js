@@ -37,6 +37,12 @@ const ARTIFACT_PATTERNS = {
   nsis: [/-setup\.exe$/i, /\.exe$/i],
 };
 
+// 关闭 updater 产物的构建（无密钥的验证构建）不会产 .app.tar.gz，只产 .dmg。
+// 主形态命中时永不走这里，故 tag 发布的产物集合与既往完全一致。
+const FALLBACK_PATTERNS = {
+  app: [/\.dmg$/],
+};
+
 function parseArgs(argv) {
   const o = {};
   for (let i = 2; i < argv.length; i += 1) {
@@ -64,9 +70,13 @@ function walk(dir) {
 }
 
 function findArtifacts(bundleDir, installer, version) {
-  const pats = ARTIFACT_PATTERNS[installer] || [];
   const all = walk(bundleDir).filter((f) => !/\.sig$/.test(f));
-  const hits = all.filter((f) => pats.some((re) => re.test(path.basename(f))));
+  const by = (pats) => all.filter((f) => pats.some((re) => re.test(path.basename(f))));
+  let hits = by(ARTIFACT_PATTERNS[installer] || []);
+  if (!hits.length && FALLBACK_PATTERNS[installer]) {
+    hits = by(FALLBACK_PATTERNS[installer]);
+    if (hits.length) console.log('   主形态未命中，改用备用形态（关闭 updater 产物的验证构建）');
+  }
   // 必须按**版本**过滤（2026-09-11 修复）：bundle 目录会累积历史版本安装包，
   //   不过滤会把旧版本一并打进发布包（体积膨胀 + 语义混乱，且清单与包内容不一致）。
   //   CI 每次全新 workspace 故只产一个版本，但本地开发/重跑会命中此问题（实测 1.0.1 与 1.0.2 同目录）。
