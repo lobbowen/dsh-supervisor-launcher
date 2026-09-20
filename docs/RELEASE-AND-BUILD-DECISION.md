@@ -43,17 +43,20 @@ bash scripts/bump-shell.sh <ver>        # 同号写入 Cargo.toml / tauri.conf.j
 node scripts/verify-shell-versions.js   # 自洽校验（不一致即失败）
 ```
 
-### 2.2 本机自查（可选，**不构成验收依据**）
+### 2.2 本机自查上限（**纯静态**，不构成验收依据）
 
 ```bash
-cd src-tauri && cargo test            # 全部门禁（含跨平台导入门禁、CI 覆盖性门禁）
-cargo check --all-targets             # 0 警告
+bash -n scripts/bump-shell.sh           # shell 语法
+node --check scripts/verify-shell-versions.js
+cargo fmt --check                       # 格式（不编译、不产 target/）
 ```
 
-> 这两条只是开发机上提前发现问题的手段，**验收只由 CI 的四平台矩阵裁决**（§0 硬标准：
-> 单平台跑绿证明不了另三个）。本机若与别的会话共享（同一工作树可能被并行改动），
-> 按内核仓 `ACCEPTANCE-STANDARD.md` 的口径**不在本机跑测试套件**，上限为
-> `cargo fmt --check` / `node --check` / `bash -n` 这类静态自查。
+> 本机的上限到此为止。**`cargo test` / `cargo check --all-targets` / `cargo build` 一律不在本机跑**
+> （`RELEASE-STANDARD.md` §0 硬标准：构建与测试都由 CI 裁决）。
+> 理由不是「怕慢」，而是**结论不可移植**：单平台、单 glibc、单 HOME 下跑绿证明不了另三个平台，
+> 跑红也可能是本机环境（缺系统依赖 / 别的会话并行改动）造成的假信号，
+> 而 `src-tauri/target/` 会留下 GB 级中间产物污染工作区。
+> 门禁是否真的执行由 CI 的**自动枚举**保证（新增 `tests/*.rs` 自动入 CI），不靠本机复述。
 
 ### 2.3 发布
 

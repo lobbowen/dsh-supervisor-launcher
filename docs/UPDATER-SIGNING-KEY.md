@@ -108,19 +108,28 @@ dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDk2REUzRUYyNkYzODlGNzAKUldS
 
 ## 五、验证备份是否可用
 
-> **前置**：本机已无这些文件（见 §〇）。下面两段只在**从离线介质找回副本后**执行，
-> 且必须先过 §二 的 key id 比对，再拿它去签名。
+> **前置**：本机已无这些文件（见 §〇）。下面两步只在**从离线介质找回副本后**执行，
+> 且必须先过 §二 的 key id 比对。
+
+**第 1 步（本机，纯静态）**：比对指纹，不签名、不构建。
 
 ```bash
-# 1) 指纹比对（应等于 92e3ae43ed4dea58）
+# 应等于 92e3ae43ed4dea58
 sha256sum ~/.tauri/backup/dsh-supervisor.key.<时间戳> | cut -c1-16
-
-# 2) 用备份实际签名一次（真正验证密钥可用）
-export TAURI_SIGNING_PRIVATE_KEY=~/.tauri/backup/dsh-supervisor.key.<时间戳>
-export TAURI_SIGNING_PRIVATE_KEY_PASSWORD=""
-cd <壳仓>/src-tauri && npx @tauri-apps/cli@2 build --bundles deb
-# 成功即产出 .deb + .deb.sig
 ```
+
+**第 2 步（CI，唯一能证明「密钥可用于产线」的地方）**：
+
+1. 由用户把私钥写入仓库 secret `TAURI_SIGNING_PRIVATE_KEY`（+ 口令 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`）；
+   私钥**不得**经命令行 `export`、不得进工作区任何文件（与内核仓 CREDENTIALS-STANDARD 铁律 2 同规）；
+2. 触发一次**非 tag** 构建（`workflow_dispatch`）；`build` job 见 secret 非空即照常产出 updater 产物；
+3. 判据：每个平台的 artifact 里出现**成对**的 `<安装程序>` + `<安装程序>.sig`，
+   且 `组装 npm 包` 步骤没有 `::warning::TAURI_SIGNING_PRIVATE_KEY 未配置`。
+
+> 非 tag 构建**不跑** H7 的 `updater_artifacts` 同源验签（该步 `if: startsWith(github.ref,'refs/tags/v')`），
+> 所以上面只证明「能签出 `.sig`」，不证明「Tauri 客户端会接受」。后者要等真正的 tag 构建裁决。
+> 本机一律不得跑 `npx @tauri-apps/cli@2 build` 来验证 —— 那会产出发布形态的产物，直接违反
+> `RELEASE-STANDARD.md` §0 硬标准。
 
 ## 六、轮换（设计上可行，实操代价极高）
 

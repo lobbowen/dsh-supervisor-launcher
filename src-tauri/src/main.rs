@@ -332,7 +332,7 @@ fn cli_service_plan() -> i32 {
     }
 }
 fn main() {
-    // 启动里程碑日志（常开，落盘 ~/.dsh/shell/shell.log）：打开日志即可判定卡在
+    // 启动里程碑日志（常开，落盘 <状态根>/shell/shell.log）：打开日志即可判定卡在
     // 「Rust setup 未执行」还是「前端 JS 未执行」。shell.log 超 1MB 自动滚动。
     macro_rules! bt {
         ($($a:tt)*) => {

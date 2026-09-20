@@ -10,14 +10,14 @@ use super::{home_dir, user_name, Capabilities, LaunchSpec, Platform, SVC_NORMAL,
 
 pub const NAME: &str = "linux";
 
-/// 安装命令超时（15 分钟：下载 + 解包 + 系统授权）。
+/// 安装命令超时（15 分钟：下载 + 解包）。
 const INSTALL_CMD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
-/// Linux 可用提权通道（**按优先级**）。单一事实源：
-///   · has_privilege_channel() 用它判定「能否提权」；
-///   · install_node() 用它选**实际执行**的命令。
+/// Linux 可用提权通道（**按优先级**）。单一事实源：只由 `has_privilege_channel()` 使用，
+/// 供**壳自更新**（deb/rpm 落系统目录）判定「能否提权」。
 ///
-/// 两者必须同源（探测与执行用同一命令），否则会「宣称可更新却在安装时失败」。
+/// 提权探测与实际执行必须同源，否则会「宣称可更新却在安装时失败」。
+/// Node 安装**刻意不经过这里**：它解到用户级状态目录，零权限（门禁 A-2）。
 pub const PRIVILEGE_COMMANDS: [&str; 2] = ["pkexec", "sudo"];
 
 /// 在 PATH 中定位第一个可用的提权命令（**不执行**，只判存在性）。

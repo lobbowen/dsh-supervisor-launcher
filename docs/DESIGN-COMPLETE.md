@@ -134,15 +134,18 @@ ManagedRegistry.heartbeat(5000)                objects.js:289-324
 
 ## 6. 跨仓契约面（全清单）
 
+> 表中路径写 `<状态根>`：产品状态根（`DSH_SUPERVISOR_HOME` 覆盖），与 DSH 的 `~/.dsh` 无关；
+> 内核侧 `src/platform/service/state-root.js`、壳侧 `src-tauri/src/env.rs` 同源，schema 由门禁握手。
+
 | 契约 | 类型 | 方向 | 格式/语义 |
 |---|---|---|---|
-| `~/.dsh/supervisor/config.json` | 文件 | 内核写 / **壳读** | `apiPort`、`closeAction`(hide\|exit)、`apiAccessKey`、`shellWatchdog`…（**壳读内核配置的唯一入口**：`env.rs:229 config_json()`，一律真 JSON 解析，禁字符串扫描）|
-| `~/.dsh/supervisor/runtime.json` | 文件 | **壳写** / 内核读 | schema 2 工具链契约：node（path/binDir/version）+ npm（path/**args**/**version**）+ 旧键 `nodePath`/`nodeVersion`/`minNode`。唯一写入方 `runtime_contract::write`（`record_runtime_meta` 已删除，见 §30.2 现状）|
-| `~/.dsh/supervisor/registry.json` | 文件 | **壳写** / 内核读 | 镜像源 `{mode,origins,manualOrigin}`（`mirror.rs:191 export_to_kernel`；`supervisor.js:192` 读）|
-| `~/.dsh/shell/identity.json` | 文件 | **壳写** / 内核读 | `{version,platform,arch,installKind,selfUpdateCapable,phase,pid,startedAt,lastSeenAt,exe}`（`update.rs::init_identity` 写；`domains/shell/index.js` 读）|
-| `~/.dsh/shell/update-journal.json` | 文件 | 内核写 / 内核读（面板与 CLI 经 `/shell/status`）| 壳更新账本 `{from,to,confirmed}`；**不含隐式回退/拉黑/冷却字段**（紧急回退走发布通道契约的 `rollback` dist-tag，不经此账本）（`domains/shell/index.js`）|
-| 守卫服务定义 | 文件 | **壳写** / 服务管理器读 | systemd unit / LaunchAgent plist / schtasks（`platform/service.rs`）|
-| 面板 HTTP API | HTTP | 内核提供 / 壳与浏览器消费 | **71 精确 + 14 前缀**（`api/surface.js`）；信任三层（socket 身份 → Origin 端口 → 可选 access key）|
+| `<状态根>/supervisor/config.json` | 文件 | 内核写 / **壳读** | `apiPort`、`closeAction`(hide\|exit)、`apiAccessKey`、`shellWatchdog`…（**壳读内核配置的唯一入口**：`env.rs::config_json()`，一律真 JSON 解析，禁字符串扫描）|
+| `<状态根>/supervisor/runtime.json` | 文件 | **壳写** / 内核读 | schema 2 工具链契约：node（path/binDir/version）+ npm（path/**args**/**version**）+ 旧键 `nodePath`/`nodeVersion`/`minNode`。唯一写入方 `runtime_contract::write`（`record_runtime_meta` 已删除，见 §30.2 现状）|
+| `<状态根>/supervisor/registry.json` | 文件 | **壳写** / 内核读 | 镜像源契约 schema 2：`{mode,origins,manualOrigin,catalog,selected,probe}`（壳 `mirror.rs::export_to_kernel*` 写；内核 `platform/distribution/registry.js` 消费、`platform/contract/registry.js` 校验）|
+| `<状态根>/shell/identity.json` | 文件 | **壳写** / 内核读 | `{version,platform,arch,installKind,selfUpdateCapable,phase,pid,startedAt,lastSeenAt,exe}`（`update.rs::init_identity` 写；内核 `domains/shell/journal.js` 读）|
+| `<状态根>/shell/update-journal.json` | 文件 | 内核写 / 内核读（面板与 CLI 经 `/shell/status`）| 壳更新账本 `{from,to,confirmed}`；**不含隐式回退/拉黑/冷却字段**（紧急回退走发布通道契约的 `rollback` dist-tag，不经此账本）（`domains/shell/journal.js`）|
+| 守卫服务定义 | 文件 | **壳写** / 服务管理器读 | systemd unit / LaunchAgent plist / schtasks（`platform/{linux,macos,windows}.rs` 的 `ServiceControl` 实现）|
+| 面板 HTTP API | HTTP | 内核提供 / 壳与浏览器消费 | 精确路由 + 前缀路由的**清单与计数以 `src/api/contract.js` 的 `SURFACE`/`PREFIXES` 为准**（该文件的 `summary()` 自算，文档不抄数字）；信任三层（socket 身份 → Origin 端口 → 可选 access key）|
 | 壳健康上报 | HTTP | 壳 → 内核 | `POST /shell/health`（`phase=ready` 即更新确认信号）|
 | 守卫握手 | HTTP | 壳 → 内核 | `GET /healthz`、`GET /session/status`、`POST /session/stop` |
 
@@ -181,38 +184,46 @@ ManagedRegistry.heartbeat(5000)                objects.js:289-324
   托盘左键 → show_main；右键 → 菜单（显示/启动/停止/重启/退出）
 ```
 
-**IPC 形态（全部经 `main.rs` 的 20 个 `#[tauri::command]`）**：
+**IPC 形态（23 个 `#[tauri::command]`，全部定义在 `src-tauri/src/commands/mod.rs`）**：
 
-| 命令 | 行 | 体量 | 职责 |
-|---|---|---|---|
-| `node_status` | 73 | 47 | 环境探测（异步，900ms 预算）|
-| `mirror_warmup` / `mirror_cached` | 125/132 | 5/17 | 镜像预热（后台）+ 读缓存（无 I/O）|
-| `node_latest` | 151 | 17 | 官方最新 LTS（网络）|
-| `start_node_install` | 186 | 39 | 装 Node |
-| `core_status`/`core_plan`/`core_apply` | 369/394/407 | 22/8/38 | 内核版本治理 |
-| `guard_start`/`guard_ready` | 447/484 | 30/14 | 守卫启停与握手 |
-| `win_ctl` | 502 | 26 | 窗口动作 |
-| `shell_identity`/`shell_set_phase`/`shell_panel_url` | 960/971/820 | 9/4/8 | 壳身份与阶段 |
-| `mirror_status`/`mirror_set` | 1020/1054 | 31/30 | 镜像设置 |
-| `shell_update_check`/`shell_update_apply` | 1088/1145 | 54/77 | 壳自更新 |
-| `shell_restart`/`finish_boot` | 1224/172 | 6/5 | 重启/完成 |
+> 命令的**权威清单** = `commands/mod.rs` 的 `#[tauri::command]` 与 `main.rs` 的
+> `generate_handler!` 两处（数量必须一致，否则前端 invoke 到不存在的命令）。
+> 本表**不记行号与函数体量** —— 它们每次重构都飘；原先记的「全部经 main.rs 的 20 个命令」
+> 既已不成立（门禁 G3 恰恰要求 `main.rs` 里 `#[tauri::command]` **为 0**）。
 
-**无头自检入口（4 个，任何平台可跑）**：`--env-plan` / `--mirror-plan` / `--node-plan` / `--core-plan` / `--service-plan`。
+| 命令组 | 职责 |
+|---|---|
+| `node_status` / `node_latest` | 环境探测（异步，在飞探测有预算）+ 官方最新 LTS（网络）|
+| `start_node_install` | 装 Node（用户级、零权限）|
+| `core_status` / `core_plan` / `core_apply` / `kernel_update_apply` | 内核版本治理（唯一写入者 = 壳）|
+| `guard_start` / `guard_ready` | 守卫启停与握手（对齐门 + healthz）|
+| `mirror_status` / `mirror_set` / `mirror_warmup` / `mirror_cached` | 镜像设置、预热与读缓存 |
+| `shell_identity` / `shell_set_phase` / `shell_panel_url` / `shell_state_root` / `shell_bridge_contract` | 壳身份、阶段、面板地址与自描述 |
+| `shell_update_check` / `shell_update_apply` / `shell_restart` | 壳自更新（minisign 强制验签）|
+| `win_ctl` / `finish_boot` | 窗口动作、引导完成 |
+
+**无头入口（`main.rs` 在 Tauri 初始化之前分派，共 8 个自检/计划入口 + 1 个守卫入口，任何平台可跑）**：
+`--env-plan` / `--mirror-plan` / `--node-plan` / `--core-plan` / `--service-plan`（可加 `--service-apply` 才写盘）/
+`--platform-matrix` / `--shell-update-plan`；以及**非自检**的 `--run-guard`（服务定义唯一指向的稳定入口，每次启动重新检测后 exec）。
+CI 目前只冒烟 `--node-plan`（且 `|| true` 不影响结论）—— 其余入口有产出、无 CI 断言。
 
 ## 8. 工程现状：脆弱性量化
 
-| 指标 | 实测 | 对照（内核）| 判断 |
-|---|---|---|---|
-| 平台分支 | **43 处 / 8 文件** | 67 处 / 60 在 `platform/os/`（90%）| **壳零平台层** |
-| 分支明细 | `node.rs` 11 / `main.rs` 10 / `service.rs` 9 / `env.rs` 6 / `bounded` 2 / `nodeprobe` 2 / `update` 2 / `core` 1 | — | 加平台翻 8 文件 |
-| `main.rs` | **1487 行**（20 命令 487 行 + 4 CLI + 平台服务控制 + 业务）| `supervisor.js` 1188 行但已拆 6 mixin | 单体，无分层 |
-| 错误类型 | `Result<_, String>` **42 处** / Error 枚举 **0** | 内核 `{ok:false,error,code?}` 对象 | 前端只能字符串匹配 |
-| 前端 | `bootstrap.html` **760 行单块 JS** | 内核 `ui-react/` 有构建与模块化 | 一处语法错全页死（已真实发生）|
-| **有界执行** | `bounded.rs` + **B32 门禁**（禁裸 `.output()`）| `platform/exec.js` **零引用** + 23 处无 timeout | **壳优于内核**（罕见）|
-| 文档 | 10 份，`Contract`/`不变量`/`平台矩阵` 出现 **0** 次 | `ARCHITECTURE-CONTRACT-phase0.md` 等 | 无规范 |
-| 测试 | `cargo test` **68 项**（B1–B55 + V1–V6 + 单元）| 47 文件 / 991 断言 | 基础健康 |
+> 本节原是 **2026-09-11 审计快照**，其中四条判断已被后续改造反转（platform 层、commands/domain 分层、
+> 错误枚举、前端拆分）。下表为**按当前代码复测**的结果；判定权在门禁，不在这些数字。
 
-**结论：壳不是「一塌糊涂」，是「缺一层抽象（platform/）＋ 缺一层分层（commands/domain）＋ 缺规范文档＋ 缺把规范变门禁」。**
+| 指标 | 当前实测（2026-09-20）| 锁定它的门禁 | 判断 |
+|---|---|---|---|
+| `#[cfg(target_os)]` / `cfg!(windows)` 分布 | 平台层内 14 处；平台层外仅 `bounded.rs`（Windows `creation_flags` + 3 处测试夹具）与 2 条注释 | G1 | 平台知识已收口，「加平台翻 8 文件」不再成立 |
+| `main.rs` | **538 行**：CLI 分派 + 组装，`#[tauri::command]` **0 个** | G3（命令不得定义在 `main.rs`）| 分层已建立；距 <150 行的目标仍有差距 |
+| 错误类型 | `ShellError` 枚举（`error.rs`，含 `Contract`/`Ipc`/`Unsupported` 等变体），全仓 82 处引用；`Result<_, String>` 仍 51 处（多在 `platform/*` 与 `core.rs` 的 npm 输出透传）| — | 结构化错误已就位，字符串错误未清零 |
+| 前端 | `bootstrap.html` **197 行** + `bootstrap/js/00..80` **九个模块** | `tests/bootstrap_flow.rs` | 单块 JS 已拆分 |
+| 契约层落点 | `mirror.rs` / `runtime_contract.rs` / `core_contract.rs` / `update.rs`（见 §18）| K-1..K-10 | 尚无独立 `domain/contract/` 子层 |
+| 有界执行 | `bounded.rs` + B32 门禁（禁裸 `.output()`）| B32 | 壳侧仍是较强的一面 |
+
+**原结论（缺一层抽象 + 缺一层分层 + 缺规范文档 + 缺把规范变门禁）已不成立**：前两项基本补齐，
+第三、四项由本仓的 `docs/` 规范与门禁表承担。剩下的真实缺口是 **`Result<_, String>` 的 51 处残留**
+与 `main.rs` 未达 <150 行目标。
 
 ## 9. 壳的真实缺陷（本次审计确证）
 
@@ -433,11 +444,12 @@ pub enum ShellError {
 ## 18. 契约层（与内核的唯一耦合面）
 
 ```
-domain/contract/
-  ├── schema.rs     契约版本常量 + 校验（每个契约带 schema）
-  ├── mirror.rs     写 ~/.dsh/supervisor/registry.json（**壳是唯一写入方**）
-  ├── identity.rs   写 ~/.dsh/shell/identity.json
-  └── runtime.rs    写 ~/.dsh/supervisor/runtime.json（改为原子写）
+一契约一模块（当前落在 src-tauri/src/ 顶层，尚未收进 domain/contract/ 子层）
+  ├── mirror.rs           写 <状态根>/supervisor/registry.json（CONTRACT_SCHEMA=2；**壳是唯一写入方**）
+  ├── runtime_contract.rs 写 <状态根>/supervisor/runtime.json（schema 2，原子写 tmp+rename）
+  ├── core_contract.rs    写 <状态根>/supervisor/core.json（schema 1，内核位置契约）
+  └── update.rs           写 <状态根>/shell/identity.json（init_identity + phase 心跳）
+schema 常量就在各自模块内（无独立 schema.rs）；跨仓握手的 schema 常量另有门禁锁定。
 ```
 
 ### 18.1 `registry.json` 升级（消费者内核已就位）
@@ -551,7 +563,7 @@ bootstrap/
 |---|---|---|
 | E1 | `bootstrap.html` 760 行 → 8 个 JS 模块 | 门禁 **G5**（每文件独立语法）|
 | E2 | 全局 `onerror`/`unhandledrejection` → `shell.log` | 人为抛错能在日志看到 |
-| E3 | 落 **G1–G8** 全部门禁 | `cargo test` 含 8 组新断言 |
+| E3 | 落 **G1–G8** 全部门禁 | CI 的门禁步骤含 8 组新断言 |
 
 ### 批 F　内核侧缺陷（修 K1–K10）
 
@@ -582,7 +594,7 @@ bootstrap/
 ## 22. 验收标准（何时算「标准壳工程」）
 
 ```
-1. cargo test 全绿，且含 G1–G8；内核 npm test 全绿，且含 G9–G10
+1. CI 的门禁步骤全绿（壳 `cargo test` / 内核 `npm test`，均**只在 CI 内**），且含 G1–G8 与 G9–G10
 2. 三平台 CI 各跑 --platform-matrix，输出与 §17 一致
 3. main.rs ≤ 150 行；commands/ 内零 #[cfg]、零 Command
 4. 前端 8 个 JS 模块各自语法门禁；删任一模块不影响其余模块加载与报错
@@ -688,28 +700,14 @@ pub fn export_to_kernel(m: &Mirrors, selected: Option<&Probe>) -> Result<(), Str
 }
 ```
 
-**内核侧（M1-b）**：`dist/index.js:68-75` 的 `REGISTRY_PRESETS` **删除**，`platform/config.js:66-73` 的 `registries` **删除**，改为：
+**内核侧（M1-b）已落地形态**（提案里的 `dist/index.js::_registryOrigins` / `_catalogFromContract` 从未存在，别再照它找代码）：
 
-```js
-// platform/config.js —— 最小兜底（契约缺失/损坏时才用；不再是「一等来源」）
-//  为什么是 2 条而不是 6 条：目录归壳（M1），内核只需保证「契约缺失时也能跑」。
-//  官方源 + 国内最普及源，覆盖「能上网」与「中国网络」两种基本情形。
-registries: [
-  "https://registry.npmjs.org",
-  "https://registry.npmmirror.com",
-],
-```
-
-```js
-// dist/index.js —— 契约优先，兜底在后
-_registryOrigins() {
-  const fromContract = this._catalogFromContract();   // 读 ~/.dsh/supervisor/registry.json 的 catalog
-  if (fromContract.length) return fromContract;
-  const o = (this.registryConfig && this.registryConfig.origins) || [];
-  const list = o.filter((x) => typeof x === "string" && x.trim());
-  return list.length ? list : [...this.defaultRegistries];
-}
-```
+- 硬编码目录 `REGISTRY_PRESETS` **已删除**（全仓 0 处引用）；
+- 最小兜底 = `platform/service/config.js` 的 `registries`（2 条）与 `platform/distribution/policies.js` 的 `FALLBACK_REGISTRIES`，**契约缺失/损坏时才用**：
+  `https://registry.npmjs.org`（能上网）+ `https://registry.npmmirror.com`（中国网络）—— 不变量 C2；
+- 契约优先：`platform/contract/registry.js` 读 + 校验 `<状态根>/supervisor/registry.json`，
+  `platform/distribution/registry.js` 按 `契约 catalog/selected → 旧字段 → 构造参数 → 最小兜底` 逐级回退，
+  并按契约的 `probe` 规格探测（与壳同法，不变量 C4）。
 
 ### 27.3 验收断言
 

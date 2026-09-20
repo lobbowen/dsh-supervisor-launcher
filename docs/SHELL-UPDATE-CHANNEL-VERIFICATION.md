@@ -2,6 +2,18 @@
 
 > 回答用户问题：**「更新路径通过什么？是通过 GitHub？」**
 > 结论：**不能是 GitHub Release 直连**。以下全部为实测 / 源码级证据。
+>
+> ## 读前必看：本文是**当时的验证记录**，三项建议的最新状态如下
+>
+> | 建议 | 后来怎样 | 现在的事实源 |
+> |---|---|---|
+> | **N1 通道 = npm CDN（unpkg/jsdelivr）** | **已采纳**：`tauri.conf.json` 的 `plugins.updater.endpoints` 就是这两条直链，清单由 CI 的 `shell-release/make-manifest.js` 生成 | `docs/RELEASE-STANDARD.md` §1 H6/H8 |
+> | **N2 Linux 主形态 = deb（放弃 AppImage）** | **已采纳并扩展**：Linux bundles = `deb,rpm`；**AppImage 全仓已废弃**，任何文档再出现它都是残留 | `docs/RELEASE-STANDARD.md` §2 矩阵 |
+> | **N3 内核本地预取 + 缓存加速** | **未采纳，且方向被推翻**：壳自更新链**没有预取、没有缓存、没有隐式回退**，账本只有 `pending -> confirmed` 两态。§六「加速侧」那段（含 `~/.dsh/shell/cache/` 路径）**从未落地，不要照它实现** | 内核 `src/domains/shell/journal.js`；紧急回退走 `rollback` dist-tag（内核仓 `RELEASE-CHANNEL-CONTRACT.md` RC-2 优先级 / RC-7 反降级下限）|
+>
+> §一 的实测网速是 2026-09-11 在**当时的开发机与当时的网络出口**上取样的，只用于解释「为什么不直连 GitHub」，
+> **不是当前带宽结论**；GitHub Release 本身现在也是空的（见 `docs/UPDATER-SIGNING-KEY.md` §〇），
+> 所以那批资产如今在本仓已不可复现。
 
 ---
 
@@ -157,7 +169,7 @@ fn install_deb(&self, bytes: &[u8]) -> Result<()> {
           -> url 指向 unpkg 上的产物文件
           -> tauri-plugin-updater：下载 -> minisign 验签 -> 平台安装
 
-【加速侧（可选）】
+【加速侧（可选）】                        ← 未采纳，从未落地（见开头 N3 行）
   内核（若在运行）预取并缓存到 ~/.dsh/shell/cache/
   -> 壳优先从本机内核取（本地，秒级），失败再直连公网
 ```

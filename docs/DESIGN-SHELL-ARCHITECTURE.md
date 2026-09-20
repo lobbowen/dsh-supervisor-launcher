@@ -31,6 +31,14 @@
 
 ## 二、目标架构
 
+> **落地进度对照（读之前先看）**：本章是**目标态**，不是当前目录清单。
+> 已落地：`platform/`（含 `unsupported.rs`）分层与平台分支收口、`domain/` 存在、`error.rs` 的
+> `ShellError`、`bounded.rs` 有界执行、`commands/mod.rs` 只做校验+委托（门禁 G3）。
+> **未落地**：`commands/` 尚未按 `env/node/core/mirror/shell/window` 拆文件（仍是单个 `mod.rs`）；
+> `domain/` 实际是 `cli / coreloc / guardctl / localhttp / windowing`，没有 `probe/provision/mirror/update/contract` 子层；
+> 没有 `infra/` 目录（`bounded.rs`、`env.rs` 直接在 `src/` 下）；`main.rs` 538 行（目标 < 150）。
+> 契约读写当前落在 `mirror.rs` / `runtime_contract.rs` / `core_contract.rs` / `update.rs`（见 §3.2）。
+
 ### 2.1 分层与依赖方向（单向，可门禁）
 
 ```
@@ -72,31 +80,40 @@ src-tauri/src/
 ### 2.2 平台适配层（把 43 处收拢成 1 个契约）
 
 ```rust
-// platform/mod.rs
+// platform/mod.rs —— 实际契约面（17 个方法；下面就是全部，不多不少）
 /// 平台能力契约。**每个能力要么实现，要么显式声明不支持**（不得静默成功）。
 pub trait Platform: Send + Sync {
     fn name(&self) -> &'static str;
+    fn service(&self) -> &'static dyn service::ServiceControl;
+    fn capabilities(&self) -> Capabilities;
 
-    // ── Node 制品与安装 ──
-    /// 制品形态（Linux/macOS tar.gz / Windows zip，均为**用户级零权限**归档）与文件名。
+    // ── 平台事实：包标签与 Node 制品 ──
+    fn core_platform_tag(&self) -> Option<&'static str>;      // None = 无此组合，如实报错
     fn node_artifact(&self, version: &str) -> Option<NodeArtifact>;
-    /// 安装（含提权）。**提权为本平台专有实现**。
-    fn install_node(&self, artifact: &Path) -> Result<InstallReport, ShellError>;
-    /// npm 子包平台标签（linux-x64 / darwin-arm64 / win-x64 …）。
-    fn core_platform_tag(&self) -> &'static str;
 
-    // ── 探测 ──
-    fn path_dirs(&self) -> Vec<PathBuf>;
-    fn known_node_locations(&self) -> Vec<PathBuf>;
-    /// 该目录是否在「本地固定盘」（Windows 需排除网络盘/可移动盘）。
-    fn is_local_fixed_dir(&self, dir: &Path) -> bool;
+    // ── Node 安装（用户级、零权限，解到 <状态根>/node）──
+    fn install_node(&self, file: &Path) -> Result<PathBuf, String>;
+    fn node_bin_after_install(&self) -> PathBuf;
+    fn has_privilege_channel(&self) -> bool;                  // 只服务壳自更新
 
-    // ── 服务（定义 + 启停 **同一对象** —— 修掉历史上的分层违规）──
-    fn service(&self) -> &dyn ServiceControl;
+    // ── 探测（路径知识不得外泄到业务层）──
+    fn node_candidate_paths(&self) -> Vec<PathBuf>;
+    fn is_usable_executable(&self, cand: &Path) -> bool;      // Windows 过滤 Store 别名存根
+    fn is_local_fixed_dir(&self, dir: &Path) -> bool;         // 判定本身不得触网阻塞
 
-    // ── 能力声明（供契约与面板）──
-    fn capabilities(&self) -> PlatformCapabilities;
+    // ── 内核位置候选 ──
+    fn core_extra_candidates(&self, names: &[&str], pkg: Option<&str>) -> Vec<PathBuf>;
+    fn core_bin_candidates_in_prefix(&self, prefix: &Path, names: &[&str], pkg: Option<&str>) -> Vec<PathBuf>;
+    fn core_exe_names(&self) -> &'static [&'static str];
+
+    // ── 可执行文件名 ──
+    fn node_exe_name(&self) -> &'static str;
+    fn npm_exe_name(&self) -> &'static str;                   // Windows: npm.cmd
+
+    // ── 状态根平台默认（覆盖由 env.rs 负责）──
+    fn state_root_default(&self) -> PathBuf;                  // 带默认实现
 }
+```
 
 pub trait ServiceControl: Send + Sync {
     fn kind(&self) -> &'static str;
@@ -143,17 +160,17 @@ pub enum ShellError {
 
 ### 3.1 平台矩阵：每条能力 × 每个平台 = 实现 或 **显式不支持**
 
-| 能力 | Linux | macOS | Windows | 实现位 |
+| 能力 | Linux | macOS | Windows | 实现位（当前落点）|
 |---|---|---|---|---|
-| 环境探针（候选枚举/版本/PATH）| | | | `domain/probe` |
+| 环境探针（候选枚举/版本/PATH）| 共用 | 共用 | 共用 | `nodeprobe.rs`（候选表来自 `platform/*::node_candidate_paths`）|
 | Node 制品解析 | `tar.gz` | `tar.gz` | `zip` | `platform/*::node_artifact` |
 | Node 安装（**用户级/零权限**）| `tar` → `<状态根>/node` | `tar` | `Expand-Archive` | `platform/*::install_node` |
-| 镜像测速与选择 | | | | `domain/mirror` |
-| 内核安装/升级 | | | | `domain/provision` |
+| 镜像测速与选择 | 共用 | 共用 | 共用 | `mirror.rs`（契约投放见 §3.2）|
+| 内核安装/升级 | 共用 | 共用 | 共用 | `core.rs` + `core_contract.rs`；定位 `domain/coreloc.rs` |
 | 服务定义（守卫）| systemd | LaunchAgent | schtasks | `platform/*::ServiceControl` |
 | 服务启停 | `systemctl --user` | `launchctl` | `schtasks` | 同上 |
-| 提权通道探测 | | （恒有）| | `platform/*::has_privilege_channel` |
-| 壳自更新 | deb/rpm | app | exe/msi | `domain/update` |
+| 提权通道探测 | 有 `pkexec`/`sudo` 才算有 | 恒有（osascript）| 恒有（UAC）| `platform/*::has_privilege_channel` —— **只服务壳自更新** |
+| 壳自更新 | deb/rpm | .app 替换 | exe/msi | `update.rs` + `update_plan.rs` |
 
 **不变量 P1**：矩阵的每一格必须是「实现」或「显式不支持」。
 「显式不支持」在代码里表现为返回 `ShellError::Unsupported`，**绝不静默成功**。
@@ -161,10 +178,11 @@ pub enum ShellError {
 ### 3.2 契约层（与内核的唯一耦合面）
 
 ```
-domain/contract/
-  ├── schema.rs     契约版本常量 + 校验
-  ├── mirror.rs     写 ~/.dsh/supervisor/registry.json（壳是唯一写入方）
-  └── identity.rs   写/读 ~/.dsh/shell/identity.json
+契约层（与内核的唯一耦合面）—— 每个契约一个模块，落点均在 <状态根>/{{supervisor,shell}}
+  ├── mirror.rs           写 <状态根>/supervisor/registry.json（CONTRACT_SCHEMA=2；壳唯一写入方）
+  ├── runtime_contract.rs 写 <状态根>/supervisor/runtime.json（Node/npm/PATH，schema 2）
+  ├── core_contract.rs    写 <状态根>/supervisor/core.json（内核位置契约，schema 1）
+  └── update.rs           写 <状态根>/shell/identity.json（壳身份 + phase 心跳）
 ```
 
 | 不变量 | 内容 |
@@ -172,7 +190,7 @@ domain/contract/
 | **C1** | 每个契约文件**只有一个写入方**（壳写 `registry.json`；内核写 `update-journal.json`）|
 | **C2** | 契约带 `schema` 版本；不匹配时**明确拒绝**并记录，不静默降级 |
 | **C3** | 写入必须**原子**（`tmp + rename`），读取必须容忍缺失 |
-| **C4** | 壳启动时**必须导出完整契约**（含 `catalog` + `probe`；现仅在 `latest_lts()` 成功时导出部分内容）|
+| **C4** | 壳启动时**必须导出完整契约**（含 `catalog` + `probe`）—— 由 `mirror::export_on_boot` 在 setup 早期无条件执行，线上版本探测失败只记日志，不得让契约不落地 |
 
 ### 3.2b 运行期启动契约（Runtime Launch Contract，2026-09-15）
 
@@ -181,7 +199,7 @@ domain/contract/
 nvm/fnm/volta 或 GUI 最小 PATH 下，systemd --user 的 PATH 不含 node 目录 →
 ExecStart 以 127 失败 → **内核装上了却永远拉不起来**。
 
-**契约**：壳写 ~/.dsh/supervisor/runtime.json（schema 2），**保留**内核 env-catalog 已读的旧键：
+**契约**：壳写 `<状态根>/supervisor/runtime.json`（schema 2），**保留**内核 env-catalog 已读的旧键：
 
 | 键 | 含义 |
 |---|---|
@@ -364,7 +382,8 @@ fn g1_platform_branches_only_in_platform_layer() {
 ## 八、验收标准（何时算「标准壳工程」）
 
 ```
-1. cargo test 全绿，且包含 G1–G8 全部门禁
+1. CI 的 H2 步骤（`cargo test --bins` + 自动枚举的 `tests/*.rs`）全绿，且包含 G1–G8 全部门禁
+   —— 判定权在 CI，本机不跑（`RELEASE-STANDARD.md` §0）
 2. 三平台 CI 各跑一次 --platform-matrix 自检，输出与本文档 §3.1 一致
 3. main.rs ≤ 200 行；commands/ 内零 #[cfg]、零 Command
 4. 前端 8 个 JS 模块，各自语法门禁；kill 任一模块不影响其余模块的加载与报错
