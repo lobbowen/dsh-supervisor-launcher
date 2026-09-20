@@ -271,7 +271,7 @@ fn install_deb(&self, bytes: &[u8]) -> Result<()> {
 |---|---|
 | `src-tauri/src/mirror.rs` | 新增 `SHELL_ARTIFACT_NPM_CDNS` / `SHELL_ARTIFACT_RELEASE_BASE` 与 `artifact_candidates()`：清单声明源永远第一，其后按 npm 包内同路径换主机，最后退到同名 Release 资产 |
 | `src-tauri/src/commands/mod.rs` | `shell_update_apply` 按候选源逐个下载。**只有「这个源没把字节给全」**（`Network` / `Reqwest` / `Io` / 超时）才换源；验签类失败立即报出，换源掩盖它只会反复下载大包。全失败时把每个源的主机名与失败原因一起回显 |
-| 门禁 | `mirror.rs` 内联单测钉候选推导与「假镜像不得回流」的 deny-list；`tests/bootstrap_flow.rs` B19 ③ 钉安装包链路确实接了候选源 |
+| 门禁 | `mirror.rs` 内联单测钉候选推导与「假镜像不得回流」的 deny-list；`commands/mod.rs` 内联单测钉换源判据**对着插件的错误形态**（`Update::download` 对非 2xx 统一返回 `Error::Network` ⇒ jsdelivr 屏蔽 `.exe` 的 403 会正常落到下一个源），判据不靠我们对「网络失败」的想象；`tests/bootstrap_flow.rs` B19 ③ 钉安装包链路确实接了候选源 |
 | `tauri.conf.json` 与 `SHELL_PRESETS` | **不动**：两条端点对**清单**都成立（本轮复测 200），只是不能再宣称它们分发 `.exe` |
 
 ### 换源上线后按平台复算（同一天，线上 `1.2.0`，判据同上）
@@ -287,6 +287,11 @@ fn install_deb(&self, bytes: &[u8]) -> Result<()> {
 
 Release 侧文件名与 npm `artifact/` 内的文件名逐字一致（`dsh-supervisor_1.2.0_x64-setup.exe`、
 `dsh-supervisor_1.2.0_amd64.deb`），所以同名回退成立。
+
+同日换一条出口（本机经代理）复算第二遍：**上表的判据结论逐格一致** —— 含 win 那格 jsdelivr 仍 403、
+mac 两格仍不挂 Release。变化的只有速度与 unpkg 的 `Range` 行为（win 的 Release 从 ~82KB/s 变 ~567KB/s；
+`darwin-x64` 那格这次给 206 而不是 200 全量）。⇒ 速度与 `Range` 支持是**取样属性**，随出口与 CDN 边缘节点变，
+不得当承诺引用；能当判据的只有「这一格取不取得到字节」。
 
 ### 为什么不再往表里加源（「更多源」的天花板在哪）
 

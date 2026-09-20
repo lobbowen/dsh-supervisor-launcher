@@ -750,7 +750,7 @@ pub async fn shell_update_apply(app: tauri::AppHandle) -> ShellResult<serde_json
     crate::update::log(&format!("桌面更新开始下载 {}（{} 个候选源）", target, candidates.len()));
     let mut failures: Vec<String> = Vec::new();
     let mut downloaded: Option<Vec<u8>> = None;
-    for url in &candidates {
+    for (idx, url) in candidates.iter().enumerate() {
         let host = url.host_str().unwrap_or("?").to_string();
         let mut candidate = u.clone();
         candidate.download_url = url.clone();
@@ -809,7 +809,10 @@ pub async fn shell_update_apply(app: tauri::AppHandle) -> ShellResult<serde_json
                 break;
             }
         }
-        crate::update::log(&format!("桌面更新换下一个源：{}", failures.last().unwrap_or(&String::new())));
+        // 只在还有下一个候选时说「换源」；最后一个源的结论由下面的汇总行给出。
+        if idx + 1 < candidates.len() {
+            crate::update::log(&format!("桌面更新换下一个源：{}", failures.last().unwrap_or(&String::new())));
+        }
     }
     let Some(bytes) = downloaded else {
         let msg = format!("下载失败（{} 个源都没取到安装包）：{}", candidates.len(), failures.join("；"));
@@ -846,4 +849,25 @@ pub fn shell_restart(app: tauri::AppHandle) {
     crate::update::set_phase("restarting");
     crate::update::log("桌面更新重启以应用新版本");
     app.restart();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::worth_next_source;
+    use tauri_plugin_updater::Error as E;
+
+    /// 判据绑的是插件的实际错误形态（`Update::download` 对非 2xx 统一返回 `Network`，
+    /// jsdelivr 屏蔽 `.exe` 的 403 就走这条路），不是我们对「网络失败」的想象。
+    #[test]
+    fn only_byte_shortfall_advances_to_next_source() {
+        assert!(worth_next_source(&E::Network(
+            "Download request failed with status: 403 Forbidden".to_string()
+        )));
+        assert!(worth_next_source(&E::Io(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "stream closed"
+        ))));
+        assert!(!worth_next_source(&E::SignatureUtf8("not-a-signature".to_string())));
+        assert!(!worth_next_source(&E::ReleaseNotFound));
+    }
 }
