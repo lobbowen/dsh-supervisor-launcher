@@ -165,6 +165,7 @@ GitHub **永远不会执行**它；但 `docs/RELEASE-AND-BUILD-DECISION.md` 与 
 |---|---|
 | 构建 / 门禁失败 | 修代码；不需回滚（未发布）|
 | 某平台打包失败 | 修该平台；**不要**只发其余平台（安装程序会不全）|
+| macOS leg 只有 `bundle_dmg.sh` 那一步退出 1（`.app` 已 `Bundling` 成功、其余三平台全绿、日志收尾出现 `Terminate orphan process (diskimages-help)`）| 按**runner 抖动**判：先 `rerun-failed-jobs` 复判同一 commit，再谈改代码。实测 run 35588464417 首跑即此形态，重跑四平台全绿；同一份产线配置在 tag run 35581948978 一次通过并产出 `_x64.dmg`。**不得**为此给产线加重试循环，也**不得**改成只产 `.app` —— 那是砍能力迁就缺陷；重跑仍红才算确定性缺陷，按根因查 `hdiutil` 侧 |
 | npm 已发布但需修 | npm 同版本不可重发 → 提 patch 版本 |
 | 安装包不可用 | 提新版本；旧安装包不覆盖 |
 | 更新通道异常 | 见 `docs/SHELL-UPDATE-CHANNEL-VERIFICATION.md` |
