@@ -2,7 +2,7 @@
 
 本文件记录桌面壳（`dsh-supervisor-gui`，公开仓 `lobbowen/dsh-supervisor-launcher`）的重要变更。
 
-## [未发布]
+## [1.2.1]（2026-09-21）
 
 ### Windows 上「装了 Node 仍没有 npm」的根因修复：可用 = 探针与消费者同一条 spawn 路径，落定 = 整棵工具链校验
 
