@@ -48,6 +48,53 @@ fn ps_quote(s: &str) -> String {
 /// 归档解包超时（15 分钟；下载已完成，余量给解包与慢盘）。
 const INSTALL_CMD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
+/// 清空并重建目标目录（解包器各自负责给出干净的目标，避免上一次的部分产物混进本次结果）。
+fn fresh_dir(dir: &Path) -> Result<(), String> {
+    let _ = std::fs::remove_dir_all(dir);
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())
+}
+
+/// 首选解包器：Windows 10 1803+ 内置的 bsdtar（`System32\tar.exe`）。
+///
+/// 为什么不用 PowerShell：`Expand-Archive` 走 .NET Framework 的 ZipFile，路径超过 260 字符的
+///   条目会被**静默丢弃且退出码为 0**（Node 的 npm 依赖树必然超过），
+///   而 bsdtar 用宽字符路径 API，直接支持深目录。
+/// 返回 Err 只代表「这条路走不通」（tar.exe 不存在 / 非零退出），由调用方决定是否回退。
+fn extract_with_tar(archive: &Path, dest: &Path) -> Result<(), String> {
+    fresh_dir(dest)?;
+    let out = crate::bounded::run(
+        Command::new("tar").args(["-xf", &archive.display().to_string(), "-C", &dest.display().to_string()]),
+        INSTALL_CMD_TIMEOUT,
+    )
+    .map_err(|e| format!("无法启动 tar.exe: {}", e))?;
+    if !out.success {
+        return Err(format!("tar 退出码 {}: {}", out.code.unwrap_or_else(|| "killed".into()), out.stderr.trim()));
+    }
+    Ok(())
+}
+
+/// 回退解包器：PowerShell 内置 `Expand-Archive`（更老的 Windows 上唯一无需安装的解法）。
+///
+/// 它可能产出**残缺树** —— 调用方必须过 `commit_user_node` 的完整性校验，
+/// 该校验就是为这条路兜底的：宁可报「不含可用 npm」，也不报「环境已就绪」。
+fn extract_with_expand_archive(archive: &Path, dest: &Path) -> Result<(), String> {
+    fresh_dir(dest)?;
+    let ps = format!(
+        "Expand-Archive -LiteralPath {} -DestinationPath {} -Force",
+        ps_quote(&archive.display().to_string()),
+        ps_quote(&dest.display().to_string())
+    );
+    let out = crate::bounded::run(
+        Command::new("powershell").args(["-NoProfile", "-NonInteractive", "-Command", &ps]),
+        INSTALL_CMD_TIMEOUT,
+    )
+    .map_err(|e| format!("无法启动 powershell: {}", e))?;
+    if !out.success {
+        return Err(format!("Expand-Archive 退出码 {}: {}", out.code.unwrap_or_else(|| "killed".into()), out.stderr.trim()));
+    }
+    Ok(())
+}
+
 pub struct Impl;
 static IMPL: Impl = Impl;
 
@@ -180,28 +227,30 @@ impl Platform for Impl {
         //   zip 解包两问题都不存在（本进程直接写自己的状态目录）。
         let root = crate::env::node_install_root();
         let staging = root.with_file_name("node.extract");
-        let _ = std::fs::remove_dir_all(&staging);
-        std::fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
-        // Expand-Archive 是 Windows 内置（PS 5+）；单引号内再转义单引号。
-        let ps = format!(
-            "Expand-Archive -LiteralPath '{}' -DestinationPath '{}' -Force",
-            file.display().to_string().replace('\'', "''"),
-            staging.display().to_string().replace('\'', "''")
-        );
-        let out = crate::bounded::run(
-            Command::new("powershell").args(["-NoProfile", "-NonInteractive", "-Command", &ps]),
-            INSTALL_CMD_TIMEOUT,
-        )
-        .map_err(|e| format!("无法启动 powershell: {}", e))?;
-        if !out.success {
-            let _ = std::fs::remove_dir_all(&staging);
-            return Err(format!("解包 Node 归档失败: {}", out.stderr.trim()));
+        // 解包器必须**长路径安全**：Node 官方 zip 里 npm 的依赖树深过 260 字符，而 PowerShell 5.1
+        //   的 Expand-Archive 走 .NET Framework 的 ZipFile，超长子路径被**静默丢弃、退出码仍为 0**；
+        //   旧实现只看退出码，于是 node.exe 完好而 npm 载荷残缺，「Node 已就绪」指向半棵树。
+        //   首选 bsdtar（Windows 10 1803+ 自带的 System32\tar.exe，走宽字符路径 API）。
+        //   每条解包路都以 commit_user_node 的工具链校验为准，校验不过就换下一条：两条路的失败
+        //   形态不同（tar 可能根本不存在 / Expand-Archive 会截断），信任单一退出码正是本次缺陷成因。
+        let extractors: [(&str, fn(&Path, &Path) -> Result<(), String>); 2] = [
+            ("tar.exe", extract_with_tar),
+            ("Expand-Archive", extract_with_expand_archive),
+        ];
+        let mut errs: Vec<String> = Vec::new();
+        for (name, extract) in extractors {
+            let outcome = extract(file, &staging)
+                .and_then(|()| super::commit_user_node(&staging, &root, &[self.node_exe_name()]));
+            match outcome {
+                Ok(installed) => return Ok(installed),
+                Err(e) => {
+                    crate::update::log(&format!("{} 解包未通过工具链校验：{}", name, e));
+                    let _ = std::fs::remove_dir_all(&staging);
+                    errs.push(format!("{}：{}", name, e));
+                }
+            }
         }
-        let r = super::commit_user_node(&staging, &root, &[self.node_exe_name()]);
-        if r.is_err() {
-            let _ = std::fs::remove_dir_all(&staging);
-        }
-        r
+        Err(format!("解包 Node 归档失败：{}", errs.join("；")))
     }
 
     fn core_extra_candidates(&self, names: &[&str], pkg: Option<&str>) -> Vec<PathBuf> {
@@ -288,6 +337,18 @@ impl Platform for Impl {
     /// Windows 内核候选：`.cmd` 垫片必须在内 —— PATH 解析只认扩展名形态。
     fn core_exe_names(&self) -> &'static [&'static str] {
         &["dsh-supervisor.exe", "dsh-supervisor.cmd", "dsh-supervisor"]
+    }
+
+    /// 只有 PE 可执行程序能被 CreateProcessW 直接拉起。
+    ///
+    /// `.cmd`/`.bat` 是 cmd.exe 的脚本、Node 目录里那个无扩展名的 `npm` 是 POSIX sh 脚本：
+    ///   三者都「文件存在」而 CreateProcessW 返回 ERROR_BAD_EXE_FORMAT。
+    /// 因此 Windows 上 npm 一律经 `node.exe + node_modules/npm/bin/npm-cli.js` 调用
+    ///   （见 runtime_contract::probe_npm），消费者与探针共用同一条 spawn 路径。
+    fn is_directly_spawnable(&self, prog: &Path) -> bool {
+        prog.extension()
+            .map(|e| e.eq_ignore_ascii_case("exe"))
+            .unwrap_or(false)
     }
 }
 
@@ -498,4 +559,133 @@ fn drive_is_fixed(letter: u16) -> bool {
         m.insert(letter, fixed);
     }
     fixed
+}
+
+#[cfg(test)]
+mod toolchain_tests {
+    //! Windows 工具链事实的行为门禁（2026-09-21：npm「装了却不在」的根因取证）。
+    //!
+    //! 本模块**只在 Windows 上编译**，这正是它的价值：`.cmd` 能否被 CreateProcessW 拉起、
+    //! 官方 zip 解出来 npm 载荷完不完整，都是只有本平台能判定的事实。
+    //! 这些断言在 Linux/macOS 上恒真，写在那里等于没写。
+
+    use super::*;
+    use std::path::{Path, PathBuf};
+    use crate::runtime_contract::{npm_cli_js, npm_shim_candidates, probe_npm};
+
+    fn tmp(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("dsh-win-{}-{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[test]
+    fn only_pe_executables_are_directly_spawnable() {
+        let p = crate::platform::current();
+        assert!(p.is_directly_spawnable(Path::new("C:\\node\\node.exe")));
+        assert!(p.is_directly_spawnable(Path::new("C:\\node\\NPM.EXE")));
+        // 这三个都在官方 zip 的 node 目录里，且全都「文件存在而拉不起来」。
+        assert!(!p.is_directly_spawnable(Path::new("C:\\node\\npm.cmd")));
+        assert!(!p.is_directly_spawnable(Path::new("C:\\node\\npm.bat")));
+        assert!(!p.is_directly_spawnable(Path::new("C:\\node\\npm")));
+    }
+
+    #[test]
+    fn cmd_shim_alone_is_not_reported_as_npm() {
+        // 截断/裁剪后的现场：node.exe 与 npm.cmd 在，包内 JS 树没了。
+        // 旧实现在这里会返回 npm.cmd，探针再经 cmd /C 包装跑一次 --version：
+        // 要么报「环境已就绪」而后续 npm install 必失败，要么面板出现 npm 缺失。
+        let d = tmp("cmd-only");
+        let node = d.join("node.exe");
+        std::fs::write(&node, b"").unwrap();
+        std::fs::write(d.join("npm.cmd"), b"@echo off\r\n").unwrap();
+        assert!(
+            probe_npm(&node, &d).is_none(),
+            "只剩不可直接执行的垫片时必须判为不就绪，绝不把 .cmd 交给 Command::new"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn official_layout_resolves_to_node_plus_npm_cli_js() {
+        // 官方 zip 完整形态：npm.cmd / npm / node_modules\npm\bin\npm-cli.js 并存。
+        let d = tmp("official");
+        let node = d.join("node.exe");
+        std::fs::write(&node, b"").unwrap();
+        for extra in ["npm.cmd", "npm"] {
+            std::fs::write(d.join(extra), b"").unwrap();
+        }
+        let cli = npm_cli_js(&d);
+        std::fs::create_dir_all(cli.parent().unwrap()).unwrap();
+        std::fs::write(&cli, b"").unwrap();
+        let (prog, args) = probe_npm(&node, &d).expect("完整树应解析出 npm");
+        assert_eq!(prog, node, "npm 必须由同一 node.exe 承载");
+        assert_eq!(args, vec![cli.display().to_string()]);
+        assert!(crate::platform::current().is_directly_spawnable(&prog));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn commit_refuses_to_replace_a_good_install_with_a_truncated_tree() {
+        // 半成品不得落定：这是「Node 已就绪而 npm 不在」的最后一道闸。
+        let staging = tmp("trunc-staging");
+        let inner = staging.join("node-v22.12.0-win-x64");
+        std::fs::create_dir_all(&inner).unwrap();
+        std::fs::write(inner.join("node.exe"), b"").unwrap();
+        std::fs::write(inner.join("npm.cmd"), b"@echo off\r\n").unwrap();
+        let root = tmp("trunc-root").join("node");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("marker"), b"既有安装").unwrap();
+        let err = crate::platform::commit_user_node(&staging, &root, &["node.exe"])
+            .expect_err("残缺树必须被拒绝");
+        assert!(err.contains("npm"), "错误要指出缺的是 npm：{}", err);
+        assert!(root.join("marker").exists(), "拒绝半成品时不得动既有安装");
+        let _ = std::fs::remove_dir_all(staging);
+        let _ = std::fs::remove_dir_all(root.parent().unwrap());
+    }
+
+    #[test]
+    fn every_shim_candidate_name_is_a_plain_file_name() {
+        // 候选清单是错误文案与 probe_npm 的共用事实源：拼进 bin_dir 后不得跑出该目录。
+        let bin = Path::new("C:\\node");
+        for p in npm_shim_candidates(bin) {
+            assert_eq!(p.parent(), Some(bin), "候选必须是 bin 目录内的裸文件名");
+            assert!(p.file_name().is_some());
+        }
+    }
+
+    /// 真机取证：下载官方归档并走**生产解包路径**，断言解出来的 npm 真实可用。
+    ///
+    /// 为什么必须存在：整条 zip -> node_modules\\npm -> `npm --version` 链在 CI 上
+    ///   从未被执行过（构建与门禁都不碰真归档），于是 Windows 上「装完 Node 仍没有 npm」
+    ///   只能靠用户报障发现。此测试由 build.yml 的 Windows leg 以 `--ignored` 显式执行。
+    #[test]
+    #[ignore = "联网下载官方 Node 归档（约 30MB），仅由 CI 的 Windows leg 执行"]
+    fn official_artifact_installs_usable_npm() {
+        let home = tmp("e2e");
+        std::env::set_var("DSH_SUPERVISOR_HOME", &home);
+        let choice = crate::node::latest_lts().expect("镜像发现失败");
+        let dl = home.join("dl");
+        let archive = crate::node::download_verified(
+            &choice.version,
+            &choice.file,
+            &dl,
+            Some(choice.source.as_str()),
+        )
+        .expect("官方归档下载失败");
+        let node = crate::platform::current()
+            .install_node(&archive)
+            .expect("生产解包路径失败（这一步的报错就是面板会显示给用户的那句）");
+        let rt = crate::runtime_contract::derive_usable(&node, &choice.version)
+            .unwrap_or_else(|| panic!("{} 解出来后 npm 不可用：node={}", choice.version, node.display()));
+        let v = rt.npm_version.clone().expect("真实执行过 npm，必须回读到版本号");
+        assert!(!v.is_empty());
+        assert!(
+            node.starts_with(&home),
+            "安装必须落在 DSH_SUPERVISOR_HOME 下，实际：{}",
+            node.display()
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
 }

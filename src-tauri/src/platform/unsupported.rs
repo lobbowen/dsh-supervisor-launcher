@@ -161,4 +161,6 @@ impl Platform for Impl {
     fn node_exe_name(&self) -> &'static str { "node" }
     fn npm_exe_name(&self) -> &'static str { "npm" }
     fn core_exe_names(&self) -> &'static [&'static str] { &["dsh-supervisor"] }
+    // 未知平台按 POSIX 形态给出（与上面三个文件名同一保守口径）。
+    fn is_directly_spawnable(&self, _prog: &Path) -> bool { true }
 }

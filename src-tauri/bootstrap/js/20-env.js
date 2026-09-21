@@ -137,7 +137,11 @@
       NS.setStep(0);
       return NS.probeMirrorThen(function () {
         // 文案必须自带 npm 字样（SSOT 门禁 G-5）：只说「补全环境」会让 npm 缺失再次被掩盖。
-        NS.install.begin('npm', '检测到缺少/不可用的 npm · 正在补全工具链…');
+        // npmWhy 由后端 probe_npm_usable 回传（「文件存在」与「本平台拉得起来」是两件事）：
+        //   不写出原因，用户与开发者都只能在这句文案前猜是归档残缺、垫片不可执行还是 npm 自身报错。
+        NS.install.begin('npm', '检测到缺少/不可用的 npm'
+          + (st.npmWhy ? '（' + st.npmWhy + '）' : '')
+          + ' · 正在补全工具链…');
         return NS.core.invoke('start_node_install').then(function () { return NS.stepNodeWait('npm'); });
       });
     }
