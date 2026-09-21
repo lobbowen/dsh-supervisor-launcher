@@ -23,11 +23,14 @@
 - 面板不再只显示「缺少 npm」：`probe_npm_usable` 改为返回 `Result<_, String>`，失败原因经 `node_status` 的
   `npmWhy` 落到 npm 分支文案（T-1d）。三类成因（载荷缺失 / 垫片拉不起来 / 执行报错）处置不同，原因不上屏就是把排障推给用户。
 - 新增门禁：G-9（`probe_npm` 必过 `is_directly_spawnable`，且 `platform/` 之外不得出现 `cmd` 包装）、
-  G-10（`commit_user_node` 函数体必须校验 npm），G-1 收紧到「`npmWhy` 上屏 + `probe_npm_usable` 带原因」，
+  G-10（`commit_user_node` 函数体必须校验 npm）、G-11（真实归档的 CI 步骤必须按全路径命中并断言跑了 1 个），
+  G-1 收紧到「`npmWhy` 上屏 + `probe_npm_usable` 带原因」，
   G-5 增加「npm 分支必须回显 `st.npmWhy`」；Windows 侧行为面在 `platform/windows.rs::toolchain_tests`。
 - **整条 zip 到 npm 的链第一次在 CI 上真跑**：`build.yml` 新增 Windows 步骤，以 `--ignored` 执行
   `official_artifact_installs_usable_npm`（下载官方归档、走生产 `install_node`、读回 npm 版本）。
   静态门禁只能证明代码里写了判据，证明不了本平台解出来确实有 npm —— 这正是它此前从未被执行过的代价。
+  该步骤按**全路径** `--exact` 指定测试并断言「恰好 1 passed」：`--exact` 配短名是零命中且退出码 0，
+  「加了实测步骤」与「步骤什么都没跑」在 CI 上长得一模一样（门禁 G-11 钉住这一点）。
 
 ### Linux 支持面收窄为「Ubuntu + deb 一种形态」，旁路产物从产线源头停掉
 

@@ -500,3 +500,34 @@ fn g10_commit_validates_npm_payload() {
         body
     );
 }
+
+/// G-11：真实归档的 Windows 实测步骤必须**真的跑到那一个测试**。
+/// 不变量 T-12：`zip 解包 -> npm 可用` 这条链只由真机归档证明，静态门禁一律碰不到它。
+/// 为什么要钉在 CI 步骤上：libtest 对 `--exact` 的短名是零命中且退出码 0，
+///   于是「加了实测步骤」和「实测步骤什么都没测」在 CI 上长得一模一样 ——
+///   而后者正是本轮问题拖到用户报障的原因（注释里的承诺不算证据，只看执行行）。
+#[test]
+fn g11_windows_real_artifact_step_actually_runs_the_ignored_test() {
+    let y = read("../.github/workflows/build.yml");
+    let full = "platform::windows::toolchain_tests::official_artifact_installs_usable_npm";
+    assert!(
+        y.contains(full),
+        "CI 未按**全路径**执行真实归档测试：--exact 配短名会零命中且退出码 0（空转）"
+    );
+    assert!(
+        y.contains("test result: ok. 1 passed"),
+        "CI 未对真实归档步骤把「恰好一个测试通过」的关：零命中不会被发现"
+    );
+    let win = read("src/platform/windows.rs");
+    let at = win
+        .find("fn official_artifact_installs_usable_npm")
+        .expect("windows.rs 缺 official_artifact_installs_usable_npm（真实归档的唯一实测口）");
+    let guard = win[..at]
+        .rfind("#[ignore")
+        .expect("真实归档测试未标 ignore：它会联网下载归档，不该被普通测试集执行");
+    assert!(
+        at - guard < 240,
+        "真实归档测试的 #[ignore] 离声明过远（可能标在别的测试上）：{} 字节",
+        at - guard
+    );
+}

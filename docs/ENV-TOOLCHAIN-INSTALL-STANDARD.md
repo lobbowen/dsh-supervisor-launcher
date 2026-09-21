@@ -222,6 +222,8 @@ NS.versionLabel(v)             // 版本号形态归一（唯一实现）；null
 `official_artifact_installs_usable_npm`（`--ignored`，下载官方归档、走生产 `install_node`）驱动。
 静态门禁只能证明「代码里写了判据」，证明不了「本平台解出来确实有 npm」—— 这条链此前从未被执行过，
 所以缺陷只能靠用户报障发现。
+该步骤以**全路径** `--exact` 指定测试，并对 `test result: ok. 1 passed` 把一次关：
+`--exact` 配短名是零命中且退出码 0，「加了实测步骤」与「步骤什么都没跑」在 CI 上完全同形（门禁 G-11）。
 
 ---
 
@@ -267,6 +269,7 @@ NS.versionLabel(v)             // 版本号形态归一（唯一实现）；null
 | G-8 | 工具链快照只有一个写入点（`applyToolchain`）与一个读取口（`readEnv`）；`NS.nodeVer`/`NS.npmVer` 不得复活；就绪行与诊断串同时含 node 与 npm |
 | G-9 | 探针与消费者**同源**（T-10）：`probe_npm` 的函数体必须过 `is_directly_spawnable`；`src/` 在 `platform/` 之外不得出现 `cmd.exe` / `cmd /C` 包装（只看代码行，注释里的历史说明不算证据也不触发红） |
 | G-10 | 落定校验（T-11）：`commit_user_node` 函数体必须调用 `probe_npm` —— 只看 node 可执行就会把截断树落定成「安装成功」 |
+| G-11 | 真实归档实测（T-12）：`build.yml` 必须按**全路径** `--exact` 执行 `official_artifact_installs_usable_npm`，并断言「恰好 1 passed」；测试本身须带 `#[ignore]`（短名零命中也会绿，那一步就成了空转） |
 
 判据位置：`src-tauri/tests/env_toolchain_standard_test.rs`（G-7/G-8 的判据抽成纯函数，并各自带
 **旧形态反向夹具** —— 认不出旧形态的判据等于空转）。契约字段的行为面在
