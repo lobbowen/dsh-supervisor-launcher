@@ -7,7 +7,7 @@
 
 | 事实 | 证据 |
 |---|---|
-| **签名产物在线上、且是在用的更新通道**：清单 `@dsh-sup/shell-release@latest` 现指 `1.2.0`（换钥后首版，`pub_date` 2026-09-20），四平台各带一份 minisign 签名。现值随每次发布变化，重核：`npm view @dsh-sup/shell-release version` | `GET https://unpkg.com/@dsh-sup/shell-release@latest/shell-manifest.json`，按 `docs/RELEASE-STANDARD.md` §5 的解法逐条取 key id |
+| **签名产物在线上、且是在用的更新通道**：清单 `@dsh-sup/shell-release@latest` 现指 `1.2.1`（2026-09-21 实测，`pub_date` 2026-09-21T09:32Z；换钥后首版是 `1.2.0`），四平台各带一份 minisign 签名，**key id 逐条实测均为新钥 `54A15461E39C8AEF`**。现值随每次发布变化，重核：`npm view @dsh-sup/shell-release version` | `GET https://unpkg.com/@dsh-sup/shell-release@latest/shell-manifest.json`（`@latest` 会 302 到具体版本，须跟随），按 `docs/RELEASE-STANDARD.md` §5 的解法逐条取 key id |
 | **1.1.11 及更早版本共用一把钥匙**：抽验 1.0.1 / 1.0.5 / 1.1.0 / 1.1.5 / 1.1.9 / 1.1.10 / 1.1.11，key id 均为 `96DE3EF26F389F70`，与该轮 `tauri.conf.json` 内置公钥逐字一致 → 存量客户端只认这一把。**1.2.0 起换成新钥**，两把不通用 | 同上取各版本 manifest；签名 blob 第 2..10 字节（小端转 hex）即 key id |
 | **通道不是 GitHub Release**：该轮取证时 `/repos/…/releases` 为 0 条，而清单与产物一直托管在 npm（unpkg + jsdelivr 两个端点写在 `tauri.conf.json`）。**本节此前写「壳仓从未产出过签名产物，也从未发布过 GitHub Release」是错误引导** —— 后半句在当时真、前半句假，且它足以诱导「换钥无害」的结论。**现状**：`v1.2.0` 起 Release 有资产，既是手动下载点，**也进来了自动更新的候选源**（清单每平台只写一条 payload URL，拿不到时壳按实测候选换源，其中含 Release 同名资产） | `releases/tags/v1.2.0` 返回 12 项资产；`npm view @dsh-sup/shell-release versions` 含 `1.2.0`；换源口径与逐源实测见 `docs/SHELL-UPDATE-CHANNEL-VERIFICATION.md` §九 |
 | **旧钥判不可得，用户 2026-09-21 裁决：轮换而非继续等待** —— 新钥对已生成、新公钥已内置 `tauri.conf.json`、两枚签名 secret 已配置 | 新 minisign key id `54A15461E39C8AEF`；私钥与口令按 §四 布局落在 `~/.tauri/`；`GET /repos/lobbowen/dsh-supervisor-launcher/actions/secrets` 现列 `NPM_TOKEN` + `TAURI_SIGNING_PRIVATE_KEY` + `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` |
