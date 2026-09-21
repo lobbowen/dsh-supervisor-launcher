@@ -129,8 +129,8 @@ fn macos_system_proxy() -> Option<String> {
 /// 用户级 Node 安装的**原子落定**（三平台共用）。
 ///
 /// 约定：调用方先把官方归档解到 `staging`。两种布局都由本函数统一处理：
-///   · Unix：`tar --strip-components=1` → staging 下直接是 bin/lib/...；
-///   · Windows：解包不带 strip → staging 下多一层 `node-vX-win-.../`。
+///   Unix 用 `tar --strip-components=1`，staging 下直接是 bin/lib/...；
+///   Windows 解包不带 strip，staging 下多一层 `node-vX-win-.../`。
 /// 落定前必须验过整棵工具链（node **且** npm），落定后返回 node 可执行路径。
 /// 失败不留下半装状态（root 只在工具链完整后才替换）。
 pub fn commit_user_node(

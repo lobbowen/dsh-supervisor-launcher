@@ -62,8 +62,9 @@ fn fresh_dir(dir: &Path) -> Result<(), String> {
 /// 返回 Err 只代表「这条路走不通」（tar.exe 不存在 / 非零退出），由调用方决定是否回退。
 fn extract_with_tar(archive: &Path, dest: &Path) -> Result<(), String> {
     fresh_dir(dest)?;
+    let (src, dst) = (archive.display().to_string(), dest.display().to_string());
     let out = crate::bounded::run(
-        Command::new("tar").args(["-xf", &archive.display().to_string(), "-C", &dest.display().to_string()]),
+        Command::new("tar").args(["-xf", src.as_str(), "-C", dst.as_str()]),
         INSTALL_CMD_TIMEOUT,
     )
     .map_err(|e| format!("无法启动 tar.exe: {}", e))?;
@@ -85,7 +86,7 @@ fn extract_with_expand_archive(archive: &Path, dest: &Path) -> Result<(), String
         ps_quote(&dest.display().to_string())
     );
     let out = crate::bounded::run(
-        Command::new("powershell").args(["-NoProfile", "-NonInteractive", "-Command", &ps]),
+        Command::new("powershell").args(["-NoProfile", "-NonInteractive", "-Command", ps.as_str()]),
         INSTALL_CMD_TIMEOUT,
     )
     .map_err(|e| format!("无法启动 powershell: {}", e))?;
@@ -636,7 +637,7 @@ mod toolchain_tests {
         std::fs::write(inner.join("npm.cmd"), b"@echo off\r\n").unwrap();
         let root = tmp("trunc-root").join("node");
         std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(root.join("marker"), b"既有安装").unwrap();
+        std::fs::write(root.join("marker"), "既有安装").unwrap();
         let err = crate::platform::commit_user_node(&staging, &root, &["node.exe"])
             .expect_err("残缺树必须被拒绝");
         assert!(err.contains("npm"), "错误要指出缺的是 npm：{}", err);
