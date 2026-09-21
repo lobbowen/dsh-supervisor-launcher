@@ -448,19 +448,18 @@ fn g8_toolchain_snapshot_has_single_owner() {
 }
 
 /// G-9：探针与消费者必须走**同一条 spawn 路径**。
-/// 不变量 T-8：选择 npm 程序时按平台可执行性过滤，且平台层之外不得出现把程序包进 cmd 的调用。
+/// 不变量 T-10：选择 npm 程序时按平台可执行性过滤，且平台层之外不得出现把程序包进 cmd 的调用。
 /// 为什么要钉住这一点（Windows 实测根因之一）：`npm.cmd` 是 cmd.exe 的脚本，CreateProcessW 认不了它。
 ///   旧实现让探针经 `cmd /C` 跑通，于是面板报「npm 可用」，而真正的消费者（`npm install -g`、
 ///   `npm prefix -g`）用同一个路径直接 spawn 必失败 —— 包装把缺陷藏成了成功。
 #[test]
 fn g9_npm_probe_shares_the_consumer_spawn_path() {
-    let rt = read("src/runtime_contract.rs");
-    let at = code_only(&rt)
-        .find("pub fn probe_npm(")
-        .expect("runtime_contract 缺 pub fn probe_npm(（npm 程序选择的唯一实现口）");
+    let rt = code_only(&read("src/runtime_contract.rs"));
+    let body = fn_body(&rt, "pub fn probe_npm(");
     assert!(
-        code_only(&rt)[at..].contains("is_directly_spawnable"),
-        "probe_npm 未按平台可执行性筛选 npm 程序：不可执行的垫片会被直接交给消费者"
+        body.contains("is_directly_spawnable"),
+        "probe_npm 未按平台可执行性筛选 npm 程序：不可执行的垫片会被直接交给消费者\n{}",
+        body
     );
     let mut hits: Vec<String> = Vec::new();
     for (p, text) in walk("src") {
@@ -486,7 +485,7 @@ fn g9_npm_probe_shares_the_consumer_spawn_path() {
 }
 
 /// G-10：解包落定必须以「npm 载荷可用」为条件。
-/// 不变量 T-9：解包器可以静默截断深层路径（Expand-Archive 对 >260 字符路径如此且退出码为 0），
+/// 不变量 T-11：解包器可以静默截断深层路径（Expand-Archive 对 >260 字符路径如此且退出码为 0），
 ///   只校验 node.exe 就会把半成品树报成安装成功，npm 仍然缺失。
 #[test]
 fn g10_commit_validates_npm_payload() {
