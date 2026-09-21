@@ -29,6 +29,23 @@
 **架构结论（同一条）**：工具链的每一项都必须**带着自己的版本走完整条链**（契约 → 事件 → 文案），
 且这份事实只有一个所有者、一个读取口。拼接字符串对类型系统完全合法，所以归属只能靠门禁对账（G-7/G-8）。
 
+**第三轮（2026-09-21，Windows 真机）：npm「装过、探过」，用户看到的仍是缺失。** 前两轮把 npm 拉进了
+判定与播报链，但**「可用」的判据本身在两处失守**：
+
+- 契约的 npm 解析口 `probe_npm` 只判 `is_file()`，按优先级给出的第一个候选在 Windows 上是 `npm.cmd` ——
+  `.cmd` 是 cmd.exe 的脚本，CreateProcessW **执行不了它**（ERROR_BAD_EXE_FORMAT），而所有消费者
+  （`npm install -g`、`npm prefix -g`）都是 `Command::new(npm)` 直接 spawn。探针当时却经 `cmd /C`
+  包装跑 `--version` —— **探针与消费者走了两条不同的 spawn 路径**：面板可以报「可用」，装内核必失败；
+  而去掉包装后，同一个 npm 又立刻被报成「缺失」。**包装是胶水**：它把「本平台拉不起来」藏成了成功。
+- Windows 的 Node 归档由 PowerShell `Expand-Archive` 解出：PS 5.1 走 .NET Framework 的 `ZipFile`，
+  路径超过 260 字符的条目被**静默丢弃且退出码为 0**。npm 的依赖树必然超深，而浅层的 `node.exe` 完好 ——
+  `commit_user_node` 当时只校验 node 可执行，于是**一棵残缺的树被落定为「安装成功」**。
+
+**架构结论（同一条）**：「文件存在」不等于「可用」，「退出码 0」不等于「载荷完整」。可用性判据必须
+**与消费者共用同一条 spawn 路径**（平台层给出可执行性判据，选择程序时就排除不可执行的垫片，见 T-10），
+且**解包落定必须以整棵工具链校验为准**（T-11）。面板还要能说出**为什么**不可用（`npmWhy`，T-1d）：
+「归档解残缺」「垫片拉不起来」「npm 自己报错」三类的处置完全不同，只报「缺少 npm」等于把排障推给用户。
+
 ---
 
 ## 2. 后端契约（Rust，冻结）
@@ -43,6 +60,7 @@
   "npmOk": true | false | null,       // npm 是否可用（**与 node 同权**）；null=本轮未取到 node，未知
   "npmVersion": "10.9.2" | null,      // npm 真实执行 `npm --version` 得到的版本；未执行为 null
   "npmPath": "/abs/npm" | null,
+  "npmWhy": "文字" | null,             // npmOk 为 false 时的**不可用原因**（查过哪些路径 / 执行失败详情）；可用时为 null
   "nodePath": "/abs/node" | null,
   "busy": true | false,
   "status": "文字（供 UI 直接显示）",
@@ -58,6 +76,9 @@
 也**不等于**不可用，不得因 `null` 触发重装（那是无根因的空转）。
 **不变量 T-1c**：`npmVersion` 只在真实执行过 npm 时非空；未执行必须是 `null`，**不得**用空串或
 node 的版本号占位。
+**不变量 T-1d**：`npmOk === false` 时 `npmWhy` 必须非空，且它必须是 `probe_npm_usable` 的 `Err` 文案本身
+（不是前端拼的猜测）。npm 不可用有三类成因（载荷缺失 / 垫片本平台拉不起来 / 执行报错），处置各不相同，
+原因不上屏就等于把排障推给用户。
 **不变量 T-2**：`busy === true` 期间 `installed/minOk/npmOk` 允许为中间态，UI 必须只依赖 `busy/status` 展示。
 
 **版本号形态**：node 自带 `v`（`v22.12.0`），npm 与内核/桌面壳都不带（`10.9.2`）。归一规则只在
@@ -77,12 +98,27 @@ npm 路径/前置参数/版本），而不是字段子集或元组。外层每�
 **不变量 T-3**：成功返回时，后续 `node_status` 必须给出 `installed != null && minOk && npmOk === true`。
 **不变量 T-4**：失败必须 `emit` 错误事件并保留可操作文案；不得静默。
 
+**解包与落定（三平台同一收口 `platform::commit_user_node`）**：解包器**逐条尝试**，每条都以
+`commit_user_node` 的工具链校验为准 —— 校验同时要求 node 可执行**与** `probe_npm` 解析得出可用 npm，
+不通过就换下一条解包器，全部不通过才失败（`T-11`）。Windows 的候选顺序是 `tar.exe`（bsdtar，宽字符路径）
+优先、`Expand-Archive` 兜底；后者在 PS 5.1 上会**静默截断**超 260 字符的条目并返回 0，
+所以它的退出码**不构成**载荷完整的证据（见 §1 第三轮）。
+
 ### 2.3 npm 修复策略（按优先级，跨平台）
+
+**解析口只有一个**：`runtime_contract::probe_npm(node, binDir)`。候选表 `npm_shim_candidates`（错误文案
+`npm_search_summary` 与安装校验共用同一张表），**每条候选都必须过 `Platform::is_directly_spawnable`**
+才可能被选中 —— 判据来自平台层：Windows 只有 `.exe` 能被 CreateProcessW 拉起；POSIX 的 execve 认 shebang，
+判据恒真。它放在 `Platform` trait 上而不是写成 `cfg` 分支，是因为「交出去的程序必须可直接 spawn」是
+每个平台都要兑现的契约承诺（G1 也要求平台知识只留在 `src/platform/`）。
+返回的 `(program, prefix_args)` 承诺「program 能被 `Command::new` 直接拉起」，探针与所有消费者
+（`npm install -g`、`npm prefix -g`）因此天然走同一条 spawn 路径。
 
 1. 官方分发包自带 npm：node 的用户级归档（zip/tar.gz）解包后，npm 通常已就位（先探测，命中即止）；
 2. 未命中且存在 `<nodeBinDir>/node_modules/npm/bin/npm-cli.js` → 以 `node <npm-cli.js>` 形态可用（契约已支持 `npmArgs`）；
+   Windows 上这是**常态而非兜底**：官方目录里的 `npm` / `npm.cmd` 都不可直接 spawn，只有 `node.exe + npm-cli.js` 可以；
 3. 包内 CLI 也不存在（裁剪分发/解包不完整）→ **重新执行官方安装**（幂等）后复探；
-4. 仍失败 → 如实失败，文案给出「手动安装 Node 官方分发包」的指引。
+4. 仍失败 → 如实失败，文案给出「手动安装 Node 官方分发包」的指引，并带上 `npmWhy`（T-1d）。
 
 **禁止**：`npm config set`、写用户 `~/.npmrc`、改全局 registry（凭据与用户环境不得被污染）。
 
@@ -114,7 +150,7 @@ stepEnv 轮询 readEnv()（= node_status 的唯一读取口）
    ├─ busy            → 等待（只显示 status 文字）
    ├─ !installed      → 安装（kind=node）
    ├─ minOk === false → 安装/升级（kind=node）
-   ├─ npmOk !== true  → 安装/修复（kind=npm）← **必须与 node 并列，不得复用 node 分支文案**
+   ├─ npmOk !== true  → 安装/修复（kind=npm）← **必须与 node 并列，不得复用 node 分支文案**；文案须回显 `npmWhy`（T-1d）
    └─ 全部通过        → stepNodeDone
 ```
 
@@ -163,12 +199,31 @@ NS.versionLabel(v)             // 版本号形态归一（唯一实现）；null
 | 项 | Linux | macOS | Windows |
 |---|---|---|---|
 | node 可执行名 | `node` | `node` | `node.exe` |
-| npm 可执行名 | `npm` | `npm` | `npm.cmd` |
+| npm 垫片候选名（按优先级） | `npm`、`npm.cmd`、`npm.exe` | 同左 | `npm.cmd`、`npm`、`npm.exe` |
+| **实际交出去的 npm** | 垫片本身（execve 认 shebang） | 同左 | `node.exe` + `npm-cli.js`（垫片全都不可直接 spawn） |
 | 官方分发包 | `tar.gz` | `tar.gz` | `zip` |
+| 解包器（按尝试顺序） | `tar` | `tar` | `tar.exe`(bsdtar)、`Expand-Archive` |
+| 落定校验 | node **且** `probe_npm` 命中（`commit_user_node`） | 同左 | 同左 |
 | 安装位置 | `<状态根>/node`（用户级） | `<状态根>/node` | `<状态根>/node` |
 | 是否需要提权 | **否** | **否** | **否** |
-| npm 兜底 | `node_modules/npm/bin/npm-cli.js` | 同左 | 同左 |
 | 事件形态 | 统一 `install_*` | 同左 | 同左 |
+
+**不变量 T-10（spawn 路径同源）**：`probe_npm` 交出的 `program` 必须能被 `Command::new(program)` 直接
+拉起 —— 判据是 `Platform::is_directly_spawnable`，它在**选择程序**时就排除 `.cmd`/`.bat`/无扩展名脚本这类
+本平台拉不起来的垫片。探针不得对程序做任何 shell 包装：**包装会把「不可执行」藏成「探针成功」**，
+而消费者（`npm install -g`、`npm prefix -g`）随后必然失败。平台知识只允许出现在 `src/platform/`（门禁 G1），
+因此这条判据是 trait 方法而不是调用点的 `cfg` 分支（门禁 G-9）。
+
+**不变量 T-11（落定以整棵工具链为准）**：解包成功 ≠ 载荷完整。`commit_user_node` 必须同时验 node 可执行
+**与** npm 可用（同一个 `probe_npm`），否则拒绝落定并换下一条解包路；既有安装不得被半成品覆盖（门禁 G-10）。
+理由：`Expand-Archive` 在 PS 5.1 上会静默丢弃超 260 字符的条目**且退出码为 0**，npm 的依赖树必然超深。
+
+**不变量 T-12（真实归档必须在 CI 上跑过）**：`zip 解包 → npm 可用` 整条链由 Windows leg 的
+`official_artifact_installs_usable_npm`（`--ignored`，下载官方归档、走生产 `install_node`）驱动。
+静态门禁只能证明「代码里写了判据」，证明不了「本平台解出来确实有 npm」—— 这条链此前从未被执行过，
+所以缺陷只能靠用户报障发现。
+该步骤以**全路径** `--exact` 指定测试，并对 `test result: ok. 1 passed` 把一次关：
+`--exact` 配短名是零命中且退出码 0，「加了实测步骤」与「步骤什么都没跑」在 CI 上完全同形（门禁 G-11）。
 
 ---
 
@@ -204,15 +259,21 @@ NS.versionLabel(v)             // 版本号形态归一（唯一实现）；null
 
 | 门禁 | 断言 |
 |---|---|
-| G-1 | `node_status` 含 `npmOk`/`npmPath`/`npmVersion`，且来源是真实探测（`probe_npm` / `probe_npm_usable`） |
+| G-1 | `node_status` 含 `npmOk`/`npmPath`/`npmVersion`，且来源是真实探测（`probe_npm` / `probe_npm_usable`）；`npmWhy` 必须在回传字段里，且 `probe_npm_usable` 的签名是 `Result<NpmUsable, String>`（返回 `Option` 就把三类成因合并成一个 `None`，原因无法上屏） |
 | G-2 | `run_install` **函数体**（或被委派的 `node::finalize_install` 函数体）里真实调用 npm 可用性探测（`derive_usable`/`probe_npm_usable`）；行注释不算证据 |
 | G-3 | 全仓无 `showProgress`/`hideProgress`/`progBar`/`id="prog"` |
 | G-4 | 全仓无旧事件名（`env_progress`/`env_done`/`env_error`/`shell_update_progress`） |
-| G-5 | `20-env.js` 存在独立的 `npmOk !== true` 分支且**不得**与 node 分支共用安装文案 |
+| G-5 | `20-env.js` 存在独立的 `npmOk !== true` 分支且**不得**与 node 分支共用安装文案；分支文案必须回显后端的 `st.npmWhy`（T-1d） |
 | G-6 | 前端所有 install 文案经 `NS.install.*`（无自行拼装） |
 | G-7 | 每条 `install_done` 的 `version` 归属其 `kind`：node 事件取 node 版本、npm 事件取 npm 版本，npm 事件**混入 node 版本即红**（按 `handle.emit(...)` 调用切块对账，不按字符窗口） |
 | G-8 | 工具链快照只有一个写入点（`applyToolchain`）与一个读取口（`readEnv`）；`NS.nodeVer`/`NS.npmVer` 不得复活；就绪行与诊断串同时含 node 与 npm |
+| G-9 | 探针与消费者**同源**（T-10）：`probe_npm` 的函数体必须过 `is_directly_spawnable`；`src/` 在 `platform/` 之外不得出现 `cmd.exe` / `cmd /C` 包装（只看代码行，注释里的历史说明不算证据也不触发红） |
+| G-10 | 落定校验（T-11）：`commit_user_node` 函数体必须调用 `probe_npm` —— 只看 node 可执行就会把截断树落定成「安装成功」 |
+| G-11 | 真实归档实测（T-12）：`build.yml` 必须按**全路径** `--exact` 执行 `official_artifact_installs_usable_npm`，并断言「恰好 1 passed」；测试本身须带 `#[ignore]`（短名零命中也会绿，那一步就成了空转） |
 
 判据位置：`src-tauri/tests/env_toolchain_standard_test.rs`（G-7/G-8 的判据抽成纯函数，并各自带
 **旧形态反向夹具** —— 认不出旧形态的判据等于空转）。契约字段的行为面在
 `src-tauri/src/runtime_contract.rs` 的内置单元测试（写读往返、不伪造 npm 版本）。
+G-9/G-10 的**平台侧行为面**在 `src/platform/windows.rs` 的 `toolchain_tests`（`.cmd` 不可直接 spawn、
+完整树解析为 `node.exe + npm-cli.js`、残缺树拒绝落定），以及 `official_artifact_installs_usable_npm`
+（T-12：真机下载官方 zip 并走生产 `install_node`，由 `build.yml` 的 Windows leg 以 `--ignored` 执行）。

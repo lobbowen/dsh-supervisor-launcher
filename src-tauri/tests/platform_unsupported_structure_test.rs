@@ -27,7 +27,7 @@
 //!
 //! ## 锁定不变量
 //!   U-a  `impl ServiceControl for Impl` 只含 ServiceControl 的 6 个方法
-//!   U-b  `impl Platform for Impl`（可多块）含 Platform 的**全部** 15 个方法
+//!   U-b  `impl Platform for Impl`（可多块）含 Platform 的**全部** 18 个方法
 //!   U-c  两个集合**不相交**（同一方法不得同时出现在两个 trait 的 impl 里）
 //!   U-d  真实 trait 定义的方法集与预期一致（防 trait 演进后本门禁失效）
 
@@ -141,6 +141,8 @@ const PLATFORM_METHODS: &[&str] = &[
     "is_usable_executable", "core_extra_candidates", "core_bin_candidates_in_prefix", "state_root_default", "is_local_fixed_dir",
     "install_node", "has_privilege_channel",
     "node_exe_name", "npm_exe_name", "core_exe_names",
+    // 2026-09-21：程序能否被 Command::new 直接拉起（Windows 上 .cmd/.bat 不能）。
+    "is_directly_spawnable",
 ];
 const SERVICE_METHODS: &[&str] = &[
     "kind", "definition_path", "ensure_defined", "start", "stop", "spawn_daemon",

@@ -160,6 +160,8 @@ impl Platform for Impl {
     fn node_exe_name(&self) -> &'static str { "node" }
     fn npm_exe_name(&self) -> &'static str { "npm" }
     fn core_exe_names(&self) -> &'static [&'static str] { &["dsh-supervisor"] }
+    // execve 按 shebang 解释脚本，npm 垫片因此可直接 spawn。
+    fn is_directly_spawnable(&self, _prog: &Path) -> bool { true }
 }
 
 impl ServiceControl for Impl {

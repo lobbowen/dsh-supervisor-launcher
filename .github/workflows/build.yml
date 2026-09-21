@@ -144,6 +144,26 @@ jobs:
           cargo test --bins ${TARGETS} 2>&1 | tail -80
         working-directory: src-tauri
 
+      - name: Windows 工具链实测（官方归档 -> npm 真实可用）
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          # 为什么单独占一步：zip 解包 -> node_modules/npm -> `npm --version` 这条链
+          #   在 CI 上从未被执行过（构建与静态门禁都不碰真归档），于是 Windows 上
+          #   「装完 Node 仍没有 npm」只能靠用户报障。此步走**生产代码**（install_node +
+          #   derive_usable），跑真机归档，失败信息就是面板将来会显示给用户的那句。
+          #   单线程 + --ignored：它会改 DSH_SUPERVISOR_HOME 环境变量，不与其它测试并发。
+          #   --exact 必须配**全路径**：短名在 libtest 里零命中且退出码 0，这一步会绿得
+          #   什么都没跑；因此再对「恰好一个测试通过」把一次关，空转即红。
+          set -o pipefail
+          LOG="${RUNNER_TEMP:-/tmp}/official-npm-test.log"
+          cargo test --bins -- --exact --ignored --test-threads=1 \
+            platform::windows::toolchain_tests::official_artifact_installs_usable_npm \
+            2>&1 | tee "$LOG" | tail -40
+          grep -q "test result: ok. 1 passed" "$LOG" || {
+            echo "本步未真正执行那一个测试（零命中/编译前失败/超时都会走到这里）"; exit 1; }
+        working-directory: src-tauri
+
       - name: 壳无头冒烟（--node-plan：环境探针 + 官方最新 LTS）
         shell: bash
         run: |

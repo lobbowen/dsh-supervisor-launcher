@@ -129,9 +129,10 @@ fn macos_system_proxy() -> Option<String> {
 /// 用户级 Node 安装的**原子落定**（三平台共用）。
 ///
 /// 约定：调用方先把官方归档解到 `staging`。两种布局都由本函数统一处理：
-///   · Unix：`tar --strip-components=1` → staging 下直接是 bin/lib/...；
-///   · Windows：`Expand-Archive` → staging 下多一层 `node-vX-win-.../`。
-/// 落定后返回 node 可执行路径。失败不留下半装状态（root 只在确认可执行后才替换）。
+///   Unix 用 `tar --strip-components=1`，staging 下直接是 bin/lib/...；
+///   Windows 解包不带 strip，staging 下多一层 `node-vX-win-.../`。
+/// 落定前必须验过整棵工具链（node **且** npm），落定后返回 node 可执行路径。
+/// 失败不留下半装状态（root 只在工具链完整后才替换）。
 pub fn commit_user_node(
     staging: &std::path::Path,
     root: &std::path::Path,
@@ -157,6 +158,18 @@ pub fn commit_user_node(
     if !found.is_file() {
         return Err(format!("解包后未找到 Node 可执行（{}）", found.display()));
     }
+    // 工具链完整性：**node 在 ≠ 工具链在**。npm 必须与 node 出自同一棵解包树，判据直接取
+    //   运行期契约的解析口（probe_npm）—— 这里再列一份候选就必然与契约分叉。
+    //   Windows 实测根因（2026-09-21）：PowerShell 5.1 的 Expand-Archive 不处理长路径，
+    //   深层 `node_modules/npm/**` 被截断而浅层的 node.exe 完好，旧实现只看 node.exe，
+    //   于是「Node 已就绪」指向一棵残缺的树，面板随后如实报出 npm 缺失。
+    let bin_dir = found.parent().unwrap_or(base.as_path()).to_path_buf();
+    if crate::runtime_contract::probe_npm(&found, &bin_dir).is_none() {
+        return Err(format!(
+            "解包后的归档不含可用 npm（{}）。拒绝落定半成品。",
+            crate::runtime_contract::npm_search_summary(&bin_dir)
+        ));
+    }
     if let Some(parent) = root.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
@@ -170,76 +183,6 @@ pub fn commit_user_node(
         return Err(format!("{} 未就位", installed.display()));
     }
     Ok(installed)
-}
-
-/// 以当前平台的**正确方式**执行版本探针（`<prog> [args...] --version`），有界返回首个非空行。
-///
-/// 为什么必须在平台层：Windows 上的 .cmd / .bat（如官方 npm.cmd）**不能**被
-///   CreateProcess 直接执行，必须经 `cmd /C`。这是平台知识，按门禁 G1 只能出现在本层。
-/// 无输出 / 非零退出 / 超时一律 None（视为不可用）—— 「文件存在」不等于「可执行」。
-pub fn run_version_probe(prog: &std::path::Path, args: &[String]) -> Option<String> {
-    use std::process::{Command, Stdio};
-    let mut cmd;
-    #[cfg(target_os = "windows")]
-    {
-        let needs_shell = prog
-            .extension()
-            .map(|e| {
-                let e = e.to_string_lossy().to_ascii_lowercase();
-                e == "cmd" || e == "bat"
-            })
-            .unwrap_or(false);
-        if needs_shell {
-            let mut c = Command::new("cmd");
-            c.arg("/C").arg(prog);
-            for a in args { c.arg(a); }
-            c.arg("--version");
-            cmd = c;
-        } else {
-            let mut c = Command::new(prog);
-            for a in args { c.arg(a); }
-            c.arg("--version");
-            cmd = c;
-        }
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let mut c = Command::new(prog);
-        for a in args { c.arg(a); }
-        c.arg("--version");
-        cmd = c;
-    }
-    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null());
-    crate::bounded::prepare(&mut cmd);
-    let mut child = cmd.spawn().ok()?;
-    let started = std::time::Instant::now();
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(st)) => break st,
-            Ok(None) => {
-                if started.elapsed() >= std::time::Duration::from_secs(8) {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return None;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(40));
-            }
-            Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
-        }
-    };
-    if !status.success() { return None; }
-    let mut out = String::new();
-    {
-        use std::io::Read;
-        if let Some(mut s) = child.stdout.take() {
-            let _ = s.read_to_string(&mut out);
-        }
-    }
-    out.lines().map(|l| l.trim().to_string()).find(|l| !l.is_empty())
 }
 
 /// 平台能力声明（供 `--platform-matrix` 自检与诊断，**不参与业务逻辑**）。
@@ -504,6 +447,14 @@ pub trait Platform: Send + Sync {
 
     /// 内核可执行文件的**候选名**（Windows 含 `.exe`/`.cmd` 垫片）。
     fn core_exe_names(&self) -> &'static [&'static str];
+
+    /// 该路径能否作为 `Command::new(prog)` 的**程序**被直接拉起（不经任何 shell）。
+    ///
+    /// 为什么是平台知识：Windows 的 CreateProcessW 只执行可执行程序，`.cmd`/`.bat` 是
+    ///   cmd.exe 的脚本、无扩展名的 `npm` 是 POSIX sh 脚本 —— 两者都**存在但拉不起来**
+    ///   （ERROR_BAD_EXE_FORMAT）。运行期契约承诺「program 可直接 spawn」，
+    ///   判据必须在这里给出，否则探针与消费者会走两条不同的 spawn 路径而分叉。
+    fn is_directly_spawnable(&self, prog: &std::path::Path) -> bool;
 }
 
 // ── 平台实现的选择：**本文件是全仓唯一出现平台分支的地方**（门禁 G1）──

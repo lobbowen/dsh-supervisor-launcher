@@ -4,6 +4,34 @@
 
 ## [未发布]
 
+### Windows 上「装了 Node 仍没有 npm」的根因修复：可用 = 探针与消费者同一条 spawn 路径，落定 = 整棵工具链校验
+
+现场（用户 Windows 真机）：引导页装完 Node 之后 npm 仍然缺失。前两轮将 npm 拉进判定链时，
+**「可用」的判据本身在两处失守**（取证与推演见 `docs/ENV-TOOLCHAIN-INSTALL-STANDARD.md` §1 第三轮）：
+
+- **探针与消费者走了两条不同的 spawn 路径**。`probe_npm` 只判 `is_file()`，Windows 上第一个命中的候选是
+  `npm.cmd`；而 CreateProcessW 执行不了 `.cmd`（那是 cmd.exe 的脚本）。旧探针在平台层用 `cmd /C` 包装跑
+  `--version`，于是探针报「可用」、真正的消费者（`npm install -g` / `npm prefix -g`，`Command::new` 直接 spawn）必失败。
+  包装是胶水：它把一个「本平台不可直接执行」的事实藏成了探针成功，所以**删掉包装**而不是给消费者也套一层。
+  现由 `Platform::is_directly_spawnable`（新增 trait 方法）在**选择程序**时就排除这类垫片，Windows 上 npm
+  一律以 `node.exe + node_modules/npm/bin/npm-cli.js` 形态交出；探针因此不再需要任何平台分支（G1）。
+- **解包成功被当成载荷完整**。PowerShell 5.1 的 `Expand-Archive` 走 .NET Framework 的 `ZipFile`，超 260 字符的
+  条目被**静默丢弃且退出码为 0**，而 npm 的依赖树必然超深；`commit_user_node` 当时只校验 `node.exe`，
+  于是残缺树被落定为「Node 已就绪」。现首选 Windows 10 1803+ 自带的 `tar.exe`（bsdtar，宽字符路径），
+  `Expand-Archive` 只作兜底，且**每条解包路都以工具链校验为准**（node 且 `probe_npm` 命中）才落定，
+  不通过则换下一条 —— 既有安装不会被半成品覆盖。
+- 面板不再只显示「缺少 npm」：`probe_npm_usable` 改为返回 `Result<_, String>`，失败原因经 `node_status` 的
+  `npmWhy` 落到 npm 分支文案（T-1d）。三类成因（载荷缺失 / 垫片拉不起来 / 执行报错）处置不同，原因不上屏就是把排障推给用户。
+- 新增门禁：G-9（`probe_npm` 必过 `is_directly_spawnable`，且 `platform/` 之外不得出现 `cmd` 包装）、
+  G-10（`commit_user_node` 函数体必须校验 npm）、G-11（真实归档的 CI 步骤必须按全路径命中并断言跑了 1 个），
+  G-1 收紧到「`npmWhy` 上屏 + `probe_npm_usable` 带原因」，
+  G-5 增加「npm 分支必须回显 `st.npmWhy`」；Windows 侧行为面在 `platform/windows.rs::toolchain_tests`。
+- **整条 zip 到 npm 的链第一次在 CI 上真跑**：`build.yml` 新增 Windows 步骤，以 `--ignored` 执行
+  `official_artifact_installs_usable_npm`（下载官方归档、走生产 `install_node`、读回 npm 版本）。
+  静态门禁只能证明代码里写了判据，证明不了本平台解出来确实有 npm —— 这正是它此前从未被执行过的代价。
+  该步骤按**全路径** `--exact` 指定测试并断言「恰好 1 passed」：`--exact` 配短名是零命中且退出码 0，
+  「加了实测步骤」与「步骤什么都没跑」在 CI 上长得一模一样（门禁 G-11 钉住这一点）。
+
 ### Linux 支持面收窄为「Ubuntu + deb 一种形态」，旁路产物从产线源头停掉
 
 上面第一条缺口不是靠补文案收口的，而是把「多形态」这条旁路整个拆掉：

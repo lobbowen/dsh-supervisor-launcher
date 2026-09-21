@@ -96,8 +96,15 @@ fn g1_node_status_exposes_real_npm_probe() {
     assert!(cmd.contains("npmOk"), "node_status 未回传 npmOk（npm 与 node 同权，缺失即漏判）");
     assert!(cmd.contains("npmPath"), "node_status 未回传 npmPath（UI/排障无法定位 npm）");
     assert!(cmd.contains("probe_npm"), "node_status 的 npmOk 未追溯 probe_npm（禁止伪造 npm 存在）");
+    // 判 false 时必须同时给出**为什么**：面板只有拿到原因才能区分「缺 npm」与「npm 拉不起来」。
+    assert!(cmd.contains("npmWhy"), "node_status 未回传 npmWhy（不可用原因不上屏，排障只能靠猜）");
     let rt = read("src/runtime_contract.rs");
     assert!(rt.contains("fn probe_npm"), "runtime_contract 缺 probe_npm（npm 真实探测的唯一实现）");
+    // 唯一探测口必须能**输出**失败原因；返回 Option 的版本会把三类根因合并成一个 None。
+    assert!(
+        rt.contains("pub fn probe_npm_usable(node: &Path, bin_dir: &Path) -> Result<NpmUsable, String>"),
+        "probe_npm_usable 未以 Result<_, String> 暴露失败原因（不可用原因无法送到面板）"
+    );
 }
 
 /// npm「可用」的证据 token：三者内部都会真实执行 `npm --version`（不变量 T-1b）。
@@ -192,6 +199,13 @@ fn g5_env_js_has_standalone_npm_branch() {
     assert!(
         mentions_npm,
         "npm 分支未使用独立文案（必须显式提到 npm，不得与 node 分支共用）：\n{}",
+        window
+    );
+    // 原因上屏：npmOk=false 有三种根因（归档解残缺 / 垫片在本平台拉不起来 / npm 执行报错），
+    //   处置彼此不同。只报「缺少 npm」会把排障推给用户 —— 后端已回传 npmWhy，前端必须用。
+    assert!(
+        window.contains("st.npmWhy"),
+        "npm 分支未回显后端给出的不可用原因 npmWhy：\n{}",
         window
     );
 }
@@ -431,4 +445,89 @@ fn g8_toolchain_snapshot_has_single_owner() {
             oh
         );
     }
+}
+
+/// G-9：探针与消费者必须走**同一条 spawn 路径**。
+/// 不变量 T-10：选择 npm 程序时按平台可执行性过滤，且平台层之外不得出现把程序包进 cmd 的调用。
+/// 为什么要钉住这一点（Windows 实测根因之一）：`npm.cmd` 是 cmd.exe 的脚本，CreateProcessW 认不了它。
+///   旧实现让探针经 `cmd /C` 跑通，于是面板报「npm 可用」，而真正的消费者（`npm install -g`、
+///   `npm prefix -g`）用同一个路径直接 spawn 必失败 —— 包装把缺陷藏成了成功。
+#[test]
+fn g9_npm_probe_shares_the_consumer_spawn_path() {
+    let rt = code_only(&read("src/runtime_contract.rs"));
+    let body = fn_body(&rt, "pub fn probe_npm(");
+    assert!(
+        body.contains("is_directly_spawnable"),
+        "probe_npm 未按平台可执行性筛选 npm 程序：不可执行的垫片会被直接交给消费者\n{}",
+        body
+    );
+    let mut hits: Vec<String> = Vec::new();
+    for (p, text) in walk("src") {
+        let rel = p.display().to_string().replace('\\', "/");
+        if rel.contains("/platform/") {
+            continue;
+        }
+        for (n, line) in text.lines().enumerate() {
+            if line.trim_start().starts_with("//") {
+                continue;
+            }
+            let l = line.to_lowercase();
+            if l.contains("cmd.exe") || l.contains("cmd /c") || (l.contains("\"cmd\"") && l.contains("\"/c\"")) {
+                hits.push(format!("{}:{}", rel, n + 1));
+            }
+        }
+    }
+    assert!(
+        hits.is_empty(),
+        "平台层之外出现 cmd 包装（探针与消费者必须同源，否则不对称会重现）：{}",
+        hits.join(", ")
+    );
+}
+
+/// G-10：解包落定必须以「npm 载荷可用」为条件。
+/// 不变量 T-11：解包器可以静默截断深层路径（Expand-Archive 对 >260 字符路径如此且退出码为 0），
+///   只校验 node.exe 就会把半成品树报成安装成功，npm 仍然缺失。
+#[test]
+fn g10_commit_validates_npm_payload() {
+    let plat = read("src/platform/mod.rs");
+    let at = plat
+        .find("fn commit_user_node")
+        .expect("platform/mod.rs 缺 commit_user_node（解包落定的唯一出口）");
+    let body = code_only(&fn_body(&plat[at..], "fn commit_user_node"));
+    assert!(
+        body.contains("probe_npm"),
+        "commit_user_node 未校验 npm 载荷 —— 被截断的归档会被当作安装成功：\n{}",
+        body
+    );
+}
+
+/// G-11：真实归档的 Windows 实测步骤必须**真的跑到那一个测试**。
+/// 不变量 T-12：`zip 解包 -> npm 可用` 这条链只由真机归档证明，静态门禁一律碰不到它。
+/// 为什么要钉在 CI 步骤上：libtest 对 `--exact` 的短名是零命中且退出码 0，
+///   于是「加了实测步骤」和「实测步骤什么都没测」在 CI 上长得一模一样 ——
+///   而后者正是本轮问题拖到用户报障的原因（注释里的承诺不算证据，只看执行行）。
+#[test]
+fn g11_windows_real_artifact_step_actually_runs_the_ignored_test() {
+    let y = read("../.github/workflows/build.yml");
+    let full = "platform::windows::toolchain_tests::official_artifact_installs_usable_npm";
+    assert!(
+        y.contains(full),
+        "CI 未按**全路径**执行真实归档测试：--exact 配短名会零命中且退出码 0（空转）"
+    );
+    assert!(
+        y.contains("test result: ok. 1 passed"),
+        "CI 未对真实归档步骤把「恰好一个测试通过」的关：零命中不会被发现"
+    );
+    let win = read("src/platform/windows.rs");
+    let at = win
+        .find("fn official_artifact_installs_usable_npm")
+        .expect("windows.rs 缺 official_artifact_installs_usable_npm（真实归档的唯一实测口）");
+    let guard = win[..at]
+        .rfind("#[ignore")
+        .expect("真实归档测试未标 ignore：它会联网下载归档，不该被普通测试集执行");
+    assert!(
+        at - guard < 240,
+        "真实归档测试的 #[ignore] 离声明过远（可能标在别的测试上）：{} 字节",
+        at - guard
+    );
 }

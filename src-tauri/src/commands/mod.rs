@@ -42,16 +42,20 @@ pub async fn node_status(app: tauri::AppHandle) -> serde_json::Value {
     // npm 可用性必须**真实执行**（不变量 T-1b），且与 node **同源**：只用本次探测到的 node 路径。
     //   探测未给出 path 时 npm 是「未知」（null），不得伪造成 false —— 否则会触发无谓重装。
     let node_for_npm = out.path.clone();
-    let npm = match tauri::async_runtime::spawn_blocking(move || {
-        node_for_npm
-            .as_ref()
-            .and_then(|p| p.parent().and_then(|b| crate::runtime_contract::probe_npm_usable(p, b)))
+    let npm_probe = match tauri::async_runtime::spawn_blocking(move || match node_for_npm.as_ref() {
+        Some(p) => match p.parent() {
+            Some(b) => crate::runtime_contract::probe_npm_usable(p, b),
+            None => Err(format!("node 路径 {} 没有父目录", p.display())),
+        },
+        None => Err("本次未探测到 node 路径，npm 无从判定".to_string()),
     })
     .await
     {
-        Ok(v) => v,
-        Err(_) => None,
+        Ok(r) => r,
+        Err(_) => Err("npm 探测线程未返回".to_string()),
     };
+    let npm_why: Option<String> = npm_probe.as_ref().err().map(|e| e.clone());
+    let npm = npm_probe.ok();
     let npm_known = out.path.is_some();
     let mut o = {
         let state = app.state::<Mutex<RunState>>();
@@ -70,6 +74,12 @@ pub async fn node_status(app: tauri::AppHandle) -> serde_json::Value {
         o["npmOk"] = if npm_known { serde_json::json!(npm.is_some()) } else { serde_json::Value::Null };
         o["npmVersion"] = serde_json::json!(npm.as_ref().map(|n| n.version.clone()));
         o["npmPath"] = serde_json::json!(npm.as_ref().map(|n| n.path.display().to_string()));
+        // npm 不可用时必须把**原因**带到面板：「残缺归档」「垫片在本平台拉不起来」「npm 自己报错」
+        //   三类问题的处置完全不同，只报「npm 缺失」等于把排障推给用户（Windows 实测教训）。
+        o["npmWhy"] = match &npm_why {
+            Some(why) => serde_json::json!(why),
+            None => serde_json::Value::Null,
+        };
         o
     };
     // 契约落盘：node 与 npm **都真实可用**才写（不论是否由壳安装）——
