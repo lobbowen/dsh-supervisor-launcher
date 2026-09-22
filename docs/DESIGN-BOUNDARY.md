@@ -140,6 +140,12 @@
 
 详见内核仓 `PLATFORM-CAPABILITY-MATRIX.md §六`。
 
+**自启开关单写者的执法点**（2026-09-22，IL-2 壳仓半边）：`platform/linux.rs::ensure_defined` 里
+`systemctl --user enable` 与 `loginctl enable-linger` **只在定义首次建立时**执行；内容过时的自愈路径
+只写 unit + `daemon-reload` 后立即返回。此前每次升级都重放 enable/linger，于是用户在面板关掉自启后，
+下一次模板演进会把自启位重新打开 —— 那是本表第二行所禁的第二个写者。
+判据：`d5_definition_self_heal_does_not_rewrite_autostart`（含三种回归形态的反向合成样本）。
+
 ### D6 不做的事（诚实说明）
 
 | 不做 | 理由 |
