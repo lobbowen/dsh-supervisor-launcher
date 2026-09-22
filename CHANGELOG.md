@@ -24,6 +24,10 @@
 - 伪内核夹具收为单源（`ci/fake-core.js`）：H3 与 H10 共用，不再在 workflow 里内联第二份。
 - 门禁：`src-tauri/tests/installer_smoke_coverage_test.rs`（I-a..I-h）钉住以上全部形态，
   含「只解包不安装」「只下载不验签」两种假冒烟形态的反向判据。
+- 首跑（Linux 腿通过）暴露两个形态缺陷，随本批修掉并各加判据：macOS 腿里紧贴全角括号写 `$B（`，
+  bash 在非 UTF-8 语域下吃掉该字符的半个字节，`set -u` 立即判失败；Windows 腿的探针用调用运算符
+  跑 GUI 子系统的壳，既不等待也接不到 stdout，探针恒读到空。后者由 I-f 的
+  `RedirectStandardOutput` + `WaitForExit` 判据与 i_h 的反向样本钉住。
 
 ## [1.2.6]（2026-09-23）
 

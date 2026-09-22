@@ -157,6 +157,10 @@ fn i_f_installed_probe_reads_conclusions_not_survival() {
     // 落盘链路（identity.json 的 exe + shell.log）是壳自己的事实源，装机形态必须写对。
     assert!(sh.contains("identity.json"), "I-f FAIL 没判 identity.json 落盘");
     assert!(ps.contains("identity.json"), "I-f FAIL Windows 没判 identity.json 落盘");
+    // 壳在 Windows 上是 GUI 子系统进程：调用运算符不等待、也不接它的 stdout，
+    // 于是探针读到空输出 + 空退出码，「装上了但测不到」与「压根没装上」在日志里长得一样。
+    assert!(ps.contains("RedirectStandardOutput") && ps.contains("WaitForExit"),
+        "I-f FAIL Windows 探针未接管 GUI 子系统进程的输出与等待");
     assert!(sh.contains("shell.log"), "I-f FAIL 没判 shell.log 落盘");
     // 覆盖安装必须真的换掉字节，否则「升级」只是把旧文件又装了一遍。
     assert!(sh.contains("HASH_A"), "I-f FAIL Linux/macOS 没有比对覆盖前后的字节摘要");
@@ -198,6 +202,10 @@ fn i_h_reverse_judgements_are_not_vacuous() {
         "I-h FAIL 旧 publish 依赖被误判为已含安装冒烟");
     // 只查清单能不能下载、不验签的假通道冒烟
     let fake = "  const m = await (await fetch(u)).json();\n  console.log(m.version);\n";
+    // 调用运算符跑 GUI 子系统进程：不等待、读不到 stdout，形似有判据实则空转。
+    let lazy = "function RunExe($exe, $argv) { (@(& $exe @argv 2>&1) -join \"`n\") + \"exit=$LASTEXITCODE\" }";
+    assert!(!lazy.contains("RedirectStandardOutput") && !lazy.contains("WaitForExit"),
+        "I-h FAIL 调用运算符形态被判为已接管输出与等待");
     assert!(!fake.contains("crypto.verify"), "I-h FAIL 无验签的脚本被误判为通过 I-e");
     // 把安装换成「解包看看」的假安装冒烟
     let fake_install = "dpkg-deb -f pkg.deb Version\ntar xf pkg.deb\n";

@@ -227,7 +227,7 @@ GitHub **永远不会执行**它；但 `docs/RELEASE-AND-BUILD-DECISION.md` 与 
 | I-c | 该 job 结构上拿不到构建产物（出现 `target/debug` / `cargo build` 即判失败）|
 | I-d | `publish` 必须 `needs` 安装冒烟 |
 | I-e | `published-channel-smoke` 只在 tag 发布成功或手工触发跑，且校验脚本真的从 `tauri.conf.json` 端点取清单、验 key id、验签、比字节 |
-| I-f | 装机判据读的是**结论**：自报版本 + 包管理器版本 + identity.json/shell.log 落盘 + 覆盖后字节变化（按版本分流）|
+| I-f | 装机判据读的是**结论**：自报版本 + 包管理器版本 + identity.json/shell.log 落盘 + 覆盖后字节变化（按版本分流）；Windows 探针必须自己接管 stdout 并等待（壳是 GUI 子系统进程，调用运算符读不到输出也等不到退出）|
 | I-g | 伪内核夹具单源（workflow 内不得再内联第二份）|
 | I-h | 反向：以上判据能识别「只解包不安装」「只下载不验签」的假冒烟形态 |
 

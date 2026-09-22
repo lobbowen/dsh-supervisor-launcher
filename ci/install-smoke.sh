@@ -116,7 +116,7 @@ chain_plan() {
   out=$("$BIN" --node-plan 2>&1) || fail node-plan "装好的壳 --node-plan 退出非零：$out"
   printf '%s\n' "$out"
   for key in node= node_probe_candidates= latest_lts= mirror_selected=; do
-    printf '%s\n' "$out" | grep -q "^${key}" || fail node-plan "--node-plan 输出缺 $key（结论未产出）"
+    printf '%s\n' "$out" | grep -q "^${key}" || fail node-plan "--node-plan 输出缺 ${key}（结论未产出）"
   done
   out=$("$BIN" --platform-matrix 2>&1) || fail matrix "装好的壳 --platform-matrix 退出非零：$out"
   printf '%s\n' "$out"
@@ -124,7 +124,7 @@ chain_plan() {
 }
 
 if [ "$OS" = Darwin ]; then install_macos "$A" A; else install_linux "$A"; fi
-if [ "$AVER" = "$BVER" ]; then echo "提示：A 与 B 同为 $AVER（本次未提升版本），只验覆盖安装与字节替换"; fi
+if [ "$AVER" = "$BVER" ]; then echo "提示：A 与 B 同为 ${AVER}（本次未提升版本），只验覆盖安装与字节替换"; fi
 probe "$BIN" "$AVER" "$PKG_VER" A
 HASH_A=$(hash_of "$BIN")
 
@@ -134,7 +134,7 @@ HASH_B=$(hash_of "$BIN")
 # 版本串一致而字节未变 = 覆盖安装没真的换掉文件；这是唯一能区分「装上了新的」的独立证据。
 # 只在两版号不同时判：同版本构建（未提升版本的 PR）产物可逐字节相同，那条判据不成立。
 if [ "$AVER" != "$BVER" ] && [ "$HASH_A" = "$HASH_B" ]; then
-  fail upgrade "覆盖安装后二进制字节没变（sha256=$HASH_B）"
+  fail upgrade "覆盖安装后二进制字节没变（sha256=${HASH_B}）"
 fi
 chain_plan
 if [ "$OS" = Linux ]; then chain_linux; fi

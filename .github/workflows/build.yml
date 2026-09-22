@@ -195,7 +195,7 @@ jobs:
           fi
           printf '%s\n' "$OUT"
           for key in node= node_probe_candidates= latest_lts= mirror_selected=; do
-            grep -q "^${key}" <<<"$OUT" || { echo "--node-plan 输出缺 $key（结论未产出）"; exit 1; }
+            grep -q "^${key}" <<<"$OUT" || { echo "--node-plan 输出缺 ${key}（结论未产出）"; exit 1; }
           done
         working-directory: src-tauri
 
@@ -474,7 +474,7 @@ jobs:
             find "$GITHUB_WORKSPACE/pkgs/b" -type f | head -40
             exit 1
           fi
-          echo "B = $B（ver=${{ needs.version.outputs.ver }}）"
+          echo "B = ${B}（ver=${{ needs.version.outputs.ver }}）"
           bash ci/install-smoke.sh "$A_FILE" "$A_VER" "$B" "${{ needs.version.outputs.ver }}" \
             "$RUNNER_TEMP/install-smoke"
 
@@ -641,5 +641,5 @@ jobs:
           VER="${VER#v}"
           ARGS=""
           if [ -d dist/artifacts ]; then ARGS="--artifact-dir dist/artifacts"; fi
-          echo "复核版本 = $VER；artifact 比对 = ${ARGS:-关闭}"
+          echo "复核版本 = ${VER}；artifact 比对 = ${ARGS:-关闭}"
           node shell-release/verify-channel.js --ver "$VER" $ARGS

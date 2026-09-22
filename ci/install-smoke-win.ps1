@@ -22,12 +22,28 @@ function NormalizedPath([string]$p) {
 }
 
 # PS 7.3 起，native 命令的 stderr 在 ErrorActionPreference=Stop 下会变成终止性异常，
-# 于是「探针正常产出的警告行」能把这一步判红。跑外部程序时一律降到 Continue，判定交给退出码。
+# 于是「探针正常产出的警告行」能把这一步判红。
+# 为什么必须自己起进程而不用调用运算符：壳是 GUI 子系统的可执行文件，`& exe` 不等待它、
+# 也不接它的 stdout —— 探针行直接落进虚空，$LASTEXITCODE 还是空，判据读不到任何东西。
+# 两个管道各起一个异步读，否则子进程写满 stderr 缓冲会与父进程的 stdout 读互相锁死。
 function RunExe([string]$exe, [string[]]$argv) {
-    $prev = $ErrorActionPreference
-    $ErrorActionPreference = 'Continue'
-    try { (@(& $exe @argv 2>&1) -join "`n") + "`nexit=$LASTEXITCODE" }
-    finally { $ErrorActionPreference = $prev }
+    $psi = [System.Diagnostics.ProcessStartInfo]::new()
+    $psi.FileName = $exe
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.CreateNoWindow = $true
+    $psi.StandardOutputEncoding = [System.Text.Encoding]::UTF8
+    $psi.StandardErrorEncoding = [System.Text.Encoding]::UTF8
+    foreach ($a in $argv) { $psi.ArgumentList.Add($a) }
+    $p = [System.Diagnostics.Process]::Start($psi)
+    $so = $p.StandardOutput.ReadToEndAsync()
+    $se = $p.StandardError.ReadToEndAsync()
+    if (-not $p.WaitForExit(600000)) {
+        try { $p.Kill(); $p.WaitForExit() } catch { }
+        Fail probe "$exe 在 10 分钟内未退出"
+    }
+    (($so.Result + $se.Result).TrimEnd()) + "`nexit=$($p.ExitCode)"
 }
 
 function RunExit([string]$text) {
@@ -67,7 +83,7 @@ function Find-InstalledExe {
 function Resolve-InstalledExe([string]$tag) {
     for ($i = 0; $i -lt 30; $i++) {
         $exe = Find-InstalledExe
-        if ($exe) { return $exe }
+        if ($exe) { Write-Host "[$tag] 已装二进制 = $exe"; return $exe }
         Start-Sleep -Seconds 2
     }
     $cand = @(Get-ChildItem -Path $env:LOCALAPPDATA -Filter 'dsh-supervisor*.exe' -File -Recurse -ErrorAction SilentlyContinue |
@@ -94,7 +110,7 @@ function ProbeInstalled([string]$exe, [string]$ver, [string]$tag) {
     Write-Host $out
     if ((RunExit $out) -ne 0) { Fail probe "$tag 的 --shell-update-plan 退出码非零" }
     if ($out -notmatch "(?m)^shell_version=$([regex]::Escape($ver))") {
-        Fail probe "$tag 装后的二进制自报版本不是 $ver（跑的不是这份安装包）"
+        Fail probe "$tag 装后的二进制自报版本不是 ${ver}（跑的不是这份安装包）"
     }
     if ($out -notmatch ('state_dir=' + [regex]::Escape((NormalizedPath $script:StateDir)))) {
         if ($out -notmatch ('state_dir=' + [regex]::Escape($script:StateDir))) {
@@ -137,13 +153,13 @@ $exeB = Resolve-InstalledExe 'B'
 ProbeInstalled $exeB $VerB 'B'
 $hashB = HashOf $exeB
 # 版本串一致而字节未变 = 覆盖安装没换掉文件。同版本构建可逐字节相同，故只在版本不同时判。
-if (($VerA -ne $VerB) -and ($hashA -eq $hashB)) { Fail upgrade "覆盖安装后二进制字节没变（sha256=$hashB）" }
+if (($VerA -ne $VerB) -and ($hashA -eq $hashB)) { Fail upgrade "覆盖安装后二进制字节没变（sha256=${hashB}）" }
 
 $plan = RunExe $exeB @('--node-plan')
 Write-Host $plan
 if ((RunExit $plan) -ne 0) { Fail node-plan "装好的壳 --node-plan 退出码非零" }
 foreach ($key in @('node=', 'node_probe_candidates=', 'latest_lts=', 'mirror_selected=')) {
-    if ($plan -notmatch "(?m)^$([regex]::Escape($key))") { Fail node-plan "--node-plan 输出缺 $key（结论未产出）" }
+    if ($plan -notmatch "(?m)^$([regex]::Escape($key))") { Fail node-plan "--node-plan 输出缺 ${key}（结论未产出）" }
 }
 $matrix = RunExe $exeB @('--platform-matrix')
 Write-Host $matrix
