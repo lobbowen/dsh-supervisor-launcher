@@ -66,6 +66,18 @@ GitHub **永远不会执行**它；但 `docs/RELEASE-AND-BUILD-DECISION.md` 与 
 | H7 | 产物验收（同源验签 + 清单契约）| `cargo test --test updater_artifacts` | **仅 CI**，且只在 `refs/tags/v*` 执行（无密钥构建本就产不出 `.sig`）| 是 |
 | H8 | 发布（tag `v*`）| `publish` job：归拢产物 → `node shell-release/make-manifest.js` → `npm publish` | **仅 CI** | 是 |
 | H9 | 发布后验证 | 见第 5 节 | CI 结论 + registry 查询 | 是 |
+| H10 | **安装冒烟**（四平台）| `bash ci/install-smoke.sh <A> <Aver> <B> <Bver> <工作目录>`（Linux/macOS）/ `pwsh ci/install-smoke-win.ps1`（Windows）：装 A -> 读结论 -> 覆盖装 B -> 校验字节真的换了 -> 跑装好的那份二进制 | **仅 CI**（`install-smoke` job，四平台矩阵）| 是（**挡住 `publish`**）|
+| H11 | 发布通道冒烟 | `node shell-release/verify-channel.js --ver <ver> [--artifact-dir <dir>]`：从 `tauri.conf.json` 的端点取清单、逐平台验签、比对产物字节 | **仅 CI**（`published-channel-smoke` job，tag 发布成功后 / `workflow_dispatch`）| 是 |
+
+> **H10 为什么独立成 job 而不是 build 里的一步**：build 的四条腿跑的是 `./target/debug/` 下的构建产物，
+> 它证明不了「用户装进系统里的那份字节能不能起」。判据必须**拿不到**构建树才算数，
+> 所以安装冒烟只能消费 `actions/download-artifact` 与 GitHub Release 里的包（由 `installer_smoke_coverage_test.rs` 的 I-c 钉住）。
+>
+> **H10 的 A/B 语义**：A = 上一个**已发布**版本的安装包（`gh release download`），B = 本次构建产物。
+> 先装 A 再覆盖装 B 就是用户的升级路径；只装 B 只能证明「装得上」，证明不了「升得上」。
+> 版本未提升时 A 与 B 同号，此时产物可逐字节相同，故「覆盖后字节必须变」只在两版号不同时判。
+>
+> **H10 不覆盖**：应用内更新器的下载与应用动作（H7 判签名与清单契约、H11 判通道字节、H10 判装与起）。
 
 ## 2. 平台矩阵（4 平台，唯一来源 = CI 矩阵）
 
@@ -107,7 +119,9 @@ GitHub **永远不会执行**它；但 `docs/RELEASE-AND-BUILD-DECISION.md` 与 
 |---|---|---|
 | `version` | 总是 | 读版本 + **校验三处一致**（`verify-shell-versions.js`）|
 | `build` | 总是（4 平台矩阵）| 门禁测试 → 无头冒烟 → 构建打包 → glibc 门禁 → 组装壳包 → 产物验收 → 上传；tag 时挂 Release |
-| `publish` | tag `v*` | 归拢四平台产物 → 生成并校验 `shell-manifest.json` → 发布 npm 壳包 |
+| `install-smoke` | 总是（4 平台矩阵）| **H10 安装冒烟**：取上一已发布版本的包（A）+ 本次产物（B），装 A -> 覆盖装 B -> 只跑装进系统里的那份字节 |
+| `publish` | tag `v*` | 归拢四平台产物 → 生成并校验 `shell-manifest.json` → 发布 npm 壳包（**`needs: install-smoke`**）|
+| `published-channel-smoke` | tag 发布成功后 / `workflow_dispatch(ver=…)` | **H11 通道冒烟**：按客户端端点取清单、逐平台验签、比对字节 |
 
 > `pull_request` 触发器于 2026-09-13 补入：此前 PR **完全不跑 CI**，
 > 若直接设 required status check 会让 PR **永久等待一个永不出现的状态**。
@@ -126,16 +140,22 @@ GitHub **永远不会执行**它；但 `docs/RELEASE-AND-BUILD-DECISION.md` 与 
 > 注意 required 的 context **内嵌矩阵参数**（Linux 腿 = `build (ubuntu-22.04, linux-x64, deb, 2.35)`）。
 > **改平台矩阵（含 bundles）时必须同步更新分支保护**，否则旧语境永不出现 → 所有 PR 阻塞。
 
+> `install-smoke` 的四条腿语境（`install-smoke (<os>, <artifact>, <pkg_glob>)`）**目前不在** required 列表里：
+> 它已在产线上挡住 `publish`（装不上的包发不出去），但「PR 未过安装冒烟不得合入」要等服务端
+> `PUT /branches/main/protection` 写入并以 `GET` 读回才算成立。**本文档不声称已启用**，
+> 以服务器端读回为准（同上一段「服务器端配置不随仓迁移」的教训）。
+
 ## 5. 发布后验证（H9）
 
 | 项 | 位置 | 期望 |
 |---|---|---|
 | npm 壳包四平台 | `npm view @dsh-sup/shell-<platform>@<ver> version` ×4 | 四者皆等于目标版本 |
 | 清单包 | `npm view @dsh-sup/shell-release dist-tags` | 指向新版本 |
-| 清单签名钥匙 | 取清单，逐条把 `platforms.*.signature` base64 解出文本，再解其中**第二行**（签名 blob）的第 2..10 字节按小端转 hex | 四条**全等于** `tauri.conf.json` 内置公钥的 key id |
+| 清单签名钥匙 | 取清单，逐条把 `platforms.*.signature` base64 解出文本，再解其中**第二行**（签名 blob）的第 2..10 字节按小端转 hex | 四条**全等于** `tauri.conf.json` 内置公钥的 key id（H11 已按同一口径自动判，此处是人工复核口径）|
 | GitHub Release | tag `v<ver>` | 四平台安装包附件齐备 |
-| CI 结论 | tag run | version + 四平台 build + publish 全绿 |
-| 安装冒烟 | 各平台安装包 | 能装、能起、能更新 |
+| CI 结论 | tag run | version + 四平台 build + 四平台 install-smoke + publish + published-channel-smoke 全绿 |
+| 安装冒烟 | `install-smoke` job（H10，四平台）| 已由 CI 执法：装得上、装好的二进制自报版本、覆盖升级换了字节、Linux 腿起得到 `/healthz` 就绪。**不再是人工项** |
+| 更新通道 | `published-channel-smoke` job（H11）| 主端点清单可取、四平台 url+signature 齐、签名对得上配置公钥、（tag 构建）字节与本次产物一致 |
 
 > **清单是嵌套两层编码**：`signature` 字段本身是 base64，解出来是 minisign 的**四行文本**
 > （untrusted comment / 签名 blob / trusted comment / global signature），钥匙 id 只在**第二行**那个 blob 里。
@@ -198,6 +218,19 @@ GitHub **永远不会执行**它；但 `docs/RELEASE-AND-BUILD-DECISION.md` 与 
 | R-9 | `scripts/` 下无本地构建/发布脚本（硬标准：仅 CI 构建与发布）|
 | R-10 | CI 矩阵的每个 artifact 都在 `assemble-shell-pkg.js` 的 `PLATFORMS` 里（防「能构建但组装不了」）|
 
+`src-tauri/tests/installer_smoke_coverage_test.rs` 校验安装/通道冒烟**真的存在且真的安装**：
+
+| 组 | 校验 |
+|---|---|
+| I-a | `install-smoke` job 存在、四平台矩阵齐、`needs: [version, build]`、既有取 A（Release）也有取 B（artifact）的步骤 |
+| I-b | 每条腿真的执行平台安装动词（`sudo dpkg -i` / `hdiutil attach` + `cp -R` / NSIS `/S`），并从包管理器侧定位实际落盘二进制 |
+| I-c | 该 job 结构上拿不到构建产物（出现 `target/debug` / `cargo build` 即判失败）|
+| I-d | `publish` 必须 `needs` 安装冒烟 |
+| I-e | `published-channel-smoke` 只在 tag 发布成功或手工触发跑，且校验脚本真的从 `tauri.conf.json` 端点取清单、验 key id、验签、比字节 |
+| I-f | 装机判据读的是**结论**：自报版本 + 包管理器版本 + identity.json/shell.log 落盘 + 覆盖后字节变化（按版本分流）|
+| I-g | 伪内核夹具单源（workflow 内不得再内联第二份）|
+| I-h | 反向：以上判据能识别「只解包不安装」「只下载不验签」的假冒烟形态 |
+
 ```json shell-release-pipeline
 {
   "version": 1,
@@ -206,15 +239,21 @@ GitHub **永远不会执行**它；但 `docs/RELEASE-AND-BUILD-DECISION.md` 与 
     "scripts/verify-shell-versions.js",
     "shell-release/assemble-shell-pkg.js",
     "shell-release/make-manifest.js",
+    "shell-release/verify-channel.js",
     "shell-release/version-vectors.json",
     "ci/check-glibc.sh",
+    "ci/fake-core.js",
+    "ci/install-smoke.sh",
+    "ci/install-smoke-win.ps1",
     ".github/workflows/build.yml"
   ],
   "ciWorkflow": ".github/workflows/build.yml",
   "ciJobs": [
     "version",
     "build",
-    "publish"
+    "install-smoke",
+    "publish",
+    "published-channel-smoke"
   ],
   "tagPattern": "v*",
   "matrix": [

@@ -13,7 +13,13 @@ on:
   # （GitHub 会等一个永不出现的状态 → PR 永久合不进去）。
   pull_request:
     branches: [main]
-  workflow_dispatch: {}
+  # workflow_dispatch 只为「发布通道冒烟」留一个可复核历史版本的入口（ver = 已发布版本号）。
+  workflow_dispatch:
+    inputs:
+      ver:
+        description: '要复核的已发布版本（如 1.2.6，留空 = 用当前仓库版本）'
+        required: false
+        default: ''
 
 # 平台矩阵不变量：
 #  · Linux 基座固定 ubuntu-22.04（glibc 2.35），且**只出 deb**：支持面 = Ubuntu，
@@ -215,25 +221,9 @@ jobs:
           # 高位端口：不与 runner 上任何服务抢；被占用时伪内核会顺延并如实持久化（与真实内核同语义）。
           printf '{"apiPort":39111}\n' > "$STATE/supervisor/config.json"
           printf '{"name":"dsh-supervisor-fake","version":"9.9.9"}\n' > "$PKG/package.json"
-          cat > "$PKG/bin/dsh-supervisor" <<'JS'
-          #!/usr/bin/env node
-          const http = require('http'), fs = require('fs'), path = require('path');
-          const dir = path.join(process.env.DSH_SUPERVISOR_HOME, 'supervisor');
-          let port = JSON.parse(fs.readFileSync(path.join(dir, 'config.json'), 'utf8')).apiPort;
-          const srv = http.createServer((req, res) => {
-            if (req.url.startsWith('/healthz')) { res.writeHead(200, { 'content-type': 'text/plain' }); res.end('ok'); return; }
-            res.writeHead(404).end();
-          });
-          // 端口被占则顺延，并把**实际**端口写进 ports.json —— 壳的 await_ready 每 tick 重读它。
-          srv.on('error', (e) => { if (e.code !== 'EADDRINUSE') { console.error(e); process.exit(1); } srv.close(); port += 1; listen(); });
-          function listen() {
-            srv.listen(port, '127.0.0.1', () => {
-              fs.writeFileSync(path.join(dir, 'ports.json'), JSON.stringify({ records: [{ role: 'supervisor-api', port }] }));
-              console.log('[fake-core] healthz on ' + port);
-            });
-          }
-          listen();
-          JS
+          # 夹具随仓携带（ci/fake-core.js）：启动链冒烟与安装冒烟必须用同一份伪内核，
+          # 否则「H3 里成立的行为」与「H10 里成立的行为」可以各自漂移。
+          cp "$GITHUB_WORKSPACE/ci/fake-core.js" "$PKG/bin/dsh-supervisor"
           chmod +x "$PKG/bin/dsh-supervisor"
           # 位置契约（core.json）= 壳安装成功后写入的事实源；这里直接伪造它，避免真装内核。
           printf '{"schema":1,"bin":"%s","version":"9.9.9","source":"ci-fake"}\n' "$PKG/bin/dsh-supervisor" \
@@ -404,10 +394,112 @@ jobs:
             src-tauri/target/release/bundle/**/*.sig
           generate_release_notes: true
 
+  # ── 安装冒烟：装的是发布形态的安装包，跑的是**装进系统里**的那份字节 ──
+  # 为什么必须独立成 job：上面所有冒烟跑的都是 ./target/debug 下的构建产物，
+  #   它证明不了「用户 sudo apt install / 拖 .dmg / 静默装 .exe 之后能不能起来」。
+  #   真机报障「进面板 127.0.0.1 拒绝连接」正是装机形态的问题，构建产物形态看不见。
+  # A/B 两个包：A = 上一个已发布版本（GitHub Release 上取），B = 本次构建产物；
+  #   先装 A 再覆盖装 B 就是用户的升级路径。判据细节在 ci/install-smoke*.sh|ps1 里。
+  install-smoke:
+    needs: [version, build]
+    permissions:
+      contents: read   # 只下载公开 Release 资产
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            artifact: linux-x64
+            pkg_glob: '*.deb'
+          - os: windows-latest
+            artifact: win-x64
+            pkg_glob: '*_x64-setup.exe'
+          - os: macos-latest
+            artifact: darwin-arm64
+            pkg_glob: '*_aarch64.dmg'
+          - os: macos-15-intel
+            artifact: darwin-x64
+            pkg_glob: '*_x64.dmg'
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 取 A（上一个已发布版本的安装包）
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/pkgs/a"
+          # tag 构建时 Release 已由 build job 建好，A 必须是**它之前**的那个版本，
+          # 否则 A 与 B 同源，升级路径就没被走过。
+          SELF=""
+          [[ "${GITHUB_REF}" == refs/tags/v* ]] && SELF="${GITHUB_REF_NAME}"
+          A_TAG=""
+          for t in $(gh release list --repo "$GITHUB_REPOSITORY" --limit 30 --json tagName -q '.[].tagName'); do
+            [ "$t" = "$SELF" ] && continue
+            A_TAG="$t"
+            break
+          done
+          [ -n "$A_TAG" ] || { echo "::error::找不到可作 A 的已发布版本"; exit 1; }
+          gh release download "$A_TAG" --repo "$GITHUB_REPOSITORY" --clobber \
+            --pattern "${{ matrix.pkg_glob }}" --dir "$RUNNER_TEMP/pkgs/a"
+          A_FILE=$(find "$RUNNER_TEMP/pkgs/a" -type f | head -1)
+          if [ -z "$A_FILE" ]; then
+            echo "::error::$A_TAG 的 Release 里没有匹配 ${{ matrix.pkg_glob }} 的资产"
+            gh release view "$A_TAG" --repo "$GITHUB_REPOSITORY" --json assets -q '.assets[].name'
+            exit 1
+          fi
+          {
+            echo "A_TAG=$A_TAG"
+            echo "A_FILE=$A_FILE"
+            echo "A_VER=${A_TAG#v}"
+          } >> "$GITHUB_ENV"
+          echo "A = $A_TAG -> $A_FILE"
+
+      - name: 取 B（本次构建产物）
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: pkgs/b
+
+      - name: 安装冒烟（Linux / macOS）
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          B=$(find "$GITHUB_WORKSPACE/pkgs/b" -type f -name "${{ matrix.pkg_glob }}" | head -1)
+          if [ -z "$B" ]; then
+            echo "::error::本次产物里没有 ${{ matrix.pkg_glob }}，实际文件如下"
+            find "$GITHUB_WORKSPACE/pkgs/b" -type f | head -40
+            exit 1
+          fi
+          echo "B = $B（ver=${{ needs.version.outputs.ver }}）"
+          bash ci/install-smoke.sh "$A_FILE" "$A_VER" "$B" "${{ needs.version.outputs.ver }}" \
+            "$RUNNER_TEMP/install-smoke"
+
+      - name: 安装冒烟（Windows）
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $B = Get-ChildItem -Path "$env:GITHUB_WORKSPACE/pkgs/b" -Recurse -File -Filter '*_x64-setup.exe' |
+            Select-Object -First 1
+          if (-not $B) {
+            Write-Host '::error::本次产物里没有 NSIS 安装程序'
+            Get-ChildItem -Path "$env:GITHUB_WORKSPACE/pkgs/b" -Recurse -File |
+              Select-Object -First 40 | ForEach-Object { Write-Host $_.FullName }
+            exit 1
+          }
+          Write-Host "B = $($B.FullName)（ver=${{ needs.version.outputs.ver }}）"
+          & ./ci/install-smoke-win.ps1 -InstallerA $env:A_FILE -VerA $env:A_VER `
+            -InstallerB $B.FullName -VerB '${{ needs.version.outputs.ver }}' `
+            -Work "$env:RUNNER_TEMP/install-smoke"
+
   # ── 发布 job：汇总各平台产物 → 生成 Tauri 静态清单 → 发布到 npm ──
   # 仅在 tag 触发时执行（日常构建只做验证与产物上传）。
   publish:
-    needs: [version, build]
+    # 装不上的安装包发出去就是「用户升级到坏版本」的唯一来源；发布前必须先过安装冒烟。
+    needs: [version, build, install-smoke]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
@@ -513,3 +605,41 @@ jobs:
           }, null, 2) + '\n');
           "
           (cd "$REL" && npm publish --access public $TAG)
+
+  # ── 发布通道冒烟：从用户真正读到的端点取清单，逐平台验签与比对字节 ──
+  # 与 install-smoke 的分工：那边验「装得上、起得来」，这边验「发出去的东西本身对」。
+  # 只在 tag 发布成功后跑；ver 入参让它能在发布当天之后复核历史版本
+  # （历史版本没有本次构建产物，只验清单与签名，脚本会在结论里如实说明未比对字节）。
+  published-channel-smoke:
+    # publish 在非 tag 上是 skipped：always() 让手工触发仍能跑，
+    # 而 tag 上要求它真成功（发布没成的通道无从验起）。
+    needs: [version, publish]
+    if: ${{ always() && (github.event_name == 'workflow_dispatch' || (startsWith(github.ref, 'refs/tags/v') && needs.publish.result == 'success')) }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: 下载本次构建产物（仅 tag 构建可比对字节）
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/artifacts
+
+      - name: 校验已发布通道（清单可取 + 同源验签 + 字节一致）
+        shell: bash
+        run: |
+          set -euo pipefail
+          VER="${{ inputs.ver || needs.version.outputs.ver }}"
+          VER="${VER#v}"
+          ARGS=""
+          if [ -d dist/artifacts ]; then ARGS="--artifact-dir dist/artifacts"; fi
+          echo "复核版本 = $VER；artifact 比对 = ${ARGS:-关闭}"
+          node shell-release/verify-channel.js --ver "$VER" $ARGS

@@ -2,6 +2,29 @@
 
 本文件记录桌面壳（`dsh-supervisor-gui`，公开仓 `lobbowen/dsh-supervisor-launcher`）的重要变更。
 
+## [未发布]
+
+### 安装冒烟与发布通道冒烟进产线（补齐 1.2.3 以来缺失的那一层）
+
+`docs/RELEASE-STANDARD.md` §5 一直承诺「安装冒烟 | 各平台安装包 | 能装、能起、能更新」，
+但产线里从来没有一步安装过包：H3 的全部判据跑的都是 `./target/debug/` 下的构建产物。
+装机形态（deb 落盘 / dmg 复制 / NSIS 静默装 -> 覆盖升级 -> 装好的那份二进制起得来）因此从未被执行过，
+而真机报障正落在这条路径上。本版把它变成 CI 判据，不含产品代码变化。
+
+- H10 `install-smoke` job（四平台矩阵，`ci/install-smoke.sh` + `ci/install-smoke-win.ps1`）：
+  A = 上一个已发布版本的安装包（`gh release download`），B = 本次构建产物；先装 A 再覆盖装 B
+  就是用户的升级路径。每次安装后读四项独立事实：二进制自报版本、包管理器记录的版本、
+  `identity.json` 里的 exe 就是刚装进去的那份、`shell.log` 有对应启动行；覆盖安装后比对 sha256
+  确认字节换了（版本未提升时产物可逐字节相同，故该判据按版本分流）。Linux 腿额外把装好的壳
+  跑到 `/healthz` 判就绪。`publish` 改为 `needs: install-smoke`：装不上的包发不出去。
+- H11 `published-channel-smoke` job（`shell-release/verify-channel.js`）：端点与公钥都从
+  `tauri.conf.json` 读（不再另写一份 URL，那就会与真客户端漂移），主端点必须取到目标版本的
+  完整清单，逐平台比对签名 key id、用配置公钥验签、sha256 核对下载字节；tag 构建还比对
+  通道字节与本次产物是否逐字节一致。`workflow_dispatch(ver=…)` 是复核历史已发布版本的入口。
+- 伪内核夹具收为单源（`ci/fake-core.js`）：H3 与 H10 共用，不再在 workflow 里内联第二份。
+- 门禁：`src-tauri/tests/installer_smoke_coverage_test.rs`（I-a..I-h）钉住以上全部形态，
+  含「只解包不安装」「只下载不验签」两种假冒烟形态的反向判据。
+
 ## [1.2.6]（2026-09-23）
 
 本版是 1.2.5 那条判据的接续收口：真机回报「没有任何改变，进内核就是 127.0.0.1 拒绝连接」，
