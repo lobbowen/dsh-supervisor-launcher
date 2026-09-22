@@ -87,6 +87,33 @@
     var panelUrl = null;
     var retried = 0;
     var loadPanel = function (u) { panelUrl = u; frame.src = u; };
+    // 回引导页 = 全仓唯一的恢复链（那里重跑 guard_start 与就绪轮询）。引导页是**独立主帧页面**，
+    //   只能主帧导航，不能再塞进 iframe。
+    var backToBootstrap = function () {
+      try { window.location.replace('bootstrap.html'); } catch (e) {}
+    };
+    // 有界等守卫就绪后再重载面板（内核更新后专用）。
+    // 固定延时导航会把「新守卫还没听完端口」变成引擎自己的拒绝连接页，而 iframe 被拒不触发
+    //   error 事件、本页永不重试；URL 也必须现取，守卫可能因端口被占而顺延。
+    var reloadPanelWhenReady = function (n) {
+      if (!core) return;
+      var retry = function () {
+        if (n >= 40) return backToBootstrap(); // 20s 仍不服役：交回引导页，不做无判据导航
+        setTimeout(function () { reloadPanelWhenReady(n + 1); }, 500);
+      };
+      core.invoke('guard_ready').then(function (r) {
+        if (!r || !r.ready) return retry();
+        return core.invoke('shell_panel_url').then(function (p) {
+          var u = (p && p.url) || panelUrl;
+          if (!u) return;
+          if (p.serving === false) return retry(); // 就绪探针刚过又掉了：继续等，别投未判据的 URL
+          panelUrl = u;
+          retried = 0;
+          var sep = u.indexOf('?') >= 0 ? '&' : '?';
+          frame.src = u + sep + 'dsh_retry=' + Date.now();
+        }).catch(function () {});
+      }).catch(retry);
+    };
 
     // 引导完成 → 内容区切到面板
     if (evt) {
@@ -98,10 +125,7 @@
         // force=true（用户重新显示窗口）→ 强制重载取最新 UI；否则同 URL 不重载（守卫重启延时重发不刷面板）
         if (p.force || u !== frame.src) { retried = 0; frame.src = u; }
       });
-      evt.listen('shell:goto-bootstrap', function () {
-          // 引导页已是**独立主帧页面**，回退 = 主帧导航（不能再放进 iframe）
-          try { window.location.replace('bootstrap.html'); } catch (e) {}
-        });
+      evt.listen('shell:goto-bootstrap', function () { backToBootstrap(); });
     }
     // 面板加载失败兜底（守卫尚未就绪/瞬时错误）：同一 URL 最多重试 2 次（一次性 nonce 破缓存）
     frame.addEventListener('error', function () {
@@ -155,7 +179,12 @@
       }).catch(function () {}).then(function () {
         if (panelUrl === null) {
           core.invoke('shell_panel_url').then(function (r) {
-            if (r && r.url) loadPanel(r.url);
+            // 主帧加载是全仓唯一**必然发生**的面板导航，判据必须在这里，不能只放在 Rust 的
+            //   goto-panel 那一侧：未服役就把 URL 交给 iframe，用户看到的是引擎自己的
+            //   「127.0.0.1 拒绝连接」，而 iframe 被拒不触发 error 事件、本页无从重试。
+            if (!r) return;
+            if (r.serving === false) return backToBootstrap();
+            if (r.url) loadPanel(r.url);
           }).catch(function () {});
         }
       });
@@ -205,13 +234,8 @@
           restartUncertain: !!(r && r.restartUncertain),
           error: (r && r.error) || null,
         });
-        // K5：重启成功后重载面板 iframe（守卫已换新二进制）；延后以便结果先送达面板。
-        if (ok && panelUrl) {
-          setTimeout(function () {
-            var sep = panelUrl.indexOf('?') >= 0 ? '&' : '?';
-            frame.src = panelUrl + sep + 'dsh_retry=' + Date.now();
-          }, 900);
-        }
+        // K5：重启成功后等守卫重新就绪再重载面板（守卫已换新二进制）。
+        if (ok) reloadPanelWhenReady(0);
       }).catch(function (e) {
         finish({ v: BRIDGE.v, type: BRIDGE.types.result, requestId: rid, ok: false, error: String(e) });
       });

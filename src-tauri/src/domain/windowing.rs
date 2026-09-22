@@ -15,12 +15,11 @@ pub(crate) fn go_panel(app: &tauri::AppHandle, force: bool) {
             //   也可能刚被所有者停掉 —— 直接丢 iframe 只会得到引擎自己的错误页（WebKit 对被拒的
             //   iframe 导航不触发 error 事件，shell.html 的重试兜底形同不存在）。最后一拍仍不在
             //   服役就回引导页，那里重跑 guard_start 与就绪轮询；URL 现取（守卫可能已顺延端口）。
-            let serving = matches!(
-                crate::domain::guardctl::serving_state(crate::env::current_api_port()),
-                crate::domain::guardctl::Serving::Alive
-            );
+            // 判据与 URL 必须同出一个答案（`panel_view`）：主帧加载那条导航路径不经本函数，
+            //   在此单独判一次服役并不能阻止它按未判据的 URL 抢先导航。
+            let (url, serving) = crate::domain::guardctl::panel_view();
             if serving {
-                let _ = h.emit("shell:goto-panel", serde_json::json!({ "url": crate::env::api_base_url(), "seq": i, "force": force }));
+                let _ = h.emit("shell:goto-panel", serde_json::json!({ "url": url, "seq": i, "force": force }));
             } else if i + 1 == 3 {
                 let _ = h.emit("shell:goto-bootstrap", serde_json::json!({}));
             }

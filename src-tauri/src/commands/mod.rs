@@ -153,6 +153,9 @@ pub async fn node_latest() -> serde_json::Value {
 /// 由引导页 JS 在展示完整启动过程后触发，避免步骤一闪而过无感知。
 #[tauri::command]
 pub fn finish_boot(app: tauri::AppHandle) -> ShellResult<()> {
+    // 引导页走完 = 面板即将成为内容，此后守卫的任何失服都必须被看见（看护在此武装，
+    //   回一次引导页后解除，避免与引导页的启动链互相甩）。
+    crate::domain::guardctl::watch_panel(&app);
     crate::domain::windowing::go_panel(&app, false); // 引导完成：URL 变化即导航
     Ok(())
 }
@@ -557,16 +560,22 @@ pub fn win_ctl(app: tauri::AppHandle, action: String) -> ShellResult<()> {
     }
 }
 
-/// 返回控制面板 URL（供壳框架在导航后自行取得面板地址）。
+/// 返回控制面板 URL **与此刻能不能投**（供壳框架在导航后自行取得面板地址）。
 ///
 /// 由壳框架主动索取面板 URL，避免 shell:goto-panel 事件早于 listener 注册而丢失。
+/// `serving` 必须与 URL 同出：主帧加载时是唯一必然发生的面板导航，若它只拿到 URL 而自行
+///   决定不判据，壳就把「拒绝连接」的引擎错误页交给用户，且 iframe 被拒不触发 error 事件、
+///   前端无从重试（真机表现＝进入面板直接 127.0.0.1 拒绝连接）。
 #[tauri::command]
 pub fn shell_panel_url() -> serde_json::Value {
-    let url = crate::env::api_base_url();
-    // 落盘一行：**证明主帧导航确实完成**（引导页转入壳框架）。
+    let (url, serving) = crate::domain::guardctl::panel_view();
+    // 落盘一行：**证明主帧导航确实完成**（引导页转入壳框架），并带上判据结论。
     // 这条日志也是可观测性的关键一环：从 shell.log 就能看出卡在引导页还是壳框架。
-    crate::update::log(&format!("壳框架就绪（主帧导航完成），面板 URL: {}", url));
-    serde_json::json!({ "url": url })
+    crate::update::log(&format!(
+        "壳框架就绪（主帧导航完成），面板 URL: {} · 服役判定={}",
+        url, serving
+    ));
+    serde_json::json!({ "url": url, "serving": serving })
 }
 
 /// 壳身份快照（版本/安装形态/自更新能力），供引导页与诊断。
