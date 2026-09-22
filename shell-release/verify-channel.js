@@ -56,12 +56,31 @@ function loadPubKey(conf) {
   const m = /key:\s*([0-9A-Fa-f]+)/.exec(comment);
   if (!m) fail('配置公钥的 untrusted comment 里没有 key id');
   if (m[1].toUpperCase() !== id) fail('配置公钥注释里的 key id ' + m[1].toUpperCase() + ' 与字节算出的 ' + id + ' 不符');
-  return { id, keyId: raw.subarray(2, 10), key: raw.subarray(10), comment };
+  return { id, keyId: raw.subarray(2, 10), comment };
 }
 
-// 清单里的 signature = base64( keyId(8) + ed25519 签名(64) )，签的是更新产物本身的字节；
-// 校验在下方逐平台做（要同时比对 key id 与产物字节，拆开写反而看不出漏了什么）。
 function sha256(buf) { return crypto.createHash('sha256').update(buf).digest('hex'); }
+
+// 清单里的 signature 是**双层 base64**：外层解出一段 4 行 minisign 文本（untrusted comment /
+// 签名块 / trusted comment / 全局签名），签名块再 base64 解出 alg(2) + keyId(8) + ed25519(64) = 74 字节。
+// 本脚本对它只判两件事：这把钥匙是不是配置里那把（keyId 相等）、这份字节是不是本次构建的那份（sha256 相等）。
+// 「签名本身成不成立」不在这里判 —— 那是 src-tauri/tests/updater_artifacts.rs 的 V2/V3/V4，
+// 它用 tauri-plugin-updater 内部的同一个 minisign-verify crate，与用户端逐字同口径；
+// 在 node 里重实现只有两种结局：口径不对就年年假红，口径错了还判绿。
+function unwrapSig(key, b64, wantKeyId, wantId) {
+  const text = Buffer.from(b64, 'base64').toString('utf8');
+  const lines = text.split(/\r?\n/).filter((l) => l.trim().length);
+  if (lines.length < 2) fail(key + ' 的 signature 不是 minisign 文本块（解出 ' + lines.length + ' 行）');
+  if (!/^untrusted comment: /.test(lines[0])) fail(key + ' 的 signature 首行不是 untrusted comment');
+  const blob = Buffer.from(lines[1], 'base64');
+  if (blob.length !== 74) fail(key + ' 签名块 ' + blob.length + ' 字节，期望 74（alg(2)+keyId(8)+ed25519(64)）');
+  const alg = blob.subarray(0, 2).toString('utf8');
+  if (alg !== 'Ed' && alg !== 'ED') fail(key + ' 签名算法标记是 ' + JSON.stringify(alg) + '，不是 Ed/ED');
+  if (!blob.subarray(2, 10).equals(wantKeyId)) {
+    fail(key + ' 签名的 key id 与配置公钥 ' + wantId + ' 不符 -> 用户端必然验签失败');
+  }
+  return { blob, lines: lines.length };
+}
 
 // 清单键 -> 本次构建产物目录名（与 make-manifest.js 的 platToPkg 同一映射，产物按它分目录）。
 // 必须按键选目录：两个 mac 平台都把更新产物叫 dsh-supervisor.app.tar.gz，只按文件名比对会串台。
@@ -145,19 +164,10 @@ async function main() {
     if (!p || !p.url || !p.signature) fail(key + ' 缺 url 或 signature');
     const bytes = await fetchBuf(p.url, tries);
     const sum = sha256(bytes);
-    const sig = Buffer.from(p.signature, 'base64');
-    if (sig.length !== 72) fail(key + ' 签名长度 ' + sig.length + ' 字节，期望 72（keyId(8)+ed25519(64)）');
-    if (!sig.subarray(0, 8).equals(pub.keyId)) {
-      fail(key + ' 签名的 key id 与配置公钥 ' + pub.id + ' 不符 -> 用户端必然验签失败');
-    }
-    const spki = Buffer.concat([Buffer.from('302a300506032b6570032100', 'hex'), pub.key]);
-    let ok = false;
-    try {
-      ok = crypto.verify(null, bytes, { key: spki, format: 'der', type: 'spki' }, sig.subarray(8));
-    } catch (e) { ok = false; }
-    if (!ok) fail(key + ' 的签名对不上从 ' + p.url + ' 取到的字节');
+    const sig = unwrapSig(key, p.signature, pub.keyId, pub.id);
     const name = decodeURIComponent(path.posix.basename(new URL(p.url).pathname));
-    let line = key + ' 验签通过 sha256=' + sum.slice(0, 12) + ' 字节=' + bytes.length + ' 产物=' + name;
+    let line = key + ' 签名块钥匙 = 配置公钥 ' + pub.id + '（minisign 块 ' + sig.lines + ' 行）'
+      + ' sha256=' + sum.slice(0, 12) + ' 字节=' + bytes.length + ' 产物=' + name;
     if (artDir) {
       const hits = candidates(artDir, key, name);
       if (!hits.length) {
@@ -173,7 +183,8 @@ async function main() {
     }
     console.log(line);
   }
-  console.log('H11 通过：' + ver + ' 在 ' + wantPlatforms.length + ' 个平台端点上清单可取、验签通过'
+  console.log('H11 通过：' + ver + ' 在 ' + wantPlatforms.length + ' 个平台端点上清单可取、签名块钥匙与配置公钥一致 '
+    + pub.id + '（签名有效性由 updater_artifacts V2/V3/V4 以 minisign-verify 判）'
     + (artDir ? '、字节与本次构建产物一致' : '（未比对构建产物字节）'));
 }
 

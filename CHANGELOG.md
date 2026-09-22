@@ -19,11 +19,18 @@
   跑到 `/healthz` 判就绪。`publish` 改为 `needs: install-smoke`：装不上的包发不出去。
 - H11 `published-channel-smoke` job（`shell-release/verify-channel.js`）：端点与公钥都从
   `tauri.conf.json` 读（不再另写一份 URL，那就会与真客户端漂移），主端点必须取到目标版本的
-  完整清单，逐平台比对签名 key id、用配置公钥验签、sha256 核对下载字节；tag 构建还比对
-  通道字节与本次产物是否逐字节一致。`workflow_dispatch(ver=…)` 是复核历史已发布版本的入口。
+  完整清单，逐平台剥出 minisign 签名块、比对 key id、sha256 核对下载字节；tag 构建还比对
+  通道字节与本次产物是否逐字节一致。**签名有效性不在这里判**，那是 H7 `updater_artifacts`
+  的 V2/V3/V4（与用户端同一个 minisign-verify crate）。`workflow_dispatch(ver=…)` 是复核历史已发布版本的入口。
 - 伪内核夹具收为单源（`ci/fake-core.js`）：H3 与 H10 共用，不再在 workflow 里内联第二份。
 - 门禁：`src-tauri/tests/installer_smoke_coverage_test.rs`（I-a..I-h）钉住以上全部形态，
-  含「只解包不安装」「只下载不验签」两种假冒烟形态的反向判据。
+  判据抽成 `missing_channel_checks()` 以便反向样本与正样本用同一把尺子；含「只解包不安装」
+  「只下载清单不读签名」「单层 base64 + `crypto.verify` 的旧验签形态」三种假冒烟的反向判据。
+- H11 首跑（tag v1.2.6 run）判红在 `linux-x86_64 签名长度 329 字节，期望 72`：清单里的
+  `signature` 是**双层 base64**（外层解出 4 行 minisign 文本，第二行再解出 alg(2)+keyId(8)+ed25519(64)=74 字节），
+  且 alg 标记为 prehash 变体 `"ED"` —— Node stdlib 的纯 Ed25519 `crypto.verify` 对已知正确的三元组也验不过，
+  在 node 里重实现只会造成年年假红或口径错了还判绿。改为只判钥匙出处与字节，有效性交给 updater_artifacts；
+  四平台 key id 实测全等于配置公钥 `54A15461E39C8AEF`。
 - 首跑（Linux 腿通过）暴露两个形态缺陷，随本批修掉并各加判据：macOS 腿里紧贴全角括号写 `$B（`，
   bash 在非 UTF-8 语域下吃掉该字符的半个字节，`set -u` 立即判失败；Windows 腿的探针用调用运算符
   跑 GUI 子系统的壳，既不等待也接不到 stdout，探针恒读到空。后者由 I-f 的
