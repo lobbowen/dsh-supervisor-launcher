@@ -771,13 +771,17 @@ mod tests {
             use base64::Engine;
             base64::engine::general_purpose::STANDARD.encode([7u8; 64])
         };
-        let d = dist_meta(&format!(
+        let ok = dist_meta(&format!(
             r#"{{"versions":{{"0.1.6-BETA.3":{{"dist":{{"integrity":"sha512-{b64}"}}}}}}}}"#
         ));
-        assert_eq!(parse_integrity(Some(&d)).map(|v| v.len()), Some(64));
+        assert_eq!(parse_integrity(ok.get("integrity")).map(|v| v.len()), Some(64));
         // 算法不对、长度不对、根本不是 base64 —— 一律「没有校验值」，不拿别的摘要凑数。
-        assert_eq!(parse_integrity(Some(&dist_meta(r#"{"versions":{"0.1.6-BETA.3":{"dist":{"integrity":"sha1-abc"}}}}"#))), None);
-        assert_eq!(parse_integrity(Some(&dist_meta(r#"{"versions":{"0.1.6-BETA.3":{"dist":{"integrity":"sha512-!!!"}}}}"#))), None);
+        for bad in ["sha1-abc", "!!!", "sha512-YQ=="] {
+            let d = dist_meta(&format!(
+                r#"{{"versions":{{"0.1.6-BETA.3":{{"dist":{{"integrity":"{bad}"}}}}}}}}"#
+            ));
+            assert_eq!(parse_integrity(d.get("integrity")), None, "{bad} 不该被当成校验值");
+        }
         assert_eq!(parse_integrity(None), None);
     }
 
