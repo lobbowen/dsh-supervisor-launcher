@@ -437,3 +437,74 @@ fn k13_watchdog_shares_readiness_and_launch_sequence() {
     assert!(code_only(old).contains("Test-NetConnection") && !code_only(old).contains("service_exec_line"),
         "K-13 反向失败：判据空转");
 }
+
+// ── K-15：Windows 定义链的权限边界与通道可观测 ──
+// 真机（用户 Windows 桌面）实测过的一条死路：`/RL HIGHEST` 在非提权进程里必被拒，
+// 「降级重试」又只是把同一条命令少写一个参数再跑一遍，两次都拒绝访问，而报错里
+// 只有两句一模一样的「拒绝访问」。这里把三件事钉住：不请求最高权限、只有权限类失败
+// 才换通道、换到的通道必须是可观测的（start 按通道分派，不假装服务管理器接受了请求）。
+#[test]
+fn k15_windows_definition_permission_boundary() {
+    let w = read("src/platform/windows.rs");
+    let code = code_only(&w);
+    let missing = has_all(&code, &[
+        "fn create_guard_task",
+        "fn ensure_run_key",
+        "fn is_access_denied",
+        "fn read_action_record",
+        "fn write_action_record",
+        r#"HKCU\Software\Microsoft\Windows\CurrentVersion\Run"#,
+        "if !is_access_denied(&why)",
+    ]);
+    assert!(missing.is_empty(), "K-15 失败：Windows 定义链缺要素 {:?}", missing);
+    // 不再请求最高权限（守卫是用户态进程，提权要求只会把可用通道换成必失败）。
+    assert!(!code.contains("HIGHEST"), "K-15 失败：代码里仍出现 HIGHEST 权限请求");
+    // 守卫任务的 /Create 只有一处装配，且不再出现「同一条命令换个参数再跑一遍」的降级重试。
+    assert_eq!(
+        code.matches("\"/Create\", \"/TN\", GUARD_TASK").count(),
+        1,
+        "K-15 失败：守卫任务的 /Create 参数表不止一处"
+    );
+    let create = fn_slice(&w, "fn create_guard_task", "fn ensure_run_key");
+    assert!(!create.contains("降级重试"), "K-15 失败：仍是无差别重试同一条命令");
+    // 通道进记录、start 按通道分派：Run 键不支持即时启动，就必须如实报 Err，
+    // 否则调用方会为一个没人被请求过的启动等满就绪预算。
+    let start = fn_slice(&w, "fn start(&self) -> Result<(), String>", "fn stop");
+    assert!(start.contains("Channel::RunKey"), "K-15 失败：start 未按定义通道分派");
+    assert!(
+        fn_slice(&w, "fn ensure_defined", "fn create_guard_task").contains("write_action_record"),
+        "K-15 失败：动作记录未在定义成功后写入（失败也留档会把坏定义判成已是最新）"
+    );
+    // 请求被拒不等于已发出请求：等待判据必须只认 Some(Ok(()))。
+    let g = read("src/domain/guardctl.rs");
+    let req = fn_slice(&g, "fn start_requested", "fn evidence");
+    assert!(
+        req.contains("matches!(self.started, Some(Ok(())))"),
+        "K-15 失败：start_requested 仍把被拒的请求算作已发起（用户白等 30 秒）"
+    );
+    // 兜底直拉必须看得见子进程死活：非零退出即早停，且把守卫输出末段带进报错。
+    let daemon = fn_slice(&g, "fn await_daemon", "fn guard_log_tail");
+    assert!(
+        daemon.contains("child.try_wait()") && daemon.contains("!st.success()"),
+        "K-15 失败：兜底拉起仍不等子进程退出，只等端口超时"
+    );
+    let fallback = fn_slice(&g, "pub(crate) fn ensure_started", "fn await_daemon");
+    assert!(
+        fallback.contains("Ok(mut child)") && fallback.contains("guard_log_tail()"),
+        "K-15 失败：兜底路径未持有子进程或未带上守卫输出末段"
+    );
+    assert_eq!(
+        code.matches("spawn_daemon").count(),
+        0,
+        "K-15 失败：平台实现里又各自写了一份 spawn 兜底"
+    );
+    // 反向：旧形态（请求最高权限 + 无差别重试）必须被上面的判据抓到，证明非空转。
+    let old = "let r = crate::bounded::run(&mut base(Some(\"HIGHEST\")), SVC_NORMAL)?;\n\
+               let second = crate::bounded::run(&mut base(None), SVC_NORMAL)?; // 降级重试";
+    assert!(
+        old.contains("HIGHEST")
+            && old.matches("\"/Create\", \"/TN\", GUARD_TASK").count() == 0
+            && code_only(old).contains("降级重试"),
+        "K-15 反向失败：判据空转（旧形态未被识别）"
+    );
+}

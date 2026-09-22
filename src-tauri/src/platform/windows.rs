@@ -341,7 +341,9 @@ impl Impl {
         let tr = super::service_exec_line(shell, args);
         let r = crate::bounded::run(
             Command::new("schtasks").args([
-                "/Create", "/TN", WATCHDOG_TASK, "/SC", "MINUTE", "/MO", "5", "/RL", "HIGHEST", "/F", "/TR", &tr,
+                // 不提 /RL HIGHEST：看护跑的是用户态守卫入口，而最高权限在非提权进程里必被拒
+                //   （与守卫任务同一理由，见 ensure_defined）。
+                "/Create", "/TN", WATCHDOG_TASK, "/SC", "MINUTE", "/MO", "5", "/F", "/TR", &tr,
             ]),
             SVC_NORMAL,
         )?;
@@ -353,6 +355,60 @@ impl Impl {
     }
 
 }
+
+/// 定义通道：计划任务（可即时 `/Run`）与登录自启项（免提权，只能等下次登录）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Channel {
+    Task,
+    RunKey,
+}
+
+impl Channel {
+    fn tag(self) -> &'static str {
+        match self {
+            Channel::Task => "task",
+            Channel::RunKey => "runkey",
+        }
+    }
+
+    fn parse(s: &str) -> Option<Channel> {
+        match s {
+            "task" => Some(Channel::Task),
+            "runkey" => Some(Channel::RunKey),
+            _ => None,
+        }
+    }
+}
+
+/// 动作记录形如 `<通道>\t<动作串>`。无制表符的旧格式按**计划任务**解读（那是它当时唯一的
+/// 通道），否则升级后会把已装用户的任务判成过时并白重建一次。
+fn read_action_record(path: &Path) -> (Option<Channel>, String) {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(_) => return (None, String::new()),
+    };
+    let raw = raw.trim_end_matches(|c| c == '\r' || c == '\n');
+    match raw.split_once('\t') {
+        Some((chan, action)) => (Channel::parse(chan), action.to_string()),
+        None => (Some(Channel::Task), raw.to_string()),
+    }
+}
+
+fn write_action_record(path: &Path, channel: Channel, action: &str) -> Result<(), String> {
+    std::fs::write(path, format!("{}\t{}", channel.tag(), action))
+        .map_err(|e| format!("写入动作记录失败: {}", e))
+}
+
+/// 权限类失败：只有这一类值得换通道，参数/策略类失败重试同一条命令不会变好。
+/// 中英 Windows 的同一事实（`schtasks` 的 stderr 已由 bounded 按控制台码页解码）。
+fn is_access_denied(text: &str) -> bool {
+    let t = text.to_lowercase();
+    text.contains("拒绝访问") || t.contains("access is denied") || t.contains("access denied")
+}
+
+/// HKCU 的 Run 键与其中的值名：标准用户可写，不需要任何提权。
+const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+const RUN_VALUE: &str = "DSH Supervisor";
 
 impl ServiceControl for Impl {
     fn kind(&self) -> &'static str {
@@ -377,71 +433,103 @@ impl ServiceControl for Impl {
         )
     }
 
-    /// 建立计划任务（幂等，且动作过时时自愈）。计划任务本身回读不到动作串，
-    ///   故本地留一份动作记录比对：任务存在且记录一致才提前返回，否则 `/Create /F` 强制重建。
-    ///   若以「Query 成功即返回」当完成，模板修复永远到不了已装用户。
+    /// 建立守卫定义（幂等，且动作或通道过时时自愈）。计划任务本身回读不到动作串，
+    ///   故本地留一份动作记录比对；若以「Query 成功即返回」当完成，修复永远到不了已装用户。
     fn ensure_defined(&self, spec: &LaunchSpec) -> Result<String, String> {
-        let task_exists = matches!(
-            crate::bounded::run(
-                Command::new("schtasks").args(["/Query", "/TN", GUARD_TASK]),
-                SVC_QUICK,
-            ),
-            Ok(o) if o.success
-        );
+        let task_exists = self.is_defined();
         // 计划任务只指向稳定入口 `<壳> --run-guard`，定义不含 node/guard 路径
         //   （固化路径在 node 迁移即失效），检测由 --run-guard 在每次启动时完成。
         let (shell, args) = spec.service_command();
         let action = super::service_exec_line(shell, args);
-        // 动作内容记录（P2 自愈）：计划任务无法回读动作串，故本地留一份用于比对。
         let record = crate::env::supervisor_dir().join("guard-task.action");
         if let Some(dir) = record.parent() {
             std::fs::create_dir_all(dir).map_err(|e| format!("创建状态目录失败: {}", e))?;
         }
-        let record_current = std::fs::read_to_string(&record).ok().as_deref() == Some(action.as_str());
-        if task_exists && record_current {
+        let (channel, recorded) = read_action_record(&record);
+        if task_exists && channel == Some(Channel::Task) && recorded == action {
             // 即使守卫任务已是最新，也必须确保**壳拥有的看护任务**存在（幂等）。
             let wd = self.watchdog_status(spec);
             return Ok(format!("已存在且为最新 计划任务 {}{}", GUARD_TASK, wd));
         }
-        let is_update = task_exists;
-        std::fs::write(&record, &action).map_err(|e| format!("写入动作记录失败: {}", e))?;
-        // 看护任务（DSH-Supervisor-Watchdog）的所有者 = 壳（D6/H5）：随服务定义一并（重）建立。
-        let wd_note = self.watchdog_status(spec);
-        // `/TR` 值**自带引号**（写在值内部，非给 Rust args 加引号）：路径含空格时不被截断。
-        let tr_action = action;
-        let base = |rl: Option<&str>| {
-            let mut c = Command::new("schtasks");
-            c.args(["/Create", "/TN", GUARD_TASK, "/SC", "ONLOGON"]);
-            if let Some(level) = rl {
-                c.args(["/RL", level]);
+        let verb = if task_exists { "已更新" } else { "已建立" };
+        match self.create_guard_task(&action) {
+            Ok(how) => {
+                write_action_record(&record, Channel::Task, &action)?;
+                Ok(format!(
+                    "{} 计划任务 {}（{}）-> {}{}",
+                    verb, GUARD_TASK, how, action, self.watchdog_status(spec)
+                ))
             }
-            c.args(["/F", "/TR", &tr_action]);
+            // 免提权兜底：HKCU 登录自启项。它不能被即时启动（`start` 如实返回 Err，调用方
+            //   据此走直接拉起），但「下次登录拉起守卫」这条能力得以保留。
+            Err(e) => match self.ensure_run_key(&action) {
+                Ok(()) => {
+                    write_action_record(&record, Channel::RunKey, &action)?;
+                    Ok(format!(
+                        "计划任务不可用（{}）；已改用登录自启项 {} -> {}{}",
+                        e, RUN_VALUE, action, self.watchdog_status(spec)
+                    ))
+                }
+                Err(e2) => Err(format!("计划任务与登录自启项都建立不了：{}；{}", e, e2)),
+            },
+        }
+    }
+
+    /// 建立/更新守卫计划任务，返回成功所用的方式。用户态守卫不需要最高权限，故不再请求
+    ///   `/RL HIGHEST`：非提权进程带这一项必被拒，而「先试必失败的一条再试同一条的另一形态」
+    ///   只是把同一句拒绝访问打印两遍。同名任务由更高权限持有时先 `/Delete` 再建一次；
+    ///   连删都拒绝，就把「谁持有它」说清并交回调用方换通道。
+    fn create_guard_task(&self, action: &str) -> Result<&'static str, String> {
+        let build = || {
+            let mut c = Command::new("schtasks");
+            c.args(["/Create", "/TN", GUARD_TASK, "/SC", "ONLOGON", "/F", "/TR", action]);
             c
         };
-        let verb = if is_update { "已更新" } else { "已建立" };
-        let first = crate::bounded::run(&mut base(Some("HIGHEST")), SVC_NORMAL)?;
-        if first.success {
-            return Ok(format!(
-                "{} 计划任务 {}（最高权限）-> {}{}",
-                verb, GUARD_TASK, tr_action, wd_note
+        let mut first = build();
+        let r = crate::bounded::run(&mut first, SVC_NORMAL)?;
+        if r.success {
+            return Ok("普通权限");
+        }
+        let why = r.failure("schtasks /Create");
+        if !is_access_denied(&why) {
+            return Err(why);
+        }
+        let mut delcmd = Command::new("schtasks");
+        delcmd.args(["/Delete", "/TN", GUARD_TASK, "/F"]);
+        let del = crate::bounded::run(&mut delcmd, SVC_NORMAL)?;
+        if !del.success {
+            return Err(format!(
+                "{}（同名任务由更高权限持有，删不掉也无法覆盖：{}）",
+                why,
+                del.stderr.trim()
             ));
         }
-        // 降级重试（去掉 /RL HIGHEST）
-        let second = crate::bounded::run(&mut base(None), SVC_NORMAL)?;
-        if second.success {
-            return Ok(format!(
-                "{} 计划任务 {}（普通权限，HIGHEST 被拒）-> {}{}",
-                verb, GUARD_TASK, tr_action, wd_note
-            ));
+        let mut retry = build();
+        let again = crate::bounded::run(&mut retry, SVC_NORMAL)?;
+        if again.success {
+            return Ok("普通权限，先删除了旧任务");
         }
-        Err(format!(
-            "schtasks /Create 失败（含降级重试）: 首次={} / 降级={}",
-            first.stderr.trim(),
-            second.stderr.trim()
-        ))
+        Err(again.failure("schtasks /Create"))
+    }
+
+    /// 免提权的每用户自启：把稳定入口写进 HKCU 的 Run 键（登录时启动，语义同 ONLOGON 任务）。
+    fn ensure_run_key(&self, action: &str) -> Result<(), String> {
+        let mut cmd = Command::new("reg");
+        cmd.args(["add", RUN_KEY, "/v", RUN_VALUE, "/t", "REG_SZ", "/d", action, "/f"]);
+        let r = crate::bounded::run(&mut cmd, SVC_NORMAL)?;
+        if r.success {
+            return Ok(());
+        }
+        Err(r.failure("reg add 登录自启项"))
     }
 
     fn start(&self) -> Result<(), String> {
+        // 定义写在哪个通道，就向哪个通道请求启动：对只存在于 Run 键的守卫发 `/Run`，
+        //   得到的是「找不到任务」，那会把兜底通道伪装成服务管理器故障。
+        let (channel, _) = read_action_record(&crate::env::supervisor_dir().join("guard-task.action"));
+        if channel == Some(Channel::RunKey) {
+            return Err("定义通道是登录自启项（HKCU Run），它不支持即时启动".to_string());
+        }
         crate::bounded::run_checked(
             Command::new("schtasks").args(["/Run", "/TN", GUARD_TASK]),
             SVC_NORMAL,
@@ -656,5 +744,51 @@ mod toolchain_tests {
             node.display()
         );
         let _ = std::fs::remove_dir_all(&home);
+    }
+}
+
+#[cfg(test)]
+mod definition_tests {
+    //! 定义通道的形态门禁：权限类判定与通道记录是 Windows 拉起链唯一的分支点，
+    //! 判错的代价是用户看到「两次同样的拒绝访问」而不说原因。
+
+    use super::{is_access_denied, read_action_record, write_action_record, Channel};
+
+    fn tmp_record(tag: &str) -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!("dsh-rec-{}-{}.txt", tag, std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        p
+    }
+
+    #[test]
+    fn channel_record_roundtrips_and_defaults_to_task_for_legacy() {
+        let p = tmp_record("chan");
+        assert_eq!(read_action_record(&p).0, None, "文件不存在时必须报「无通道」而非猜一个");
+        write_action_record(&p, Channel::RunKey, r#""C:\a b\dsh.exe" --run-guard"#).unwrap();
+        let (c, a) = read_action_record(&p);
+        assert_eq!(c, Some(Channel::RunKey), "通道写进记录却没读回来 -> 下次比对会走错通道");
+        assert_eq!(a, r#""C:\a b\dsh.exe" --run-guard"#, "动作串被通道前缀污染");
+        // 旧格式（只有动作串）按计划任务解读：升级不该把已装用户的任务判成过时再重建一次。
+        std::fs::write(&p, r#""C:\x\dsh.exe" --run-guard"#).unwrap();
+        assert_eq!(read_action_record(&p).0, Some(Channel::Task), "旧记录未按计划任务解读");
+        // CRLF 与尾随换行不改变判定（记录由本模块写，但可能被人手工编辑过）。
+        std::fs::write(&p, "task\t\"C:\\x\\dsh.exe\"\r\n").unwrap();
+        let (c, a) = read_action_record(&p);
+        assert_eq!((c, a.as_str()), (Some(Channel::Task), "\"C:\\x\\dsh.exe\""));
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn only_permission_shaped_failures_change_channel() {
+        for denied in ["错误: 拒绝访问。\r\n", "ERROR: Access is denied.\n", "Access denied"] {
+            assert!(is_access_denied(denied), "权限类失败被漏判: {}", denied);
+        }
+        for other in [
+            "ERROR: The system cannot find the file specified.",
+            "错误: 无效的参数。",
+            "schtasks /Create 失败（超时被 kill）",
+        ] {
+            assert!(!is_access_denied(other), "非权限类失败被判成权限类 -> 白白换一次通道: {}", other);
+        }
     }
 }

@@ -81,4 +81,9 @@ DSH 与 AI 运行时**都在** `/tmp` 用 `dsh-*` / `dsh-spill-*` / `dsh-subproc
 
 机器校验：`scripts/check-comment-discipline.js`（CS-1 字符白名单、CS-2 叙事标记、
 CS-3 合成样本反向自检、CS-4 覆盖面下限、CS-5 块规模、CS-6 文件配比），
-由 CI 的 `version` job 调用。豁免登记表在该脚本头部注释内。
+由 CI 的 `version` job 调用。契约字面量登记表为 CS-7。
+
+覆盖面边界（如实登记，不靠放宽判据装作覆盖）：`src-tauri/src`、`src-tauri/bootstrap`、
+`scripts`、`ci`、`shell-release`。`src-tauri/tests` 与 `docs` 暂未纳入 —— 测试文件里的
+判据说明本身就大量引用被禁形态（旧代码形状、日期），纳入前需先按同一规范清理，
+否则门禁会把「解释为什么禁」的句子一起判红。

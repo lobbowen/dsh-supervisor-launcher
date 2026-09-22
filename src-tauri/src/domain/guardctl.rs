@@ -147,9 +147,10 @@ impl ServiceLaunch {
         ServiceLaunch { defined, started }
     }
 
-  /// 是否真的向服务管理器发过请求 —— 没发过就不该为它等 30 秒。
+  /// 是否真的向服务管理器发过**并被接受**的启动请求 —— 请求被拒（定义走的是兜底通道、
+  /// 任务不存在、策略拦截）就没必要为它等 30 秒：那段时间里没有任何东西会去拉起守卫。
     fn start_requested(&self) -> bool {
-        self.started.is_some()
+        matches!(self.started, Some(Ok(())))
     }
 
   /// 面向人的**一句话阶段证据**：说清走到了哪一步、为什么停在那一步。
@@ -247,18 +248,26 @@ pub(crate) fn ensure_started(
   // 服务管理器那一段的**阶段证据**必须在最终报错里出现（规范 H8）：真机上它才是根因所在。
     let evidence = launch.evidence();
     match crate::platform::service().spawn_daemon(spec) {
-        Ok(pid) => {
+        Ok(mut child) => {
+            let pid = child.id();
             crate::update::log(&format!("兜底 spawn 守卫 pid={}", pid));
-            let verdict = await_ready(DAEMON_READY_BUDGET);
-            if verdict == Readiness::Ready { return Ok(()); }
+            let (verdict, exited) = await_daemon(DAEMON_READY_BUDGET, &mut child);
+            if verdict == Readiness::Ready {
+                return Ok(());
+            }
             Err(LaunchError::new(
                 "READY_TIMEOUT",
                 format!(
-                    "守卫启动超时（{}）。{}；直接拉起进程 pid={}，其输出见 {}",
+                    "守卫启动失败（{}）。{}；直接拉起进程 pid={}{}，其输出见 {}\n守卫输出末段：{}",
                     verdict.describe(),
                     evidence,
                     pid,
-                    crate::update::guard_log_path().display()
+                    match exited {
+                        Some(code) => format!("已退出（退出码 {}）", code),
+                        None => "仍在运行".to_string(),
+                    },
+                    crate::update::guard_log_path().display(),
+                    guard_log_tail()
                 ),
             ))
         }
@@ -267,6 +276,51 @@ pub(crate) fn ensure_started(
             format!("守卫启动失败：{}；直接拉起也失败：{}", evidence, e),
         )),
     }
+}
+
+/// 兜底直拉后的等待：就绪判据与 [`await_ready`] 同源，但子进程非零退出即早停 —— 一个已经
+/// 退出的进程不会再变绿，让它跑满 60 秒就是把「拉起即失败」说成「启动超时」。退出码 0 不算
+/// 失败：Windows 上稳定入口 `<壳> --run-guard` 是先 detach 出 node 再退出的，它退了不代表守卫退了。
+fn await_daemon(
+    budget: std::time::Duration,
+    child: &mut std::process::Child,
+) -> (Readiness, Option<i32>) {
+    let started = std::time::Instant::now();
+    let mut last = Readiness::PortClosed;
+    loop {
+        last = ready(crate::env::current_api_port(), READINESS_HTTP_TIMEOUT);
+        if last == Readiness::Ready {
+            return (last, None);
+        }
+        if let Ok(Some(st)) = child.try_wait() {
+            if !st.success() {
+                return (last, st.code());
+            }
+        }
+        if started.elapsed() >= budget {
+            return (last, None);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+}
+
+/// 守卫输出日志的末段（最多 6 行 / 2000 字节）。报错要能自己带证据：真机上
+/// 「已有守卫实例在运行，本进程退出」这类关键一行就写在这里，而用户不该为此去开文件。
+fn guard_log_tail() -> String {
+    let path = crate::update::guard_log_path();
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(_) => return "(读不到)".to_string(),
+    };
+    let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
+    let tail = lines[lines.len().saturating_sub(6)..].join("\n");
+    let chars: Vec<char> = tail.chars().collect();
+    let s: String = if chars.len() > 2000 {
+        chars[chars.len() - 2000..].iter().collect()
+    } else {
+        tail.clone()
+    };
+    if s.trim().is_empty() { "(日志为空)".to_string() } else { s }
 }
 
 /// 服务管理器路径的就绪等待预算（原「60 tick x 500ms」；含每 tick 的探针成本）。
