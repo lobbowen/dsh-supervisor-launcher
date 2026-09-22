@@ -135,7 +135,7 @@ pub(crate) fn fail(app: &tauri::AppHandle, kind: InstallKind, error: &str) {
 ///   `bounded::run`），所以能如实说的只有「已经等了多久 + 它自己写了多少行」。
 ///   行数与最后一行是 npm 真实产出的现场，不是我们编的阶段分数。
 pub(crate) fn npm_heartbeat(elapsed: std::time::Duration, lines: usize, last_line: &str) -> String {
-    let last = if last_line.is_empty() { "" } else { format!(" · 最后一行「{}」", last_line) };
+    let last = if last_line.is_empty() { String::new() } else { format!(" · 最后一行「{}」", last_line) };
     format!("npm 安装中 · 已用 {}s · 输出 {} 行{}", elapsed.as_secs(), lines, last)
 }
 

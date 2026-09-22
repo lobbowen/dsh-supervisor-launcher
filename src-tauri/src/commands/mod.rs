@@ -437,15 +437,15 @@ pub async fn kernel_update_apply(app: tauri::AppHandle) -> ShellResult<serde_jso
     match restart {
         Ok(Ok((stopped, stop_error))) => Ok(serde_json::json!({
             "ok": true, "stage": "done",
-            "version": install.get("version").cloned().unwrap_or(serde_json::Value::Null),
-            "origin": install.get("origin").cloned().unwrap_or(serde_json::Value::Null),
+            "version": install_out.get("version").cloned().unwrap_or(serde_json::Value::Null),
+            "origin": install_out.get("origin").cloned().unwrap_or(serde_json::Value::Null),
             "stopped": stopped,
             // 服务管理器不可用（spawn 兜底）时端口可能未由我们释放：如实标注，不假装已重启。
             "restartUncertain": !stopped,
             "stopError": stop_error,
         })),
-        Ok(Err(e)) => Ok(serde_json::json!({ "ok": false, "stage": "restart", "code": e.code, "error": e.message, "detail": install })),
-        Err(e) => Ok(serde_json::json!({ "ok": false, "stage": "restart", "error": e.to_string(), "detail": install })),
+        Ok(Err(e)) => Ok(serde_json::json!({ "ok": false, "stage": "restart", "code": e.code, "error": e.message, "detail": install_out })),
+        Err(e) => Ok(serde_json::json!({ "ok": false, "stage": "restart", "error": e.to_string(), "detail": install_out })),
     }
 }
 

@@ -134,7 +134,7 @@ fn k3_align_before_start_and_define_failure_closes_start_edge() {
 /// 为什么按「下一个函数签名」而不是大括号配对：Rust 源码的字符串与注释里会出现 `}`，
 /// 朴素配对在中文文本上极易失配（本仓踩过一次）。切边由调用方显式给出，
 /// 因此每个调用点都能另外断言「切片不得越界」，避免判据漂到相邻函数里凑符号。
-fn fn_slice(src: &str, head: &str, next: &str) -> &str {
+fn fn_slice<'a>(src: &'a str, head: &str, next: &str) -> &'a str {
     let a = src.find(head).unwrap_or_else(|| panic!("未找到 {}", head));
     let b = src[a + head.len()..]
         .find(next)

@@ -167,6 +167,7 @@ pub fn npm_search_summary(bin_dir: &Path) -> String {
 }
 
 /// npm 的**可用性**结论（路径 + 前置参数 + 真实执行得到的版本）。
+#[derive(Clone)]
 pub struct NpmUsable {
     pub path: PathBuf,
     pub args: Vec<String>,
