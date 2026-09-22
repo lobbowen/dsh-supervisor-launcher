@@ -317,9 +317,57 @@ impl Platform for Impl {
     }
 }
 
-/// Windows 看护任务的固有实现（**不属于** ServiceControl 契约：它是壳的私有辅助，
-/// 由 `ensure_defined` 调用；放进 trait impl 内会触发 E0407）。
+/// Windows 的私有辅助（**不属于** ServiceControl 契约：放进 trait impl 会触发 E0407，
+/// 由 ensure_defined 调用）：守卫任务的建任务/免提权自启两个通道，与壳拥有的看护任务。
 impl Impl {
+    /// 建立/更新守卫计划任务，返回成功所用的方式。用户态守卫不需要最高权限，故不再请求
+    ///   `/RL HIGHEST`：非提权进程带这一项必被拒，而「先试必失败的一条再试同一条的另一形态」
+    ///   只是把同一句拒绝访问打印两遍。同名任务由更高权限持有时先 `/Delete` 再建一次；
+    ///   连删都拒绝，就把「谁持有它」说清并交回调用方换通道。
+    fn create_guard_task(&self, action: &str) -> Result<&'static str, String> {
+        let build = || {
+            let mut c = Command::new("schtasks");
+            c.args(["/Create", "/TN", GUARD_TASK, "/SC", "ONLOGON", "/F", "/TR", action]);
+            c
+        };
+        let mut first = build();
+        let r = crate::bounded::run(&mut first, SVC_NORMAL)?;
+        if r.success {
+            return Ok("普通权限");
+        }
+        let why = r.failure("schtasks /Create");
+        if !is_access_denied(&why) {
+            return Err(why);
+        }
+        let mut delcmd = Command::new("schtasks");
+        delcmd.args(["/Delete", "/TN", GUARD_TASK, "/F"]);
+        let del = crate::bounded::run(&mut delcmd, SVC_NORMAL)?;
+        if !del.success {
+            return Err(format!(
+                "{}（同名任务由更高权限持有，删不掉也无法覆盖：{}）",
+                why,
+                del.stderr.trim()
+            ));
+        }
+        let mut retry = build();
+        let again = crate::bounded::run(&mut retry, SVC_NORMAL)?;
+        if again.success {
+            return Ok("普通权限，先删除了旧任务");
+        }
+        Err(again.failure("schtasks /Create"))
+    }
+
+    /// 免提权的每用户自启：把稳定入口写进 HKCU 的 Run 键（登录时启动，语义同 ONLOGON 任务）。
+    fn ensure_run_key(&self, action: &str) -> Result<(), String> {
+        let mut cmd = Command::new("reg");
+        cmd.args(["add", RUN_KEY, "/v", RUN_VALUE, "/t", "REG_SZ", "/d", action, "/f"]);
+        let r = crate::bounded::run(&mut cmd, SVC_NORMAL)?;
+        if r.success {
+            return Ok(());
+        }
+        Err(r.failure("reg add 登录自启项"))
+    }
+
     /// 壳拥有的 Windows 看护任务（D6/H5）：计划任务直接指向稳定入口的无头模式。
     /// 幂等：每次 ensure_defined 都 `/Create /F`（覆盖语义），
     ///   故不会因守卫任务「已是最新」而被跳过；升级后旧版本留下的 `watchdog.ps1` 就地删除。
@@ -473,54 +521,6 @@ impl ServiceControl for Impl {
                 Err(e2) => Err(format!("计划任务与登录自启项都建立不了：{}；{}", e, e2)),
             },
         }
-    }
-
-    /// 建立/更新守卫计划任务，返回成功所用的方式。用户态守卫不需要最高权限，故不再请求
-    ///   `/RL HIGHEST`：非提权进程带这一项必被拒，而「先试必失败的一条再试同一条的另一形态」
-    ///   只是把同一句拒绝访问打印两遍。同名任务由更高权限持有时先 `/Delete` 再建一次；
-    ///   连删都拒绝，就把「谁持有它」说清并交回调用方换通道。
-    fn create_guard_task(&self, action: &str) -> Result<&'static str, String> {
-        let build = || {
-            let mut c = Command::new("schtasks");
-            c.args(["/Create", "/TN", GUARD_TASK, "/SC", "ONLOGON", "/F", "/TR", action]);
-            c
-        };
-        let mut first = build();
-        let r = crate::bounded::run(&mut first, SVC_NORMAL)?;
-        if r.success {
-            return Ok("普通权限");
-        }
-        let why = r.failure("schtasks /Create");
-        if !is_access_denied(&why) {
-            return Err(why);
-        }
-        let mut delcmd = Command::new("schtasks");
-        delcmd.args(["/Delete", "/TN", GUARD_TASK, "/F"]);
-        let del = crate::bounded::run(&mut delcmd, SVC_NORMAL)?;
-        if !del.success {
-            return Err(format!(
-                "{}（同名任务由更高权限持有，删不掉也无法覆盖：{}）",
-                why,
-                del.stderr.trim()
-            ));
-        }
-        let mut retry = build();
-        let again = crate::bounded::run(&mut retry, SVC_NORMAL)?;
-        if again.success {
-            return Ok("普通权限，先删除了旧任务");
-        }
-        Err(again.failure("schtasks /Create"))
-    }
-
-    /// 免提权的每用户自启：把稳定入口写进 HKCU 的 Run 键（登录时启动，语义同 ONLOGON 任务）。
-    fn ensure_run_key(&self, action: &str) -> Result<(), String> {
-        let mut cmd = Command::new("reg");
-        cmd.args(["add", RUN_KEY, "/v", RUN_VALUE, "/t", "REG_SZ", "/d", action, "/f"]);
-        let r = crate::bounded::run(&mut cmd, SVC_NORMAL)?;
-        if r.success {
-            return Ok(());
-        }
-        Err(r.failure("reg add 登录自启项"))
     }
 
     fn start(&self) -> Result<(), String> {

@@ -511,3 +511,13 @@ mod tests {
             .unwrap_or(0)
     }
 }
+
+/// 裸 [`std::process::ExitStatus`] 的同一措辞。兜底直拉的子进程不是 [`ExecRecord`]（没有命令
+/// 原文可捕获），但措辞必须与 [`ExecRecord::code_label`] 一致：跨阶段对比现场时，
+/// 「退出码 1」与「code 1」会被读成两条不同的失败。
+pub fn exit_code_label(code: Option<i32>) -> String {
+    match code {
+        Some(c) => format!("退出码 {}", c),
+        None => "被终止（无退出码）".to_string(),
+    }
+}

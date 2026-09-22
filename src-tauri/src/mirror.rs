@@ -7,6 +7,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// npm registry 预设：全部经真实 tarball 下载验证过 - 仅元数据可读不算可用（部分镜像只代理元数据、不代理 tarball）。
+/// 已排除（实测不可用）：mirrors.aliyun.com/npm、mirrors.tuna.tsinghua.edu.cn/npm（非标准 registry 路径，元数据即读不到）。
 pub const NPM_PRESETS: [&str; 6] = [
     "https://registry.npmmirror.com",
     "https://registry.npmjs.org",
@@ -18,6 +19,7 @@ pub const NPM_PRESETS: [&str; 6] = [
 
 /// Node 发行镜像预设：全部经真实下载 + 该源自身 SHASUMS256 校验通过，比「URL 可达」严格得多
 /// （能过滤代理不完整、文件损坏、清单与文件不匹配的镜像）。
+/// 已排除（实测 SHA256 校验失败）：mirrors.ustc.edu.cn/node。
 /// 各源同步进度不同不影响使用：latest_lts() 跨全部可达源取最高版本，再在提供该版本的源中选最快者，滞后源作回退。
 pub const NODE_PRESETS: [&str; 10] = [
     "https://nodejs.org/dist",

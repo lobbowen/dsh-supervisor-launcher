@@ -47,6 +47,8 @@ const CS_CONTRACT_LITERALS = [
   { lit: 'env_status', files: ['src-tauri/src/main.rs'] },
   { lit: 'minisign', files: ['src-tauri/src/commands/mod.rs', 'src-tauri/src/main.rs'] },
   { lit: '3100', files: ['src-tauri/src/domain/guardctl.rs', 'src-tauri/src/env.rs'] },
+  // 排除镜像的记录没有代码路径可锚（被排除的东西不出现在预设里），只能由注释承载。
+  { lit: '已排除', files: ['src-tauri/src/mirror.rs'] },
 ];
 
 /** Rust：返回与 src 等长的掩码串（注释字符保留，其余置空格，换行保留）。 */

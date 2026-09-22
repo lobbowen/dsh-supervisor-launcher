@@ -263,7 +263,7 @@ pub(crate) fn ensure_started(
                     evidence,
                     pid,
                     match exited {
-                        Some(code) => format!("已退出（退出码 {}）", code),
+                        Some(code) => format!("已退出（{}）", crate::bounded::exit_code_label(Some(code))),
                         None => "仍在运行".to_string(),
                     },
                     crate::update::guard_log_path().display(),
