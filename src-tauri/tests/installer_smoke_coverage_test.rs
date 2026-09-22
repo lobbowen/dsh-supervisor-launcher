@@ -1,0 +1,222 @@
+//! 安装/通道冒烟门禁。
+//!
+//! ## 缺陷
+//!
+//! `docs/RELEASE-STANDARD.md` §5 一直写着「安装冒烟 | 各平台安装包 | 能装、能起、能更新」，
+//! 但产线里**没有任何一步安装过包**：H3 的全部判据跑的都是 `./target/debug/` 下的构建产物。
+//! 于是「装机形态」这条路径（deb/dmg/NSIS 落盘 → 装进系统的那份字节起得来 → 覆盖升级换掉文件）
+//! 从来没被执行过，而用户报障恰恰落在这条路径上。
+//!
+//! 发布通道同理：清单发出去以后，没有任何自动化从**用户真正读到的端点**把它取回来验签，
+//! 全靠人工查询，所以 1.2.3 之后的发布对通道只有一句「已查」。
+//!
+//! ## 锁定不变量
+//!   I-a  install-smoke job 存在、四平台矩阵、needs build
+//!   I-b  每条腿真的执行平台安装动词（dpkg -i / hdiutil attach / NSIS /S）
+//!   I-c  该 job 结构上拿不到构建产物（不得出现 target/debug 或 release 二进制路径）
+//!   I-d  publish 必须 needs install-smoke
+//!   I-e  published-channel-smoke 存在、只在 tag 或手工触发跑、且真做验签
+//!   I-f  判据形态：装完必须读**结论**（自报版本 + 包管理器版本 + 落盘 exe + 覆盖后字节变化）
+//!   I-g  启动链夹具单源（不得再在 workflow 里内联第二份伪内核）
+//!   I-h  反向：以上判据能识别旧形态（门禁非空转）
+
+use std::fs;
+use std::path::PathBuf;
+
+fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().expect("src-tauri 的上级").to_path_buf()
+}
+
+fn read(rel: &str) -> String {
+    let p = repo_root().join(rel);
+    let s = fs::read_to_string(&p).unwrap_or_else(|e| panic!("读 {} 失败: {}", p.display(), e));
+    s.replace("\r\n", "\n")
+}
+
+fn workflow() -> String {
+    read(".github/workflows/build.yml")
+}
+
+/// 去掉整行 # 注释：YAML 里的承诺不算执行证据（本仓多次被自己的说明文字骗过）。
+fn strip_comments(src: &str) -> String {
+    src.lines().filter(|l| !l.trim_start().starts_with('#')).collect::<Vec<_>>().join("\n")
+}
+
+/// 取某个顶层 job 的代码块（含其全部步骤），用于把判据限定在单个 job 内。
+fn job_block(yaml: &str, name: &str) -> String {
+    let marker = format!("\n  {}:\n", name);
+    let start = match yaml.find(&marker) {
+        Some(i) => i + 1,
+        None => return String::new(),
+    };
+    let rest = &yaml[start..];
+    let mut end = rest.len();
+    for (idx, _) in rest.match_indices("\n  ") {
+        let line = rest[idx + 1..].lines().next().unwrap_or("");
+        if line.starts_with("  ") && !line.starts_with("   ") && line.trim_end().ends_with(':') {
+            end = idx;
+            break;
+        }
+    }
+    rest[..end].to_string()
+}
+
+#[test]
+fn i_a_install_smoke_job_exists_with_four_platforms() {
+    let y = strip_comments(&workflow());
+    let job = job_block(&y, "install-smoke");
+    assert!(!job.is_empty(), "I-a FAIL 产线里没有 install-smoke job —— 安装冒烟又是只在文档里存在");
+    for art in ["linux-x64", "win-x64", "darwin-arm64", "darwin-x64"] {
+        assert!(job.contains(&format!("artifact: {}", art)), "I-a FAIL 安装冒烟缺平台 {}", art);
+    }
+    let legs = job.matches("- os:").count();
+    assert_eq!(legs, 4, "I-a FAIL 安装冒烟矩阵腿数 = {}（应为 4）", legs);
+    assert!(
+        job.contains("needs: [version, build]"),
+        "I-a FAIL install-smoke 未依赖 build（没有本次产物就无法覆盖升级）"
+    );
+    assert!(job.contains("download-artifact"), "I-a FAIL 没有下载本次构建产物的步骤");
+    assert!(job.contains("gh release download"), "I-a FAIL 没有取上一已发布版本安装包（A）的步骤");
+    eprintln!("I-a PASS install-smoke job 四平台齐备");
+}
+
+#[test]
+fn i_b_each_platform_actually_installs() {
+    let sh = read("ci/install-smoke.sh");
+    let ps = read("ci/install-smoke-win.ps1");
+    let y = strip_comments(&workflow());
+    let job = job_block(&y, "install-smoke");
+    assert!(job.contains("ci/install-smoke.sh"), "I-b FAIL job 未引用 Linux/macOS 安装脚本");
+    assert!(job.contains("ci/install-smoke-win.ps1"), "I-b FAIL job 未引用 Windows 安装脚本");
+    // 真正的安装动词必须在脚本里：只做 dpkg-deb -f / hdiutil 挂载 / 复制 exe 都不算「装上了」。
+    assert!(sh.contains("sudo dpkg -i"), "I-b FAIL Linux 没有 dpkg 真安装动作");
+    assert!(sh.contains("hdiutil attach"), "I-b FAIL macOS 没有挂载 dmg");
+    assert!(sh.contains("cp -R"), "I-b FAIL macOS 没有把 .app 复制到安装位置");
+    assert!(ps.contains("-ArgumentList '/S'"), "I-b FAIL Windows 没有静默安装 NSIS 包");
+    // 装完必须**从系统里**找到那份二进制，而不是拿包里的文件自证。
+    assert!(sh.contains("dpkg -L"), "I-b FAIL Linux 没有从包管理器读实际落盘路径");
+    assert!(ps.contains("Uninstall"), "I-b FAIL Windows 没有读卸载注册表项定位安装目录");
+    eprintln!("I-b PASS 四平台都真的执行安装动作");
+}
+
+#[test]
+fn i_c_smoke_runs_installed_bytes_not_build_tree() {
+    let y = strip_comments(&workflow());
+    let job = job_block(&y, "install-smoke");
+    assert!(!job.is_empty(), "I-c FAIL 没有 install-smoke job，判据无从谈起");
+    for banned in ["target/debug", "target/release/dsh-supervisor-gui", "cargo build"] {
+        assert!(
+            !job.contains(banned),
+            "I-c FAIL 安装冒烟里出现 {} —— 一旦能拿到构建树，「装上的那份字节」就不是被判的对象",
+            banned
+        );
+    }
+    eprintln!("I-c PASS 安装冒烟结构上只能跑装机产物");
+}
+
+#[test]
+fn i_d_publish_requires_install_smoke() {
+    let y = strip_comments(&workflow());
+    let job = job_block(&y, "publish");
+    assert!(job.contains("needs: [version, build, install-smoke]"),
+        "I-d FAIL publish 未 needs install-smoke —— 装不上的安装包仍会被发给用户");
+    eprintln!("I-d PASS 发布被安装冒烟门禁挡住");
+}
+
+#[test]
+fn i_e_channel_smoke_verifies_published_endpoints() {
+    let y = strip_comments(&workflow());
+    let job = job_block(&y, "published-channel-smoke");
+    assert!(!job.is_empty(), "I-e FAIL 没有 published-channel-smoke job");
+    assert!(job.contains("workflow_dispatch"), "I-e FAIL 通道冒烟没有手工复核历史版本的入口");
+    assert!(job.contains("refs/tags/v"), "I-e FAIL 通道冒烟未限定在 tag 发布之后");
+    assert!(job.contains("needs.publish.result == 'success'"),
+        "I-e FAIL 发布没成仍会跑通道冒烟（判据挂在不存在的东西上）");
+    assert!(job.contains("shell-release/verify-channel.js"), "I-e FAIL 未引用通道校验脚本");
+
+    let js = read("shell-release/verify-channel.js");
+    assert!(js.contains("plugins.updater.endpoints"),
+        "I-e FAIL 校验脚本没从 tauri.conf.json 读端点 —— 与真客户端各走各的 URL 就等于没验");
+    assert!(js.contains("crypto.verify"), "I-e FAIL 没有真的验签，只查了清单能不能下载");
+    assert!(js.contains("pub.keyId"), "I-e FAIL 没比对签名里的 key id 与配置公钥");
+    assert!(js.contains("sha256"), "I-e FAIL 没有比对产物字节摘要");
+    assert!(!js.contains("attestation"),
+        "I-e FAIL 壳的发布链没有 npm attestation，判据里出现它只会指向空对象");
+    eprintln!("I-e PASS 通道冒烟按客户端端点验签与字节");
+}
+
+#[test]
+fn i_f_installed_probe_reads_conclusions_not_survival() {
+    let sh = read("ci/install-smoke.sh");
+    let ps = read("ci/install-smoke-win.ps1");
+    // 每次安装后都要读到「装进去的那份自报了版本」，且与包管理器记录一致。
+    assert!(sh.contains("shell_version="), "I-f FAIL Linux/macOS 没判装后自报版本");
+    assert!(ps.contains("shell_version="), "I-f FAIL Windows 没判装后自报版本");
+    assert!(sh.contains("dpkg-query"), "I-f FAIL Linux 没比对包管理器记录的版本");
+    assert!(sh.contains("CFBundleShortVersionString"), "I-f FAIL macOS 没读 Info.plist 版本");
+    // 落盘链路（identity.json 的 exe + shell.log）是壳自己的事实源，装机形态必须写对。
+    assert!(sh.contains("identity.json"), "I-f FAIL 没判 identity.json 落盘");
+    assert!(ps.contains("identity.json"), "I-f FAIL Windows 没判 identity.json 落盘");
+    // 壳在 Windows 上是 GUI 子系统进程：调用运算符不等待、也不接它的 stdout，
+    // 于是探针读到空输出 + 空退出码，「装上了但测不到」与「压根没装上」在日志里长得一样。
+    assert!(ps.contains("RedirectStandardOutput") && ps.contains("WaitForExit"),
+        "I-f FAIL Windows 探针未接管 GUI 子系统进程的输出与等待");
+    assert!(sh.contains("shell.log"), "I-f FAIL 没判 shell.log 落盘");
+    // 覆盖安装必须真的换掉字节，否则「升级」只是把旧文件又装了一遍。
+    assert!(sh.contains("HASH_A"), "I-f FAIL Linux/macOS 没有比对覆盖前后的字节摘要");
+    assert!(ps.contains("hashA"), "I-f FAIL Windows 没有比对覆盖前后的字节摘要");
+    // Linux 一条链要把装好的壳拉起到就绪：这是「能起」的全部含义。
+    assert!(sh.contains("--watchdog"), "I-f FAIL 没让装好的壳走就绪判据链");
+    assert!(sh.contains("ports.json"), "I-f FAIL 没核对进程真绑定了端口");
+    // 版本未提升时产物可逐字节相同，那条判据此时不成立 —— 必须按版本分流。
+    assert!(sh.contains("\"$AVER\" != \"$BVER\""), "I-f FAIL 字节变化判据未按版本分流");
+    assert!(ps.contains("-ne $VerB") || ps.contains("$VerA -ne $VerB"),
+        "I-f FAIL Windows 字节变化判据未按版本分流");
+    eprintln!("I-f PASS 装机判据读的是结论而不是进程没崩");
+}
+
+#[test]
+fn i_g_chain_fixture_has_single_source() {
+    let y = strip_comments(&workflow());
+    assert!(
+        !y.contains("<<'JS'"),
+        "I-g FAIL workflow 里仍内联伪内核夹具 —— 两份夹具会各自漂移，H3 绿不代表 H10 绿"
+    );
+    assert!(y.contains("ci/fake-core.js"), "I-g FAIL 启动链冒烟未引用随仓夹具");
+    assert!(read("ci/install-smoke.sh").contains("fake-core.js"),
+        "I-g FAIL 安装冒烟未共用同一夹具（它自己另造一份就会与 H3 漂移）");
+    assert!(
+        !job_block(&y, "install-smoke").contains("cat > "),
+        "I-g FAIL 安装冒烟又现造了一份伪内核"
+    );
+    eprintln!("I-g PASS 伪内核夹具单源（H3 与 H10 共用）");
+}
+
+#[test]
+fn i_h_reverse_judgements_are_not_vacuous() {
+    // 旧形态：没有安装 job，夹具内联在 workflow 里，publish 不依赖安装冒烟。
+    let old = "jobs:\n  version:\n    runs-on: x\n  build:\n    runs-on: y\n    steps:\n      - run: cat > f <<'JS'\n      - run: cargo test\n  publish:\n    needs: [version, build]\n";
+    assert!(job_block(old, "install-smoke").is_empty(), "I-h FAIL job_block 在无该 job 时返回了内容");
+    assert!(old.contains("<<'JS'"), "I-h FAIL 夹具内联的旧形态自检失败");
+    assert!(!job_block(old, "publish").contains("needs: [version, build, install-smoke]"),
+        "I-h FAIL 旧 publish 依赖被误判为已含安装冒烟");
+    // 只查清单能不能下载、不验签的假通道冒烟
+    let fake = "  const m = await (await fetch(u)).json();\n  console.log(m.version);\n";
+    // 调用运算符跑 GUI 子系统进程：不等待、读不到 stdout，形似有判据实则空转。
+    let lazy = "function RunExe($exe, $argv) { (@(& $exe @argv 2>&1) -join \"`n\") + \"exit=$LASTEXITCODE\" }";
+    assert!(!lazy.contains("RedirectStandardOutput") && !lazy.contains("WaitForExit"),
+        "I-h FAIL 调用运算符形态被判为已接管输出与等待");
+    assert!(!fake.contains("crypto.verify"), "I-h FAIL 无验签的脚本被误判为通过 I-e");
+    // 把安装换成「解包看看」的假安装冒烟
+    let fake_install = "dpkg-deb -f pkg.deb Version\ntar xf pkg.deb\n";
+    assert!(!fake_install.contains("sudo dpkg -i"), "I-h FAIL 未安装却自称安装");
+    // job_block 定位能力（否则 I-a/I-c/I-d/I-e 全空转）
+    let sample = "jobs:\n  a:\n    runs-on: x\n    steps:\n      - run: one\n  b:\n    runs-on: y\n";
+    let ab = job_block(sample, "a");
+    assert!(ab.contains("run: one") && !ab.contains("runs-on: y"),
+        "I-h FAIL job_block 边界错：{:?}", ab);
+    // 注释里的承诺不算证据
+    let commented = "  # 会执行 sudo dpkg -i 安装\n";
+    assert!(!strip_comments(commented).contains("sudo dpkg -i"), "I-h FAIL 注释未被剥掉");
+    eprintln!("I-h PASS 反向判据有效");
+}
