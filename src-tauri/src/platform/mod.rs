@@ -773,15 +773,46 @@ mod launch_spec_tests {
             .append(true)
             .open(dir.join("guard.log"))
             .unwrap();
-        let (out, err) = guard_stdio_streams(Some(f));
-        let (outs, errs) = (format!("{out:?}"), format!("{err:?}"));
-        assert!(!outs.contains("Null") && !errs.contains("Null"),
-            "日志可用时两条流都不得为 null: stdout={outs} stderr={errs}");
 
-        // 反向：日志不可用必须退回 null，而不是让「拉起守卫」整体失败。
+        // 正向按**现场**判，不按 `{:?}` 判：std 的 `Stdio` 的 Debug 恒为 `Stdio { .. }`
+        //   （1.98.1 的 `impl fmt::Debug for Stdio` 用 finish_non_exhaustive），
+        //   运行期从返回值里取不出「这条流最终指向 null 还是文件」——判不出来的断言就是空转。
+        //   所以这里真的拉起一个子进程，看它的两条流有没有落到那个文件里。
+        let (out, err) = guard_stdio_streams(Some(f));
+        spawn_marker_child(out, err).wait().expect("子进程应能跑完");
+        let log = std::fs::read_to_string(dir.join("guard.log")).unwrap_or_default();
+        assert!(
+            log.contains("dsh-mark-out") && log.contains("dsh-mark-err"),
+            "日志可用时两条流都得进文件: {log:?}"
+        );
+
+        // 反向：日志不可用时**退回 null**（不是 inherit 灌进宿主，也不是让拉起整体失败）。
+        //   这一半没有可观察的现场（null 与「父进程不读的管道」在小写入下都跑得完），
+        //   只能钉形态：判据读的是本文件里那段实现，函数改名/分支变化都会立刻判红。
         let (out, err) = guard_stdio_streams(None);
-        assert!(format!("{out:?}").contains("Null"), "无日志时 stdout 应为 null");
-        assert!(format!("{err:?}").contains("Null"), "无日志时 stderr 应为 null");
+        spawn_marker_child(out, err).wait().expect("无日志时也必须能拉起");
+        let src = include_str!("mod.rs");
+        let body = &src[src.find("fn guard_stdio_streams(").expect("guard_stdio_streams 已改名：同步本判据")..];
+        let body = &body[..body.find("\n}\n").expect("guard_stdio_streams 边界") + 3];
+        assert!(
+            body.contains("None => (Stdio::null(), Stdio::null())"),
+            "无日志时两条流必须退回 null（原断言用 `{:?}` 含 \"Null\" 判，std 不渲染该字，恒假）"
+        );
+        assert!(!body.contains("Stdio::inherit()"), "不得把守卫输出接到宿主进程");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 用给定的两条流拉起一个「各写一行到 stdout/stderr」的子进程。
+    fn spawn_marker_child(
+        out: std::process::Stdio,
+        err: std::process::Stdio,
+    ) -> std::process::Child {
+        let mut c = std::process::Command::new(if cfg!(windows) { "cmd" } else { "/bin/sh" });
+        if cfg!(windows) {
+            c.args(["/C", "echo dsh-mark-out & echo dsh-mark-err>&2"]);
+        } else {
+            c.args(["-c", "echo dsh-mark-out; echo dsh-mark-err >&2"]);
+        }
+        c.stdin(std::process::Stdio::null()).stdout(out).stderr(err).spawn().expect("spawn 标记子进程")
     }
 }

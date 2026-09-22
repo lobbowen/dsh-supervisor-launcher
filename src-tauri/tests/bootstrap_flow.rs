@@ -2057,10 +2057,15 @@ fn b62_console_output_decoding_is_confirmed_by_codepage_at_one_point() {
     );
 
     // ② Windows 解码必须由码页驱动，且不得硬编码单一语言
-    let w = b
-        .find("#[cfg(windows)]\nfn decode_console")
-        .expect("B62 FAIL 缺少 Windows 解码实现");
-    let wbody = &b[w..(w + 2600).min(b.len())];
+    //   2026-09-22 轮2：解码路径拆成 `decode_console`（唯一入口）+ `console_code_page`（问 OS）
+    //   + `decode_codepage`（可显式传码页，供 GBK 现场在任意语言 runner 上复现）三个原语，
+    //   因此判据取「整段 Windows 解码路径」而不是某个函数体 —— 边界用下一段的 cfg 锚点，不靠字符窗口。
+    let w = match b.find("#[cfg(windows)]\nfn decode_console") {
+        Some(v) => v,
+        None => panic!("B62 FAIL 缺少 Windows 解码实现"),
+    };
+    let wend = w + b[w..].find("#[cfg(not(windows))]").expect("B62 FAIL Windows 解码路径缺边界（应紧接 POSIX 分支）");
+    let wbody = &b[w..wend];
     assert!(
         wbody.contains("MultiByteToWideChar"),
         "B62 FAIL 未让操作系统做 MBCS→UTF-16（硬编码码页会漏掉繁体/俄语）"

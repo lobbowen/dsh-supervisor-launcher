@@ -345,9 +345,37 @@ fn decode_console(bytes: &[u8]) -> String {
     if let Ok(s) = std::str::from_utf8(bytes) {
         return s.to_string();
     }
+    match decode_codepage(bytes, console_code_page()) {
+        Some(s) => s,
+        None => String::from_utf8_lossy(bytes).into_owned(),
+    }
+}
+
+/// 当前控制台码页：**问操作系统**，不猜语言。
+///
+/// GUI 子系统没有控制台时 `GetConsoleOutputCP` 返回 0，回退系统 OEM 码页。
+#[cfg(windows)]
+fn console_code_page() -> u32 {
     extern "system" {
         fn GetConsoleOutputCP() -> u32;
         fn GetOEMCP() -> u32;
+    }
+    let c = unsafe { GetConsoleOutputCP() };
+    if c == 0 {
+        unsafe { GetOEMCP() }
+    } else {
+        c
+    }
+}
+
+/// 按**指定码页**做 MBCS→UTF-16；转不动返回 `None`，由调用方 lossy 保底（不丢字节）。
+///
+/// 为什么允许显式传码页：生产路径传的是 `console_code_page()`，而「GBK 现场」的回归用例必须在
+///   **任意语言的 runner** 上确定性复现 —— 绑在 runner 的码页上，门禁就跟着机器抖（英文 runner
+///   的 OEM 码页是 437，同一批字节解出来是另一副样子）。
+#[cfg(windows)]
+fn decode_codepage(bytes: &[u8], cp: u32) -> Option<String> {
+    extern "system" {
         fn MultiByteToWideChar(
             code_page: u32,
             flags: u32,
@@ -357,27 +385,19 @@ fn decode_console(bytes: &[u8]) -> String {
             wide_char_len: i32,
         ) -> i32;
     }
-    // GUI 子系统没有控制台时 GetConsoleOutputCP 返回 0，回退系统 OEM 码页。
-    let cp = unsafe {
-        let c = GetConsoleOutputCP();
-        if c == 0 {
-            GetOEMCP()
-        } else {
-            c
-        }
-    };
     let len = bytes.len().min(i32::MAX as usize) as i32;
     let src = bytes.as_ptr() as *const i8;
     // 第一次调用传空目的缓冲，取所需 UTF-16 字数。
     let need = unsafe { MultiByteToWideChar(cp, 0, src, len, std::ptr::null_mut(), 0) };
-    if need > 0 {
-        let mut wide = vec![0u16; need as usize];
-        let got = unsafe { MultiByteToWideChar(cp, 0, src, len, wide.as_mut_ptr(), need) };
-        if got > 0 {
-            return String::from_utf16_lossy(&wide[..got as usize]);
-        }
+    if need <= 0 {
+        return None;
     }
-    String::from_utf8_lossy(bytes).into_owned()
+    let mut wide = vec![0u16; need as usize];
+    let got = unsafe { MultiByteToWideChar(cp, 0, src, len, wide.as_mut_ptr(), need) };
+    if got <= 0 {
+        return None;
+    }
+    Some(String::from_utf16_lossy(&wide[..got as usize]))
 }
 
 /// POSIX：控制台输出即 UTF-8，lossy 保底（与历史行为一致，不引入新失败模式）。
@@ -465,7 +485,7 @@ mod tests {
         // 正文两侧空白必须归一（否则诊断串里出现双空格/换行尾巴）。
         assert!(msg.ends_with("系统找不到指定的文件。"), "{}", msg);
         // stderr 为空才回退 stdout —— 两路都不丢。
-        let fallback = ExecRecord { stdout: "only-stdout".into(), ..r };
+        let fallback = ExecRecord { stdout: "only-stdout".into(), stderr: String::new(), ..r };
         assert_eq!(fallback.detail(), "only-stdout");
     }
 
@@ -477,10 +497,13 @@ mod tests {
         assert_eq!(decode_console(b"plain ascii"), "plain ascii");
     }
 
-    /// 中文 Windows 现场回归：GBK stderr 必须解出**可读的中文**。
+    /// 中文 Windows 现场回归：GBK 字节必须解出**可读的中文**。
     ///
     /// 这段字节就是 `schtasks /Run` 对不存在的任务所写的原文（cp936）。
     /// 旧的 `from_utf8_lossy` 把它变成一串 U+FFFD，正是用户报来的乱码。
+    /// 显式传 936 而不是走 `decode_console`：runner 的控制台码页由机器决定（英文 runner 是 437，
+    ///   2026-09-22 CI 轮2 实测同一批字节被解成 mojibake），把判据绑在机器码页上等于跟着机器抖。
+    ///   「生产路径会问操作系统要码页」由 B62 的形态门禁锁住。
     #[cfg(windows)]
     #[test]
     fn decode_console_reads_gbk_console_output() {
@@ -488,7 +511,7 @@ mod tests {
             0xCF, 0xB5, 0xCD, 0xB3, 0xD5, 0xD2, 0xB2, 0xBB, 0xB5, 0xBD, 0xD6, 0xB8, 0xB6, 0xA8,
             0xB5, 0xC4, 0xCE, 0xC4, 0xBC, 0xFE, 0xA1, 0xA3,
         ];
-        assert_eq!(decode_console(GBK), "系统找不到指定的文件。");
+        assert_eq!(decode_codepage(GBK, 936).as_deref(), Some("系统找不到指定的文件。"));
         // 反向钉住旧缺陷：lossy 确实会毁掉这句话（说明本测试不是空转）。
         assert!(!String::from_utf8_lossy(GBK).contains("系统"));
     }

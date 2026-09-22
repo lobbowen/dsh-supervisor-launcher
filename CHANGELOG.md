@@ -268,6 +268,20 @@ B1–B5 把事实收回单点之后，剩下一个更早的问题：**门禁声�
   进程也能确定状态根」的受支持口子，登记待议，不在本轮顺手发明。
 - **文档**：`KERNEL-LAUNCH-STANDARD` §0 H6 改写为四态判据（含 `None` 语义与「不得糊成 `Http(0)`」）、
   §1 的 P6 行随之、§6 新增 **K-14** 与「CI 真机冒烟」行（含上面那个已知缺口的出处指引）。
+- **CI 轮1–2 抓到的三处自身缺陷（发布链记录，不粉饰）**：本批代码在本机从未编译（无 Rust toolchain），
+  轮1 红在四处编译错（`kernel_update_apply` 里四个引用点漏改 `install_out`、`npm_heartbeat` 的 `if/else`
+  两支 `&str`/`String`、`NpmFact` 派生 `Clone` 但字段 `NpmUsable` 没有、`fn_slice` 返回 `&str` 缺生命周期）；
+  轮2 红在三条单测，其中两条是**断言写错**而非实现错：
+  ① `ExecRecord` 的 stdout 回退用例用 `..r` 做函数式更新，`stderr` 被继承成非空，于是「空 stderr 才回退
+  stdout」的现场根本没造出来；② `guard_stdio_streams` 的反向判据指望 `format!("{:?}", Stdio::null())`
+  含 `"Null"` —— std 的 `impl Debug for Stdio` 是 `debug_struct("Stdio").finish_non_exhaustive()`（1.98.1
+  源码实测），null 与文件句柄渲染成同一个字符串，**这条断言按设计永远不可能通过**。现改为：正向拉起真子进程
+  看两条流的字节有没有落进日志文件（现场判据），反向钉本文件里 `None =>` 分支的形态并禁止 `Stdio::inherit()`
+  —— 判不出来的东西不配当门禁；③ GBK 解码用例走 `decode_console`，而它按契约问操作系统要码页，
+  英文 runner 的 OEM 码页是 437，同一批 936 字节被如实解成另一副样子（实现没错，用例把「机器语言」当成了
+  判据）。现把 Windows 解码拆成 `decode_console`（唯一入口）+ `console_code_page`（问 OS）+
+  `decode_codepage`（可显式传码页），回归用例显式传 936，B62 的切片锚点随之路径化（不再用字符窗口）。
+
 - **本机验证边界**：夹具的 HTTP 行为（`/healthz` 状态行、端口顺延与 `ports.json` 持久化）在本机
   用真 node 起服务实测过；三条 workflow 脚本经 YAML 解析 + `bash -n` 校验。Rust 编译、
   `cargo test` 与这三条 CI 腿本身仍由 CI 裁决（本机无 toolchain，也未跑任何构建/测试）。
