@@ -61,6 +61,27 @@ fn job_block(yaml: &str, name: &str) -> String {
     rest[..end].to_string()
 }
 
+/// H11 通道校验脚本该判什么 —— 抽成函数，好让 I-h 用同一把尺子量反向夹具
+/// （判据写在断言里就没法证伪，本仓被这种「只对自己为真的门禁」骗过多次）。
+///
+/// 分工：签名**有效性**由 `src-tauri/tests/updater_artifacts.rs` 的 V2/V3/V4 判 —— 它用的是
+/// tauri-plugin-updater 内部同一个 minisign-verify crate，与用户端逐字同口径。
+/// node 里重实现只有两种结局：口径不对年年假红（实测 minisign 的 "ED" 是 prehash 变体，
+/// Node stdlib 的纯 Ed25519 验签对不上），口径错了还判绿。所以这里判的是「钥匙对不对、
+/// 字节是不是本次构建的那份」。
+fn missing_channel_checks(js: &str) -> Vec<&'static str> {
+    let checks: Vec<(&'static str, bool)> = vec![
+        ("读客户端端点", js.contains("plugins.updater.endpoints")),
+        ("剥 minisign 文本壳", js.contains("unwrapSig") && js.contains("untrusted comment")),
+        ("签名块结构 74 字节", js.contains("blob.length !== 74")),
+        ("比对 key id", js.contains("pub.keyId")),
+        ("比对产物字节摘要", js.contains("sha256")),
+        ("验签交给 updater_artifacts", js.contains("updater_artifacts")),
+        ("不在 node 里重实现验签", !js.contains("crypto.verify")),
+    ];
+    checks.into_iter().filter(|(_, ok)| !*ok).map(|(name, _)| name).collect()
+}
+
 #[test]
 fn i_a_install_smoke_job_exists_with_four_platforms() {
     let y = strip_comments(&workflow());
@@ -135,14 +156,11 @@ fn i_e_channel_smoke_verifies_published_endpoints() {
     assert!(job.contains("shell-release/verify-channel.js"), "I-e FAIL 未引用通道校验脚本");
 
     let js = read("shell-release/verify-channel.js");
-    assert!(js.contains("plugins.updater.endpoints"),
-        "I-e FAIL 校验脚本没从 tauri.conf.json 读端点 —— 与真客户端各走各的 URL 就等于没验");
-    assert!(js.contains("crypto.verify"), "I-e FAIL 没有真的验签，只查了清单能不能下载");
-    assert!(js.contains("pub.keyId"), "I-e FAIL 没比对签名里的 key id 与配置公钥");
-    assert!(js.contains("sha256"), "I-e FAIL 没有比对产物字节摘要");
+    let missing = missing_channel_checks(&js);
+    assert!(missing.is_empty(), "I-e FAIL 通道校验缺判据: {}", missing.join(" / "));
     assert!(!js.contains("attestation"),
         "I-e FAIL 壳的发布链没有 npm attestation，判据里出现它只会指向空对象");
-    eprintln!("I-e PASS 通道冒烟按客户端端点验签与字节");
+    eprintln!("I-e PASS 通道冒烟按客户端端点读签名壳与字节，验签归 updater_artifacts");
 }
 
 #[test]
@@ -200,13 +218,24 @@ fn i_h_reverse_judgements_are_not_vacuous() {
     assert!(old.contains("<<'JS'"), "I-h FAIL 夹具内联的旧形态自检失败");
     assert!(!job_block(old, "publish").contains("needs: [version, build, install-smoke]"),
         "I-h FAIL 旧 publish 依赖被误判为已含安装冒烟");
-    // 只查清单能不能下载、不验签的假通道冒烟
+    // 只查清单能不能下载的假通道冒烟
     let fake = "  const m = await (await fetch(u)).json();\n  console.log(m.version);\n";
     // 调用运算符跑 GUI 子系统进程：不等待、读不到 stdout，形似有判据实则空转。
     let lazy = "function RunExe($exe, $argv) { (@(& $exe @argv 2>&1) -join \"`n\") + \"exit=$LASTEXITCODE\" }";
     assert!(!lazy.contains("RedirectStandardOutput") && !lazy.contains("WaitForExit"),
         "I-h FAIL 调用运算符形态被判为已接管输出与等待");
-    assert!(!fake.contains("crypto.verify"), "I-h FAIL 无验签的脚本被误判为通过 I-e");
+    assert!(missing_channel_checks(fake).contains(&"剥 minisign 文本壳"),
+        "I-h FAIL 只下载清单的假通道冒烟被误判为通过 I-e");
+    // 旧形态：把清单里的 signature 当单层 base64，直接在 node 里 ed25519 验签。
+    // 看着比新脚本更「像在验签」，但长度与 keyId 偏移全错，且口径与用户端不同 —— 必须判否。
+    let naive = "const sig = Buffer.from(p.signature, 'base64');\n\
+                 if (sig.length !== 72) fail(key + ' 签名长度不对');\n\
+                 const spki = Buffer.concat([Buffer.from('302a300506032b6570032100', 'hex'), pub.key]);\n\
+                 ok = crypto.verify(null, bytes, { key: spki, format: 'der', type: 'spki' }, sig.subarray(8));\n";
+    let naive_missing = missing_channel_checks(naive);
+    assert!(naive_missing.contains(&"剥 minisign 文本壳") && naive_missing.contains(&"签名块结构 74 字节")
+        && naive_missing.contains(&"不在 node 里重实现验签"),
+        "I-h FAIL 单层 base64 + crypto.verify 的旧形态被判为通过 I-e: {:?}", naive_missing);
     // 把安装换成「解包看看」的假安装冒烟
     let fake_install = "dpkg-deb -f pkg.deb Version\ntar xf pkg.deb\n";
     assert!(!fake_install.contains("sudo dpkg -i"), "I-h FAIL 未安装却自称安装");

@@ -67,7 +67,7 @@ GitHub **永远不会执行**它；但 `docs/RELEASE-AND-BUILD-DECISION.md` 与 
 | H8 | 发布（tag `v*`）| `publish` job：归拢产物 → `node shell-release/make-manifest.js` → `npm publish` | **仅 CI** | 是 |
 | H9 | 发布后验证 | 见第 5 节 | CI 结论 + registry 查询 | 是 |
 | H10 | **安装冒烟**（四平台）| `bash ci/install-smoke.sh <A> <Aver> <B> <Bver> <工作目录>`（Linux/macOS）/ `pwsh ci/install-smoke-win.ps1`（Windows）：装 A -> 读结论 -> 覆盖装 B -> 校验字节真的换了 -> 跑装好的那份二进制 | **仅 CI**（`install-smoke` job，四平台矩阵）| 是（**挡住 `publish`**）|
-| H11 | 发布通道冒烟 | `node shell-release/verify-channel.js --ver <ver> [--artifact-dir <dir>]`：从 `tauri.conf.json` 的端点取清单、逐平台验签、比对产物字节 | **仅 CI**（`published-channel-smoke` job，tag 发布成功后 / `workflow_dispatch`）| 是 |
+| H11 | 发布通道冒烟 | `node shell-release/verify-channel.js --ver <ver> [--artifact-dir <dir>]`：从 `tauri.conf.json` 的端点取清单、逐平台剥出 minisign 签名块并比对 key id、比对产物字节。**签名有效性由 H7 的 `updater_artifacts` V2/V3/V4 判**（同一个 minisign-verify crate，与用户端同口径），H11 判的是「端点上那份清单确由这把钥匙签、字节确是本次构建的那份」 | **仅 CI**（`published-channel-smoke` job，tag 发布成功后 / `workflow_dispatch`）| 是 |
 
 > **H10 为什么独立成 job 而不是 build 里的一步**：build 的四条腿跑的是 `./target/debug/` 下的构建产物，
 > 它证明不了「用户装进系统里的那份字节能不能起」。判据必须**拿不到**构建树才算数，
@@ -121,7 +121,7 @@ GitHub **永远不会执行**它；但 `docs/RELEASE-AND-BUILD-DECISION.md` 与 
 | `build` | 总是（4 平台矩阵）| 门禁测试 → 无头冒烟 → 构建打包 → glibc 门禁 → 组装壳包 → 产物验收 → 上传；tag 时挂 Release |
 | `install-smoke` | 总是（4 平台矩阵）| **H10 安装冒烟**：取上一已发布版本的包（A）+ 本次产物（B），装 A -> 覆盖装 B -> 只跑装进系统里的那份字节 |
 | `publish` | tag `v*` | 归拢四平台产物 → 生成并校验 `shell-manifest.json` → 发布 npm 壳包（**`needs: install-smoke`**）|
-| `published-channel-smoke` | tag 发布成功后 / `workflow_dispatch(ver=…)` | **H11 通道冒烟**：按客户端端点取清单、逐平台验签、比对字节 |
+| `published-channel-smoke` | tag 发布成功后 / `workflow_dispatch(ver=…)` | **H11 通道冒烟**：按客户端端点取清单、逐平台比对签名 key id 与产物字节（验签在 H7）|
 
 > `pull_request` 触发器于 2026-09-13 补入：此前 PR **完全不跑 CI**，
 > 若直接设 required status check 会让 PR **永久等待一个永不出现的状态**。
@@ -155,7 +155,7 @@ GitHub **永远不会执行**它；但 `docs/RELEASE-AND-BUILD-DECISION.md` 与 
 | GitHub Release | tag `v<ver>` | 四平台安装包附件齐备 |
 | CI 结论 | tag run | version + 四平台 build + 四平台 install-smoke + publish + published-channel-smoke 全绿 |
 | 安装冒烟 | `install-smoke` job（H10，四平台）| 已由 CI 执法：装得上、装好的二进制自报版本、覆盖升级换了字节、Linux 腿起得到 `/healthz` 就绪。**不再是人工项** |
-| 更新通道 | `published-channel-smoke` job（H11）| 主端点清单可取、四平台 url+signature 齐、签名对得上配置公钥、（tag 构建）字节与本次产物一致 |
+| 更新通道 | `published-channel-smoke` job（H11）| 主端点清单可取、四平台 url+signature 齐、签名块出自 `tauri.conf.json` 那把钥匙（key id 相等）、（tag 构建）字节与本次产物一致；签名**有效性**在同一 run 的 H7 `updater_artifacts` 上已判 |
 
 > **清单是嵌套两层编码**：`signature` 字段本身是 base64，解出来是 minisign 的**四行文本**
 > （untrusted comment / 签名 blob / trusted comment / global signature），钥匙 id 只在**第二行**那个 blob 里。
@@ -226,10 +226,10 @@ GitHub **永远不会执行**它；但 `docs/RELEASE-AND-BUILD-DECISION.md` 与 
 | I-b | 每条腿真的执行平台安装动词（`sudo dpkg -i` / `hdiutil attach` + `cp -R` / NSIS `/S`），并从包管理器侧定位实际落盘二进制 |
 | I-c | 该 job 结构上拿不到构建产物（出现 `target/debug` / `cargo build` 即判失败）|
 | I-d | `publish` 必须 `needs` 安装冒烟 |
-| I-e | `published-channel-smoke` 只在 tag 发布成功或手工触发跑，且校验脚本真的从 `tauri.conf.json` 端点取清单、验 key id、验签、比字节 |
+| I-e | `published-channel-smoke` 只在 tag 发布成功或手工触发跑，且校验脚本真的从 `tauri.conf.json` 端点取清单、剥出 minisign 签名块（4 行文本 + 74 字节 blob）、验 key id、比字节，并且**不在 node 里重实现验签**（出现 `crypto.verify` 即判失败，口径与用户端不同只会造成假绿/年假红）|
 | I-f | 装机判据读的是**结论**：自报版本 + 包管理器版本 + identity.json/shell.log 落盘 + 覆盖后字节变化（按版本分流）；Windows 探针必须自己接管 stdout 并等待（壳是 GUI 子系统进程，调用运算符读不到输出也等不到退出）|
 | I-g | 伪内核夹具单源（workflow 内不得再内联第二份）|
-| I-h | 反向：以上判据能识别「只解包不安装」「只下载不验签」的假冒烟形态 |
+| I-h | 反向：以上判据能识别「只解包不安装」「只下载不读签名」，以及**单层 base64 + `crypto.verify` 的旧验签形态**（它对真清单必然判错，却看着最像在干活）|
 
 ```json shell-release-pipeline
 {
