@@ -606,7 +606,8 @@ jobs:
           "
           (cd "$REL" && npm publish --access public $TAG)
 
-  # ── 发布通道冒烟：从用户真正读到的端点取清单，逐平台验签与比对字节 ──
+  # ── 发布通道冒烟：从用户真正读到的端点取清单，逐平台读签名块钥匙并比对产物字节 ──
+  # 签名有效性不在这里判（H7 updater_artifacts 用与用户端同一个 minisign-verify crate 判）。
   # 与 install-smoke 的分工：那边验「装得上、起得来」，这边验「发出去的东西本身对」。
   # 只在 tag 发布成功后跑；ver 入参让它能在发布当天之后复核历史版本
   # （历史版本没有本次构建产物，只验清单与签名，脚本会在结论里如实说明未比对字节）。
@@ -633,7 +634,7 @@ jobs:
         with:
           path: dist/artifacts
 
-      - name: 校验已发布通道（清单可取 + 同源验签 + 字节一致）
+      - name: 校验已发布通道（清单可取 + 签名块钥匙一致 + 字节一致）
         shell: bash
         run: |
           set -euo pipefail
