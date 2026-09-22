@@ -418,7 +418,9 @@ pub fn warmup_async() {
     if WARMING.swap(true, std::sync::atomic::Ordering::SeqCst) {
         return; // 已有在飞预热
     }
-    let _ = std::thread::Builder::new()
+    // 线程开不起来时**必须**回滚 WARMING：它在上面已置 true，留着就永久没有下一次预热，
+    // registry 那一格会一直停在「测速尚未完成」，且没有任何地方能解释为什么。
+    let spawned = std::thread::Builder::new()
         .name("mirror-warmup".to_string())
         .spawn(|| {
             let m = load();
@@ -463,6 +465,10 @@ pub fn warmup_async() {
             }
             WARMING.store(false, std::sync::atomic::Ordering::SeqCst);
         });
+    if let Err(e) = spawned {
+        WARMING.store(false, std::sync::atomic::Ordering::SeqCst);
+        crate::update::log(&format!("镜像预热线程未能启动（{}）：本轮 registry 维度无从判定", e));
+    }
 }
 
 #[cfg(test)]

@@ -219,6 +219,10 @@ fn main() {
             // 环境判定：Node 缺失或低于最低标准（>=22.12）时由引导页安装；达标直接进面板。
             // 探测只触发（分离线程），不得阻塞 setup —— 窗口必须先出现。
             nodeprobe::start();
+            // 镜像测速同样在引导即预热：registry 维度只读这份预热结果，只由引导页 JS 触发
+            // 的话，任何一条不走 70-boot 的入口（直进面板/脚本页加载失败）都会让那一格永久问号。
+            // WARMING 去重，前端那一枪仍在（B49），两边都打也不会测两遍。
+            crate::mirror::warmup_async();
             {
                 let h = handle.clone();
                 std::thread::spawn(move || {

@@ -193,7 +193,13 @@ pub fn dependents(node: Option<PathBuf>) -> Snapshot {
         };
         if let Some(c) = g.as_ref() {
             if reusable(&c.node, &node, c.at.elapsed()) {
-                return c.snapshot.clone();
+                let mut s = c.snapshot.clone();
+                // registry 那一格绕过 TTL：它只是读一次内存里的预热快照，零成本。复用的话，
+                // 预热完成后面板仍会念着 10 秒前的问号，而问号正是用户报的「看不到检测」。
+                if let Some(r) = s.records.iter_mut().find(|r| r.probe == Probe::Registry) {
+                    *r = registry_record();
+                }
+                return s;
             }
         }
     }
