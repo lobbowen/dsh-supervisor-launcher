@@ -4,7 +4,17 @@
 //! P1 是 P5 的前置：磁盘内核必须等于线上最新，否则拒绝启动。所有等待都有上限，退出也要能在服务管理器无响应时走完。
 
 use std::net::{TcpStream, ToSocketAddrs};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use tauri::{Emitter, Manager};
+
+/// 退出握手中（`shutdown_all` 已把守卫停掉，此时的「不在服役」是预期结果，不得回引导页重拉）。
+static EXITING: AtomicBool = AtomicBool::new(false);
+/// 面板服役看护线程唯一化（finish_boot 可被多次调用）。
+static PANEL_WATCH_RUNNING: AtomicBool = AtomicBool::new(false);
+/// 看护是否处于观察态：回一次引导页即解除，引导页走完再武装。
+static PANEL_WATCH_ARMED: AtomicBool = AtomicBool::new(false);
+/// 连续不在服役的拍数（Alive 归零）。
+static PANEL_WATCH_DOWN: AtomicU32 = AtomicU32::new(0);
 
 /// 启动失败的结构化错误（stage 由规范定义，见 KERNEL-LAUNCH-STANDARD.md 节4）。
 ///  前端据此给可操作结论；日志据此定位到具体阶段 —— 不允许「未知错误」。
@@ -86,10 +96,11 @@ pub fn resolve_local(resource_dir: Option<std::path::PathBuf>) -> Option<(crate:
 }
 
 pub(crate) fn shutdown_all(port: u16) {
-  // 契约 节4.1 退出握手（阶段 3 增强）：
-  //  1) 带超时请求内核停全部被管对象，并等待回执（防止守卫挂起时壳无限阻塞）；
+  // 契约 节4.1 退出握手：1) 带超时请求内核停全部被管对象并等回执（守卫挂起时壳不无限阻塞）；
   //  2) 轮询 sessionState 直到 stopped（确认内核确实停好；守卫已不可达同样视为完成）；
-  //  3) 由所有者停止守卫进程——守卫自身从不停止自己（阶段 1 所有权归一）。
+  //  3) 由所有者停止守卫进程——守卫自身从不停止自己（所有权归一）。
+  // 握手最长约 70s，其间「不在服役」是本次退出的预期结果，看护必须闭嘴（否则退出途中把用户甩回引导页）。
+    EXITING.store(true, Ordering::SeqCst);
     let _ = crate::domain::localhttp::post_local_timeout(port, "/session/stop", std::time::Duration::from_secs(60));
     for _ in 0..40 {
         match crate::domain::localhttp::get_session_state(port) {
@@ -441,6 +452,70 @@ pub(crate) fn serving_state(port: u16) -> Serving {
     }
 }
 
+/// 面板投影的**唯一**判据：URL 与「此刻能不能投」必须同出一个答案。
+/// 分两处问就会失效：`go_panel` 查了服役、`shell_panel_url` 没查，而壳框架主帧一定先按后者导航，
+/// 于是被查过的那次判定永远来不及生效。
+pub(crate) fn panel_view() -> (String, bool) {
+    let port = crate::env::current_api_port();
+    let serving = matches!(serving_state(port), Serving::Alive);
+    (crate::env::api_base_url(), serving)
+}
+
+/// 看护一拍的纯决策：返回（新的连续失服役拍数，是否回引导页）。
+/// 解除观察态是「回一次引导页」的伴随动作，不靠第二次调用去补 —— 引导页会重跑 guard_start，
+/// 那是全仓唯一的恢复链；重复弹跳只会把用户在两页之间来回甩。
+pub(crate) fn panel_watch_tick(down: u32, serving: bool, armed: bool, exiting: bool, needed: u32) -> (u32, bool) {
+    if exiting || !armed { return (0, false); }
+    if serving { return (0, false); }
+    let n = down + 1;
+    if n >= needed { return (0, true) }
+    (n, false)
+}
+
+/// 面板显示期的服役看护。壳此前只在「进入面板」那一刻判一次服役，之后守卫无论因何消失
+/// （被所有者停掉、崩溃、更新后重启失败），界面都停在引擎自己的「127.0.0.1 拒绝连接」页上：
+/// WebKit 对被拒的 iframe 导航不触发 error 事件，前端的失败重试形同不存在。
+pub(crate) fn watch_panel(app: &tauri::AppHandle) {
+    PANEL_WATCH_ARMED.store(true, Ordering::SeqCst);
+    if PANEL_WATCH_RUNNING.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+        return; // 线程只允许一个（看护状态是进程级的，多一个线程只会多问几遍）
+    }
+    let h = app.clone();
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(PANEL_WATCH_INTERVAL);
+            // 解除观察态（已甩回引导页 / 尚未进面板）就不探测：看护的意义是「面板正显示着」，
+            //   其余时间的每拍 HTTP 只是白耗资源。
+            if !PANEL_WATCH_ARMED.load(Ordering::SeqCst) {
+                PANEL_WATCH_DOWN.store(0, Ordering::SeqCst);
+                continue;
+            }
+            let serving = matches!(serving_state(crate::env::current_api_port()), Serving::Alive);
+            let prev = PANEL_WATCH_DOWN.load(Ordering::SeqCst);
+            let (next, bounce) = panel_watch_tick(
+                prev, serving,
+                PANEL_WATCH_ARMED.load(Ordering::SeqCst),
+                EXITING.load(Ordering::SeqCst),
+                PANEL_WATCH_DOWN_TICKS,
+            );
+            PANEL_WATCH_DOWN.store(next, Ordering::SeqCst);
+            if bounce {
+                PANEL_WATCH_ARMED.store(false, Ordering::SeqCst);
+                crate::update::log(&format!(
+                    "[panel-watch] 连续 {}s 守卫不在服役 · 回引导页重跑启动链",
+                    PANEL_WATCH_INTERVAL.as_secs() * PANEL_WATCH_DOWN_TICKS as u64
+                ));
+                let _ = h.emit("shell:goto-bootstrap", serde_json::json!({}));
+            }
+        }
+    });
+}
+
+/// 看护节拍与失服役门槛：单次 `serving_state` 最长约 1.2s（`SERVING_PROBE_TIMEOUT`），
+/// 3 拍约 15s —— 短于用户对「页面死了」的判断，长到能骑过守卫正常重启的间隙。
+const PANEL_WATCH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+const PANEL_WATCH_DOWN_TICKS: u32 = 3;
+
 /// 由所有者把守卫停干净：`service().stop()` + 等端口**不再可达**（裸 TCP 在此问的是
 /// 「还在不在」，是 `port_open` 的合法用途）。返回 false = 预算内端口仍被占，
 /// 此时重拉只会撞守卫锁退出，调用方必须如实失败而不是假装重启过。
@@ -594,8 +669,8 @@ mod tests {
     }
 
   /// 桌面真机现场：守卫还在监听、`/healthz` 还回 200，服务链却已拆完 —— 「端口通」既不等于
-  /// 「在服役」，也不等于「该重拉」。三态必须各自成立，且探针抖动（问不出会话态）只许降级成
-  /// 且探针抖动（问不出会话态）只许降级成 Alive：把健康守卫停掉重拉是把缺陷放大。
+  /// 「在服役」，也不等于「该重拉」。三态必须各自成立；探针抖动（问不出会话态）只许降级成
+  /// Alive：把健康守卫停掉重拉是把缺陷放大。
     #[test]
     fn serving_state_separates_alive_from_halted_but_listening() {
         assert!(matches!(serving_state(fake_serving(HEALTHZ_OK, SESSION_ACTIVE)), Serving::Alive));
@@ -606,6 +681,18 @@ mod tests {
             Serving::SessionHalted(s) => assert_eq!(s, "stopped"),
             other => panic!("停链守卫必须判为 SessionHalted，实得 {:?}", other),
         }
+    }
+
+    /// 看护弹跳只认「连续失服役到达门槛」：守卫正常重启的一两拍、退出握手期间、以及已经甩回
+    /// 引导页之后（armed 已降），都不许再甩页 —— 把用户在两页之间来回甩不是恢复，是新的缺陷。
+    #[test]
+    fn panel_watch_bounces_only_after_consecutive_down_ticks() {
+        assert_eq!(panel_watch_tick(0, true, true, false, 3), (0, false), "在服役必须归零拍数");
+        assert_eq!(panel_watch_tick(2, true, true, false, 3), (0, false), "失服役后要重新攒满");
+        assert_eq!(panel_watch_tick(1, false, true, false, 3), (2, false), "未达门槛只攒拍不甩页");
+        assert_eq!(panel_watch_tick(2, false, true, false, 3), (0, true), "连续达门槛才回引导页");
+        assert_eq!(panel_watch_tick(9, false, false, false, 3), (0, false), "已解除观察态不得再甩页");
+        assert_eq!(panel_watch_tick(9, false, true, true, 3), (0, false), "退出握手中不得甩页");
     }
 }
 

@@ -513,13 +513,20 @@ fn k15_windows_definition_permission_boundary() {
     );
 }
 
-// ── K-16：「端口通」不等于「在服役」——早退、导航、面板 URL 三处都必须问同一个事实 ──
+// ── K-16：「端口通」不等于「在服役」——早退、导航、面板 URL 三处必须问同一个事实 ──
 //
-// 真机（2026-09-22 桌面）：刚报完「启动完成」，进面板就是 127.0.0.1 拒绝连接。根因是三处
-//   各自用「端口上有没有人」代替「守卫还在为本产品干活吗」：走完 `/session/stop` 的守卫
-//   还占着端口（`/healthz` 照回 200），服务链却已拆光，于是早退合法、导航照发、URL 照报。
+// 真机（2026-09-22 桌面 → 2026-09-23 复查明细）：刚报完「启动完成」，进面板就是 127.0.0.1 拒绝连接。
+//   根因不止一处，且 1.2.5 只修了第一条：
+//   ① 走完 `/session/stop` 的守卫还占着端口（`/healthz` 照回 200），服务链却已拆光，
+//      早退/导航/URL 三处都把「端口有人」当成「守卫在干活」；
+//   ② 主帧加载时 shell.html 主动向 `shell_panel_url` 取 URL 并**无条件**投给 iframe ——
+//      那条导航是全仓唯一必然发生的面板导航，①里补上的服役复核（go_panel 每拍判定）根本
+//      来不及生效（iframe.src 已被写成同一个值，force=false 时不再覆盖），门禁形同虚设；
+//   ③ 面板显示之后壳**一次都不再看**：守卫此后因任何原因消失（更新重启失败、被所有者停掉、
+//      崩溃），界面就永久停在引擎自己的拒绝连接页上 —— WebKit 对被拒的 iframe 导航不触发
+//      error 事件，前端那个重试兜底永不执行。
 //   语义侧的三态判定由 `guardctl.rs` 的行为用例钉住（K-14 同一手法，回环真 socket）；
-//   本门禁钉**接线**：早退必须经过服役判定，且停链分支不许早退。
+//   本门禁钉**接线**：三处问的是同一个判据，且判据必须在**每一条**导航路径上。
 #[test]
 fn k16_serving_gate_gates_early_return_and_navigation() {
     let g = code_only(&read("src/domain/guardctl.rs"));
@@ -554,29 +561,86 @@ fn k16_serving_gate_gates_early_return_and_navigation() {
         "K-16 反向失败：判据空转（旧「端口通即服役」形态未被识别）"
     );
 
-    // 导航侧：每一拍先复核服役，最后一拍不就绪就回引导页（那里重跑 guard_start = 自愈入口）。
+    // 导航侧：判据与 URL 必须同出一个答案（`panel_view`），且每一拍都重问；
+    //   最后一拍不在服役就回引导页（那里重跑 guard_start = 自愈入口）。
     let w = code_only(&read("src/domain/windowing.rs"));
     let nav = fn_slice(&w, "pub(crate) fn go_panel", "pub(crate) fn show_main");
     let mut at = 0usize;
-    for needle in ["serving_state(", "shell:goto-panel", "shell:goto-bootstrap"] {
+    for needle in ["panel_view()", "shell:goto-panel", "shell:goto-bootstrap"] {
         let i = nav[at..]
             .find(needle)
             .unwrap_or_else(|| panic!("K-16 失败：go_panel 缺「{}」（导航未先复核）", needle));
         at += i + needle.len();
     }
+    // 单一判据：服役判定只在 guardctl 内部（早退 + panel_view），导航侧不得自己再问一遍。
     assert!(
-        nav.contains("Serving::Alive"),
-        "K-16 失败：go_panel 未把「在服役」作为放行条件"
+        !w.contains("serving_state("),
+        "K-16 失败：go_panel 绕过 panel_view 自行判定服役（判据出现第二处实现）"
+    );
+    let pv = fn_slice(&g, "pub(crate) fn panel_view", "pub(crate) fn panel_watch_tick");
+    assert!(
+        pv.contains("matches!(serving_state(") && pv.contains("Serving::Alive") && pv.contains("api_base_url()"),
+        "K-16 失败：panel_view 未同时给出 URL 与服役判定（两者分开就又会有人只问一个）"
     );
     // 自愈出口两侧都要在：壳收不到事件就等于只修了一半。
+    let shell = read("bootstrap/shell.html");
     assert!(
-        read("bootstrap/shell.html").contains("evt.listen('shell:goto-bootstrap'"),
+        shell.contains("evt.listen('shell:goto-bootstrap'"),
         "K-16 失败：shell.html 未处理 shell:goto-bootstrap（回引导页无人接手）"
     );
     let old_nav = "let _ = h.emit(\"shell:goto-panel\", serde_json::json!({ \"url\": u }));";
     assert!(
         !old_nav.contains("serving_state(") && !old_nav.contains("goto-bootstrap"),
         "K-16 反向失败：旧「无条件导航」形态未被识别"
+    );
+
+    // 主帧索取侧（②）：shell.html 拿到 URL 就必须同时拿到「能不能投」，未服役不许写 iframe.src。
+    let ask_at = shell.rfind("core.invoke('shell_panel_url')").expect("K-16：主帧未索取面板 URL");
+    let load_at = shell.find("loadPanel(r.url)").unwrap_or(usize::MAX);
+    assert!(
+        shell[ask_at..load_at].contains("r.serving === false") && shell[ask_at..load_at].contains("backToBootstrap("),
+        "K-16 失败：主帧投面板前未判服役（这条导航必然发生，未服役就是把拒绝连接页交给用户）"
+    );
+    assert!(load_at > ask_at, "K-16 失败：主帧没有「判据之后才投面板」这条顺序");
+    // 出口本身必须是主帧导航：写成 iframe.src 就变成「把引导页塞进 iframe」，1.2.5 前的形状。
+    let back = fn_slice(&shell, "var backToBootstrap = function", "// 有界等守卫就绪后再重载面板");
+    assert!(
+        back.contains("window.location.replace('bootstrap.html')"),
+        "K-16 失败：回引导页不是主帧导航"
+    );
+    // 反向：1.2.5 那个「URL 与判据分家」的形态必须被识别为违规。
+    let old_ask = "core.invoke('shell_panel_url').then(function (r) { if (r && r.url) loadPanel(r.url); });";
+    assert!(
+        !old_ask.contains("serving") && old_ask.contains("loadPanel(r.url)"),
+        "K-16 反向失败：判据空转（旧「主帧无条件投面板」形态未被识别）"
+    );
+
+    // 稳态侧（③）：面板显示后必须有人在周期复核服役，连续失服役才回引导页（一次抖动不甩页）。
+    let watch = fn_slice(&g, "pub(crate) fn watch_panel", "const PANEL_WATCH_INTERVAL");
+    assert!(
+        watch.contains("serving_state(") && watch.contains("shell:goto-bootstrap")
+            && watch.contains("panel_watch_tick("),
+        "K-16 失败：没有面板稳态看护（守卫在面板显示后死掉 = 界面永久停在引擎错误页）"
+    );
+    assert!(
+        g.contains("EXITING.store(true") && g.contains("if exiting || !armed"),
+        "K-16 失败：退出握手未与稳态看护互斥（退出途中会把用户甩回引导页）"
+    );
+    assert!(
+        read("src/commands/mod.rs").contains("watch_panel(&app)"),
+        "K-16 失败：引导完成未武装稳态看护"
+    );
+    // 内核更新后的重载不许是固定延时（新守卫还没听完端口就会得到拒绝连接页）。
+    let reload = fn_slice(&shell, "var reloadPanelWhenReady = function", "// 引导完成 → 内容区切到面板");
+    assert!(
+        !shell.contains("}, 900);") && shell.contains("reloadPanelWhenReady(0)")
+            && reload.contains("guard_ready") && reload.contains("p.serving === false"),
+        "K-16 失败：更新后面板仍按固定延时重载（不等就绪、不判服役）"
+    );
+    let old_reload = "setTimeout(function () { frame.src = panelUrl + sep + 'dsh_retry=' + Date.now(); }, 900);";
+    assert!(
+        !old_reload.contains("guard_ready"),
+        "K-16 反向失败：判据空转（旧「固定 900ms 重载」形态未被识别）"
     );
 
     // URL 侧：面板地址与就绪判据同一个端口源（只认 config.json 会导航到没人监听的端口）。

@@ -202,9 +202,11 @@ fn main() {
             // 状态根迁移（前向自愈）：把旧位置 ~/.dsh/{supervisor,shell} 的内容并入产品状态根。
             // 必须在任何读写状态之前执行；失败不阻断。
             env::migrate_legacy();
-            // 托盘直发本地 API 的端口：显式 DSH_SUPERVISOR_TRAY_PORT 优先，否则从用户 config.apiPort 解析
-            let port: u16 = std::env::var("DSH_SUPERVISOR_TRAY_PORT")
-                .ok().and_then(|p| p.parse().ok()).unwrap_or_else(env::api_port);
+            // 托盘直发本地 API 的端口：显式 DSH_SUPERVISOR_TRAY_PORT 优先，否则**每次点击现取**。
+            // 不做 setup 期快照：守卫因端口占用顺延过时，快照会把启动/停止/退出全打在没人监听的
+            // 端口上，而 guardctl 一侧读的是当前值 —— 同一事实两套答案，退出握手就打错了对象。
+            let port = || std::env::var("DSH_SUPERVISOR_TRAY_PORT")
+                .ok().and_then(|p| p.parse().ok()).unwrap_or_else(env::current_api_port);
             let handle = app.handle().clone();
 
             // 壳身份初始化：写 <状态根>/shell/identity.json + shell.log（独立于 DSH）。
@@ -274,9 +276,9 @@ fn main() {
                         // 网络 I/O **必须离开 UI 线程**：托盘菜单事件由 UI 线程派发，而
                         //   post_local 最多阻塞 60 秒（TCP 连接 + 读写超时）；守卫挂起时
                         //   点击会把整个界面冻结。改为派发到独立线程：菜单立即响应，结果异步生效。
-                        "start" => domain::localhttp::spawn_local_post(port, "/lifecycle/dsh/start"),
-                        "stop" => domain::localhttp::spawn_local_post(port, "/lifecycle/dsh/stop"),
-                        "restart" => domain::localhttp::spawn_local_post(port, "/lifecycle/dsh/restart"),
+                        "start" => domain::localhttp::spawn_local_post(port(), "/lifecycle/dsh/start"),
+                        "stop" => domain::localhttp::spawn_local_post(port(), "/lifecycle/dsh/stop"),
+                        "restart" => domain::localhttp::spawn_local_post(port(), "/lifecycle/dsh/restart"),
                         // 退出管家 = 完全退出：通知守卫停止全部服务链，随后壳退出
                         "quit" => {
                             // 契约：请求内核停被管对象（等回执）-> 由所有者停止守卫 -> 壳退出。
@@ -284,8 +286,9 @@ fn main() {
                             //   + 轮询 10s）。若在 UI 线程做，窗口卡住会被误认为「程序关不掉」
                             //   而遭强杀 —— 那会跳过退出握手，留下未停的 DSH。
                             let h = app.clone();
+                            let p = port();
                             std::thread::spawn(move || {
-                                domain::guardctl::shutdown_all(port);
+                                domain::guardctl::shutdown_all(p);
                                 h.exit(0);
                             });
                         }
@@ -316,7 +319,7 @@ fn main() {
                 if env::close_action() == "exit" {
                     // 必须离开 UI 线程（与托盘 quit 同一纪律）。
                     let h = window.app_handle().clone();
-                    let port = env::api_port();
+                    let port = env::current_api_port();
                     api.prevent_close();
                     std::thread::spawn(move || {
                         domain::guardctl::shutdown_all(port);
