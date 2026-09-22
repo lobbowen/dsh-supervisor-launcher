@@ -560,12 +560,9 @@ pub fn win_ctl(app: tauri::AppHandle, action: String) -> ShellResult<()> {
     }
 }
 
-/// 返回控制面板 URL **与此刻能不能投**（供壳框架在导航后自行取得面板地址）。
-///
-/// 由壳框架主动索取面板 URL，避免 shell:goto-panel 事件早于 listener 注册而丢失。
-/// `serving` 必须与 URL 同出：主帧加载时是唯一必然发生的面板导航，若它只拿到 URL 而自行
-///   决定不判据，壳就把「拒绝连接」的引擎错误页交给用户，且 iframe 被拒不触发 error 事件、
-///   前端无从重试（真机表现＝进入面板直接 127.0.0.1 拒绝连接）。
+/// 返回控制面板 URL **与此刻能不能投**：由壳框架主动索取，避免 shell:goto-panel 早于 listener 注册而丢失。
+/// `serving` 必须与 URL 同出：主帧加载是唯一必然发生的面板导航，只拿 URL 不判据就会把「拒绝连接」的
+///   引擎错误页交给用户；而 iframe 被拒不触发 error 事件，前端无从重试。
 #[tauri::command]
 pub fn shell_panel_url() -> serde_json::Value {
     let (url, serving) = crate::domain::guardctl::panel_view();

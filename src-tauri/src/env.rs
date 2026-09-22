@@ -255,13 +255,9 @@ pub fn api_port() -> u16 {
 }
 
 /// 内核持久化的**实际** API 端口（ports.json 的 supervisor-api 记录）。
-/// 必须读实际值：内核在 EADDRINUSE 时会自动顺延端口并持久化；
-/// 只认 config.json 的期望值会让壳永远等一个没人监听的端口，
-/// 表现为「守卫启动失败」，即使守卫已健康运行。
-///
-/// 同 role 有多条时取 `createdAt` **最新**的一条：登记表按端口号为键，避让成功的
-/// 新记录追加在尾部，旧记录只有在 `release(旧端口)` 真生效时才消失；该调用在内核侧
-/// 被 `catch {}` 包住且忽略返回值，所以「留两条」是可发生的状态，取首条即永远等旧端口。
+/// 必须读实际值：内核在 EADDRINUSE 时会顺延端口并持久化，只认 config.json 的期望值会让壳
+///   永远等一个没人监听的端口，表现为「守卫启动失败」——即使守卫已健康运行。
+/// 同 role 有多条时取 `createdAt` 最新的一条：登记表以端口号为键，旧记录只在 release 真生效时才消失。
 pub fn discovered_api_port() -> Option<u16> {
     let s = std::fs::read_to_string(supervisor_dir().join("ports.json")).ok()?;
     let v: serde_json::Value = serde_json::from_str(&s).ok()?;

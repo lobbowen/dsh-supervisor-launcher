@@ -11,12 +11,10 @@ pub(crate) fn go_panel(app: &tauri::AppHandle, force: bool) {
         let h = app.clone();
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(*delay_ms));
-            // 每一拍都是一次复核，而不只是重发同一个 URL：端口上可能是「服务链已拆完的守卫」，
-            //   也可能刚被所有者停掉 —— 直接丢 iframe 只会得到引擎自己的错误页（WebKit 对被拒的
-            //   iframe 导航不触发 error 事件，shell.html 的重试兜底形同不存在）。最后一拍仍不在
-            //   服役就回引导页，那里重跑 guard_start 与就绪轮询；URL 现取（守卫可能已顺延端口）。
-            // 判据与 URL 必须同出一个答案（`panel_view`）：主帧加载那条导航路径不经本函数，
-            //   在此单独判一次服役并不能阻止它按未判据的 URL 抢先导航。
+            // 每一拍都重新判据并现取 URL（守卫可能已顺延端口），不是重发同一个地址；最后一拍仍不在
+            //   服役就回引导页重跑启动链。投未判据的地址只会把引擎错误页留给用户。
+            // 判据与 URL 必须同出 `panel_view` 一个答案：主帧那条导航路径不经本函数，在此单独判一次
+            //   服役并不能阻止它按未判据的 URL 抢先导航。
             let (url, serving) = crate::domain::guardctl::panel_view();
             if serving {
                 let _ = h.emit("shell:goto-panel", serde_json::json!({ "url": url, "seq": i, "force": force }));

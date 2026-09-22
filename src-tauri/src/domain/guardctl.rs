@@ -96,11 +96,10 @@ pub fn resolve_local(resource_dir: Option<std::path::PathBuf>) -> Option<(crate:
 }
 
 pub(crate) fn shutdown_all(port: u16) {
-  // 契约 节4.1 退出握手（阶段 3 增强）：
-  //  1) 带超时请求内核停全部被管对象，并等待回执（防止守卫挂起时壳无限阻塞）；
+  // 契约 节4.1 退出握手：1) 带超时请求内核停全部被管对象并等回执（守卫挂起时壳不无限阻塞）；
   //  2) 轮询 sessionState 直到 stopped（确认内核确实停好；守卫已不可达同样视为完成）；
-  //  3) 由所有者停止守卫进程——守卫自身从不停止自己（阶段 1 所有权归一）。
-  // 握手最长约 70s，其间守卫「不在服役」是本次退出的预期结果，看护必须闭嘴（否则退出途中把用户甩回引导页）。
+  //  3) 由所有者停止守卫进程——守卫自身从不停止自己（所有权归一）。
+  // 握手最长约 70s，其间「不在服役」是本次退出的预期结果，看护必须闭嘴（否则退出途中把用户甩回引导页）。
     EXITING.store(true, Ordering::SeqCst);
     let _ = crate::domain::localhttp::post_local_timeout(port, "/session/stop", std::time::Duration::from_secs(60));
     for _ in 0..40 {
@@ -454,8 +453,8 @@ pub(crate) fn serving_state(port: u16) -> Serving {
 }
 
 /// 面板投影的**唯一**判据：URL 与「此刻能不能投」必须同出一个答案。
-/// 分两处问就是此前那个假绿的形状：`go_panel` 查了服役、`shell_panel_url` 没查，
-/// 而壳框架主帧一定先按后者导航，于是被查过的那次判定永远来不及生效。
+/// 分两处问就会失效：`go_panel` 查了服役、`shell_panel_url` 没查，而壳框架主帧一定先按后者导航，
+/// 于是被查过的那次判定永远来不及生效。
 pub(crate) fn panel_view() -> (String, bool) {
     let port = crate::env::current_api_port();
     let serving = matches!(serving_state(port), Serving::Alive);
@@ -513,7 +512,7 @@ pub(crate) fn watch_panel(app: &tauri::AppHandle) {
 }
 
 /// 看护节拍与失服役门槛：单次 `serving_state` 最长约 1.2s（`SERVING_PROBE_TIMEOUT`），
-/// 3 拍 ≈ 15s —— 短于用户对「页面死了」的判断，长到能骑过守卫正常重启的间隙。
+/// 3 拍约 15s —— 短于用户对「页面死了」的判断，长到能骑过守卫正常重启的间隙。
 const PANEL_WATCH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 const PANEL_WATCH_DOWN_TICKS: u32 = 3;
 
