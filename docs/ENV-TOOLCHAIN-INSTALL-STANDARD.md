@@ -2,6 +2,8 @@
 
 > **本文件是「壳的环境检测 / 安装 / 下载」的唯一事实源（SSOT）**，2026-09-16 立。
 > 目标：Node 与 npm **并行同权**检测与安装；全平台同一逻辑；引导页所有安装/下载**同一 UI 规范**。
+> 2026-09-22 修订：内核包改由壳按该源 `dist` 元数据先下载（真分母进度）再装本地 tarball；
+> 进度条以「只准由分母驱动」的形态回归，`#dlMeter` 是唯一条元素、`installMeter` 是唯一写入点（见 §3.2）。
 
 ---
 
@@ -187,16 +189,20 @@ event "install_error":    { "kind": ..., "error": "文字" }
 
 推论（写进代码的就是这几条）：
 
-1. **只有两种合法进度**：按字节下载的比例（Node 归档、桌面壳安装包），或如实的阶段/心跳文字 + `null`。
+1. **只有两种合法进度**：按字节下载的比例（Node 官方归档、内核包 tarball、桌面壳安装包），或如实的阶段/心跳文字 + `null`。
    阶段分数（按代码顺序写的 `0.1 / 0.3 / 0.85`）**全部删除** —— 它们与真实进度无关。
 2. 心跳数据来自**唯一的有界执行器**：`bounded::run_watch` 在子进程运行期间周期回调 `Live { elapsed, lines,
-   last_line }`（输出重定向到临时文件，不经管道，所以能如实说的只有行数与末行）。`core::install_version`
-   把它透传给调用方，**自己一字文案都不拼**（组装层不写用户文案）。
+   last_line }`（输出重定向到临时文件，不经管道，所以能如实说的只有行数与末行）。`core::install_spec`
+   （远程 spec 与本地包共用）把它透传给调用方，**自己一字文案都不拼**（组装层不写用户文案）。
 3. 服务端未给 `Content-Length`、给的总量为 0、或**总量小于已取回量**（ureq 的 `into_reader()` 在
    `Transfer-Encoding: chunked` 时忽略 Content-Length 一路读到流结束）→ 一律退回「已取回 N MB」+ `null`。
    文案自相矛盾比少一根进度条糟糕得多。
 4. 内核安装**开工即说清预算**：`正在安装内核 v…：共 N 个镜像源，逐源尝试（单源上限 15 分钟 · 总上限 17 分钟）`，
-   换源时发「第 i/N 个源 …」——用户报的「不知道是不是卡住」，缺的从来不是进度条，是**说清预算**。
+   换源时发「第 i/N 个源 …」。用户报的「不知道是不是卡住」，第一需要的不是说清预算，是**一个真分母**：
+   `npm install -g pkg@ver` 根本不吐取件进度，所以内核包由壳按该源自己的 `dist` 元数据先下 tarball
+   （`core::dist_from` -> `core::fetch_dist`，字节进度）再 `install_local` 装本地包。
+   源不给 `dist.size` 时进度退回「已取回 N MB」+ `null`；取件失败则发**降级行**（`install::kernel_direct`）
+   后换 npm 直装 —— 降级必须可见，否则用户看到的是进度条凭空消失。
 5. 「正在下载」/「正在安装内核」这类措辞在 `install.rs` 之外出现即红（G-12C）；反向保证 `install.rs` 必须
    **真的**持有它们，否则「不得有第二处」会退化成「一处都没有」的空转门禁。
 
@@ -257,33 +263,39 @@ npm 检测」，根因就是这个出口不存在 —— 探测在跑，但结�
 以**壳更新（`40-shell-update.js`）的纯文字风格**为基准：
 
 - 结构：沿用既有 `steps` 步骤条 + `status` 单行文字；
-- **删除进度条**：`#prog` / `#progBar` 元素与 `NS.showProgress` / `NS.hideProgress` **全部移除**；
-- 所有安装/下载（node / npm / kernel / shell）**只显示文字**，形态统一为：
+- **进度条只准由真分母驱动**：元素 `#dlMeter`（原生 `<progress>`）+ 唯一写入点 `10-ui.js::installMeter`。
+  2026-09-16 删除的是「按代码顺序涨的假条」，不是进度本身；后端如今只在拿到真实字节比时才发非 `null`
+  的 `progress`，所以条可以回来 —— 但 `progress === null` 必须**隐藏**，不得退化成 0%（门禁 G-3 强制）；
+- 所有安装/下载（node / npm / kernel / shell）文字形态统一为：
   `正在下载 <目标> … <进度文字>` → `正在安装 <目标> …` → `<目标> 已就绪`；
 - 统一入口（`10-ui.js` 导出，**唯一实现**）：
 
 ```js
-NS.install.begin(kind, text)   // 显示安装态并写文字（无进度条）
-NS.install.text(kind, text)    // 仅更新文字
-NS.install.done(kind, text)    // 完成文字
-NS.install.fail(kind, text)    // 失败文字（走既有 fail 面板）
-NS.versionLabel(v)             // 版本号形态归一（唯一实现）；null/空 → ''，由调用方说明未知
+NS.install.begin(kind, text, ratio)  // 显示安装态并写文字；ratio 无值即隐藏条
+NS.install.text(kind, text, ratio)   // 仅更新文字与条
+NS.install.done(kind, text)          // 完成文字（隐藏条）
+NS.install.fail(kind, text)          // 失败文字（走既有 fail 面板，隐藏条）
+NS.install.meter(ratio)              // 条的唯一写入点：非 0..1 的数一律当「没有分母」
+NS.versionLabel(v)                   // 版本号形态归一（唯一实现）；null/空 → ''，由调用方说明未知
 ```
 
 **不变量 T-6**：任何模块**不得**自行拼装下载/安装样式；一律调用 `NS.install.*`。
-**不变量 T-7**：全仓不得再出现 `showProgress` / `hideProgress` / `progBar` / `#prog`（门禁强制）。
+**不变量 T-7（条必须由分母驱动）**：`#dlMeter` 的元素与赋值点各只有一处；旧假条形态
+（`showProgress` / `hideProgress` / `progBar` / `#prog`）仍在禁用名单内。比值只能来自
+`install_progress.p.progress`，前端**不得**自行算分数或写常量分数（门禁 G-3 正向 + 反向钉住）。
 **不变量 T-7b**：诊断串（`10-ui.js::diagText`）与就绪行同源，同样必须 node 与 npm **并列** ——
 排障时「npm 到底探到了没有」不该再靠读代码猜。
 
 ### 3.3 事件消费（`80-init.js`，唯一入口）
 
-- `install_progress` → `NS.install.text(p.kind, p.status)`；
+- `install_progress` → `NS.install.text(p.kind, p.status, p.progress)`；
 - `install_done` → `NS.install.done(p.kind, ...)`；
 - `install_error` → `NS.install.fail(p.kind, p.error)`；
 - 删除对旧事件的监听。
 
-`p.progress` **可以**是 `null`（T-13：多数步骤没有可测分母）。前端只消费 `p.status` 文字，
-不得为「把进度条画回来」而把 `null` 读成 `0` —— 那会诱导后端重新编造分数（T-7）。
+`p.progress` **可以**是 `null`（T-13：多数步骤没有可测分母）。文字无条件更新；条只在
+`typeof p.progress === 'number'` 时出现，`null` 一律**隐藏**。把 `null` 读成 `0` 会让「没有分母」
+在界面上伪装成「卡在原地的进度」，并诱导后端重新编造分数（T-7 的来由）。
 
 ---
 

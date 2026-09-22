@@ -155,24 +155,38 @@ fn g2_run_install_validates_npm_inside_body() {
     );
 }
 
-/// G-3：递归扫描 bootstrap（含 .html/.js）不得残留进度条实现。
-/// 不变量 T-7：进度条与 showProgress/hideProgress 全部移除，安装/下载只留文字。
+/// G-3：进度条只准由**真分母**驱动（SSOT §3.2 不变量 T-7）。
+/// 条曾被整体删除，因为那时的分数按代码顺序编出来、与真实字节无关。后端现在只在拿到
+/// Content-Length / dist.size 时才发非 null 比值，所以条可以回来 —— 但「唯一元素 + 唯一写入点 +
+/// 无分母即隐藏」必须由门禁钉住：这三条一松，假条会以完全相同的形态长回来，而这次它带着合法外观。
 #[test]
-fn g3_bootstrap_has_no_progress_bar_leftovers() {
-    let banned = ["showProgress", "hideProgress", "progBar", "id=\"prog\""];
+fn g3_progress_bar_is_denominator_driven() {
+    let legacy = ["showProgress", "hideProgress", "progBar", "id=\"prog\""];
     let mut hits: Vec<String> = Vec::new();
+    let mut meter_files: Vec<String> = Vec::new();
     for (p, text) in walk("bootstrap") {
         for (n, line) in text.lines().enumerate() {
-            if banned.iter().any(|b| line.contains(b)) {
+            if legacy.iter().any(|b| line.contains(b)) {
                 hits.push(format!("{}:{} {}", p.display(), n + 1, line.trim()));
             }
         }
+        if text.contains("dlMeter") {
+            meter_files.push(p.file_name().and_then(|s| s.to_str()).unwrap_or_default().to_string());
+        }
     }
-    assert!(
-        hits.is_empty(),
-        "bootstrap 仍残留进度条实现（SSOT §3.2 不变量 T-7）：\n{}",
-        hits.join("\n")
-    );
+    assert!(hits.is_empty(), "bootstrap 仍残留旧的假进度条实现（SSOT §3.2 不变量 T-7）：\n{}", hits.join("\n"));
+    meter_files.sort();
+    assert_eq!(meter_files, vec!["10-ui.js".to_string(), "bootstrap.html".to_string()],
+        "条的元素与写入点必须各只有一处（T-7）");
+    let ui = read("bootstrap/js/10-ui.js");
+    let meter = fn_body(&ui, "function installMeter");
+    assert!(meter.contains("typeof ratio === 'number'"), "installMeter 没把比值是否为数当判据（T-7）");
+    assert!(meter.contains("'none'"), "无分母时条必须隐藏而不是画 0%（0 会被读成「还没开始」）：\n{}", meter);
+    assert!(meter.contains("el.value = r"), "条的值未经 installMeter 这一处：\n{}", meter);
+    assert_eq!(ui.matches("el.value = ").count(), 1, "installMeter 之外还有第二处写条的值（T-7）");
+    let init = read("bootstrap/js/80-init.js");
+    assert!(init.contains("NS.install.text(p.kind, p.status, p.progress)"),
+        "事件里的比值没被送进唯一渲染点（T-7）");
 }
 
 /// G-4：扫描 src 不得出现旧事件名（SSOT §2.4：改统一 install_* 且**无兼容层**）。
@@ -568,7 +582,7 @@ fn g11_windows_real_artifact_step_actually_runs_the_ignored_test() {
 ///     反向保证：`install.rs` 里必须**出现**这两个措辞（见下面的前置断言），
 ///     否则「不得有第二处」会退化成「一处都没有」的空转门禁。
 ///   D `progress` 被写成裸数字 —— 旧的阶段分数（0.1 / 0.3 / 0.85）按代码顺序编造，
-///     与真实进度无关，前端因此删掉了进度条；无分母必须发 `None`。
+///     与真实进度无关；无分母必须发 `None`，前端的条据此隐藏（T-7，见 G-3）。
 fn g12_violations(files: &[(String, String)]) -> Vec<String> {
     let mut v = Vec::new();
     for (path, text) in files {

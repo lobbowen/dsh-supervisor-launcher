@@ -4,6 +4,39 @@
 
 ## [未发布]
 
+### 内核下载第一次有了真分母：壳按 dist 元数据先取包，再装本地 tarball（T-7 反转）
+
+现场（1.2.1 起多次报告，1.2.2 仍在）：「内核的下载依然没有整个的下载进度显示」。这条不是没做，
+是**做不出来**：写入路径挂在 `npm install -g <pkg>@<ver>` 上，而 npm 根本不吐取件进度，
+所以无论前端怎么画，能拿到的只有心跳文字。要真进度只能换路径。
+
+- `core::dist_from` 读**该源自己**的 `versions[v].dist`（`tarball` / `size` / `integrity`），
+  `core::fetch_dist` 经全仓唯一的带进度 GET（`node::http_get_bytes_progress`，新增 `total_hint`
+  以承接 registry 声明的字节数）边下边报，落到 `<状态根>/dl/<slug>.tgz`，再 `core::install_local`
+  以 `file:` 形态装本地包。下载行由 `install.rs::download_line` 一处算出「已取 / 总量 / 百分比」。
+- 核对没有省：字节数与声明不符即判截断，`integrity` 的 SHA512 不符拒绝安装，两者都上屏；
+  源没给校验值时明说「按字节数核对」，不替源背书。
+- 任一步失败（源不给 dist / URL 异常 / 截断 / 摘要不符）发**降级行**后退回 npm 直装 ——
+  降级可见，且不因新路径砍掉原有能力。逐源循环、总预算、`--prefix` 反推一律不变。
+- 进度条以「只准由分母驱动」的形态回归：`#dlMeter` 是唯一条元素、`installMeter` 是唯一写入点，
+  `progress === null` 一律隐藏（画 0% 会被读成「还没开始」）。门禁 G-3 从「不得有条」改成
+  「条必须由分母驱动」，并加 K-9/K-10 正向与反向判据；SSOT `ENV-TOOLCHAIN-INSTALL-STANDARD.md`
+  §3.2/§3.3 同步改文。node 归档与桌面壳安装包共用同一条渲染路径，也一起获得了条。
+- 内核包零运行时依赖（实测 `package.json` 无 dependencies），故取件阶段就是下载的全部成本；
+  若将来引入依赖，npm 解包段仍回落到心跳行，不会伪装成分母。
+
+### 环境探测过程上屏：预热在引导即启动，registry 问号不再被 TTL 回放
+
+「看不到 npm 的检测过程」有另一半原因：registry 那一格只读预热快照，而预热**只由引导页 70-boot
+那一枪触发**，任何不走它的路径都会让该格永久停在「测速尚未完成」；`WARMING` 在线程 `spawn` 失败时被
+`let _ =` 吞掉后永久为 true，之后再也不会有第二次预热。
+
+- `main.rs` 在 `nodeprobe::start()` 旁一并 `mirror::warmup_async()`；`spawn` 失败回滚 `WARMING` 并记日志。
+- `probes.rs` 里 registry 记录绕过依赖维度的 10 秒 TTL 复用：它只是读一次内存快照，复用会让预热完成后
+  面板仍念着旧问号 —— 那格看起来像「检测卡住」，实际是缓存在回放。
+- `30-mirror.js` 的轮询窗口从 24 秒放宽到 60 秒，盖过后端两轮 `probe_all` 的最坏耗时。
+
+
 ### 注释纪律进壳仓并全量压缩：门禁缺失才是论文式注释的根因
 
 现场（用户 Windows 真机 1.2.2）：环境检测看不到 npm 的探测过程、内核下载没有进度、

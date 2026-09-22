@@ -168,9 +168,8 @@ fn b4_network_steps_have_timeout_and_skip() {
 
 #[test]
 fn b5_download_progress_is_wired() {
-    // 2026-09-16（SSOT ENV-TOOLCHAIN-INSTALL-STANDARD §3.2）：下载/安装反馈统一为
-    //   **文字形态**的 install_progress，进度条（progBar/#prog）已按规范删除。
-    //   故 B5 的判据从「有进度条」改为「有统一安装事件的文字反馈」。
+    // 2026-09-16（SSOT ENV-TOOLCHAIN-INSTALL-STANDARD §3.2）：下载/安装反馈统一走 install_progress。
+    //   旧的假条（progBar/#prog）仍在禁用名单内；条能否出现由 G-3 判（只准真分母驱动）。
     let html = bootstrap_html();
     assert!(
         html.contains("install_progress"),
@@ -178,7 +177,7 @@ fn b5_download_progress_is_wired() {
     );
     assert!(
         !html.contains("progBar") && !html.contains("id=\"prog\""),
-        "B5 FAIL 进度条元素仍在（SSOT §3.2 要求删除，只留文字）"
+        "B5 FAIL 旧的假进度条元素仍在（SSOT §3.2：条只准由真分母驱动，见 G-3）"
     );
     let m = crate_sources();
     assert!(

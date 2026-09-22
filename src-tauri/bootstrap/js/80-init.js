@@ -61,12 +61,12 @@
     });
   }
   // 安装/下载事件的唯一消费入口：node / npm / kernel / shell 三平台同一形态，一律转交
-  // NS.install.*。这里不拼下载/安装文案、不触碰进度条 - 各处各自拼文案会让同一件事在不同
-  // 阶段面貌不一，进度显示与真实进度脱节。旧事件名已按规范删除，无兼容层（门禁 G-4）。
+  // NS.install.*。这里不拼下载/安装文案，也**不自行判定进度**：条只认事件里的 progress 字段
+  // （后端 download_line 由真实字节算出），null 表示本步没有分母。旧事件名已按规范删除，无兼容层（门禁 G-4）。
   if (NS.evt) {
     NS.evt.listen('install_progress', function (e) {
       var p = e.payload || {};
-      NS.install.text(p.kind, p.status);
+      NS.install.text(p.kind, p.status, p.progress);
     });
     NS.evt.listen('install_done', function (e) {
       var p = e.payload || {};

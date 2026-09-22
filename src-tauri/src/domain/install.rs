@@ -78,10 +78,13 @@ pub(crate) fn download(app: &tauri::AppHandle, kind: InstallKind, done: u64, tot
 pub(crate) fn download_line(kind: InstallKind, done: u64, total: Option<u64>) -> (String, Option<f32>) {
     let mb = |b: u64| b as f64 / 1048576.0;
     match total.filter(|t| *t > 0 && done <= *t) {
-        Some(t) => (
-            format!("正在下载 {}：{:.1} / {:.1} MB…", kind.dl_label(), mb(done), mb(t)),
-            Some((done as f32 / t as f32).min(1.0)),
-        ),
+        Some(t) => {
+            let ratio = (done as f32 / t as f32).min(1.0);
+            (
+                format!("正在下载 {}：{:.1} / {:.1} MB（{}%）…", kind.dl_label(), mb(done), mb(t), (ratio * 100.0) as u32),
+                Some(ratio),
+            )
+        }
   // 服务端未给 Content-Length：只报已取回量（文字仍然可用），比值不猜。
         None => (format!("正在下载 {}：已取回 {:.1} MB…", kind.dl_label(), mb(done)), None),
     }
@@ -145,7 +148,50 @@ pub(crate) fn kernel_source(app: &tauri::AppHandle, tried: usize, total: usize, 
     stage(
         app,
         InstallKind::Kernel,
-        &format!("正在安装内核 · 第 {}/{} 个源 {} · npm install 中…", tried, total, origin),
+        &format!("正在安装内核 · 第 {}/{} 个源 {}", tried, total, origin),
+    );
+}
+
+/// 内核包**取件前**的说明行：分母是该源自己声明的字节数，不是估的。
+/// 「这个源没给校验值」也要上屏：只按字节数核对与按 SHA512 核对不是一回事，藏起来等于替源背书。
+pub(crate) fn kernel_fetch(app: &tauri::AppHandle, version: &str, origin: &str, size: Option<u64>, verified: bool) {
+    let size_txt = match size {
+        Some(t) => format!("{:.1} MB", t as f64 / 1048576.0),
+        None => "大小未知".to_string(),
+    };
+    stage(
+        app,
+        InstallKind::Kernel,
+        &format!(
+            "正在下载内核包 v{}（{} · 源 {} · {}）",
+            version,
+            size_txt,
+            origin,
+            if verified { "SHA512 核对" } else { "该源未给校验值，按字节数核对" }
+        ),
+    );
+}
+
+/// 取件完成行：进度条到此为止，后面是 npm 解包装链（没有字节分母，只能报心跳）。
+/// 少了这一行就会留下「条走到 100% 后长时间不动」的观感，那与卡死无法区分。
+pub(crate) fn kernel_fetched(app: &tauri::AppHandle, bytes: u64, verified: bool) {
+    stage(
+        app,
+        InstallKind::Kernel,
+        &format!(
+            "内核包下载完成（{:.1} MB · {}）· npm 本地安装中…",
+            bytes as f64 / 1048576.0,
+            if verified { "SHA512 已核对" } else { "字节数已核对" }
+        ),
+    );
+}
+
+/// 真分母取件没成，退回 registry 直装：**降级原因必须上屏**，否则用户看到的是进度条凭空消失。
+pub(crate) fn kernel_direct(app: &tauri::AppHandle, origin: &str, why: &str) {
+    stage(
+        app,
+        InstallKind::Kernel,
+        &format!("内核包未能直接下载（源 {} · {}）· 改用 npm registry 安装", origin, why),
     );
 }
 

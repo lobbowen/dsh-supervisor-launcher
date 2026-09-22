@@ -4,10 +4,13 @@
   function startMirrorWarmup() {
     try { NS.core.invoke('mirror_warmup').catch(function () {}); } catch (e) {}
     var tries = 0;
+    // 轮询窗口必须盖过后端整轮预热：两轮 probe_all，每轮上限 PROBE_TIMEOUT（20s）。
+    //   原来 24s 就收工，预热还没落地就已经没人读缓存了 —— registry 那一格于是永久停在问号。
+    var MAX_TRIES = 100;
     if (NS.warmTimer) clearInterval(NS.warmTimer);
     NS.warmTimer = setInterval(function () {
       tries++;
-      if (tries > 40) { clearInterval(NS.warmTimer); NS.warmTimer = null; return; }
+      if (tries > MAX_TRIES) { clearInterval(NS.warmTimer); NS.warmTimer = null; return; }
       // mirror_cached 是**纯读缓存**（无网络 I/O），可安全高频轮询
       NS.core.invoke('mirror_cached').then(function (m) {
         if (!m || !m.ready) return;

@@ -11,14 +11,16 @@ const HTTP_TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1
 
 /// 取回整个响应体（不关心进度的小文件：SHASUMS256.txt、index.json）。
 fn http_get_bytes(url: &str) -> Result<Vec<u8>, String> {
-    http_get_bytes_progress(url, None)
+    http_get_bytes_progress(url, None, None)
 }
 
-/// 取回整个响应体，边下边报字节进度。`on_bytes(已取回, 总量)`：总量取自服务端 Content-Length，
-/// 取不到就是 None —— 没有分母时宁可只报「已取回多少」，也不许把臆造的分数发出去。
-/// 按块回调而不是整块：Node 官方归档 30~90MB，慢网下整块读取要数分钟，而这段时间此前对 UI 完全不可见。
-fn http_get_bytes_progress(
+/// 取回整个响应体，边下边报字节进度。`on_bytes(已取回, 总量)`：总量优先取响应头的 Content-Length，
+/// 没有就用 `total_hint`（调用方从别处已知的真实大小，如 registry 的 `dist.size`），两者都没有才是
+/// None。按块回调而不是整块：Node 官方归档 30~90MB，慢网下整块读取要数分钟，而这段时间此前对 UI
+/// 完全不可见。`pub(crate)`：全仓只有这一个带进度的 GET，内核包下载必须复用它而非再写一份客户端。
+pub(crate) fn http_get_bytes_progress(
     url: &str,
+    total_hint: Option<u64>,
     on_bytes: Option<&dyn Fn(u64, Option<u64>)>,
 ) -> Result<Vec<u8>, String> {
   // 与镜像探测共用同一个 agent：代理与超时只有一处定义（见 mirror::agent）。
@@ -30,6 +32,7 @@ fn http_get_bytes_progress(
     let total = resp
         .header("content-length")
         .and_then(|v| v.trim().parse::<u64>().ok())
+        .or(total_hint)
         .filter(|t| *t > 0);
   // 预分配只是省扩容，因此对声称的大小设上限（Content-Length 由服务端给，不可全信）。
     let mut buf = Vec::with_capacity(total.unwrap_or(0).min(64 * 1024 * 1024) as usize);
@@ -201,7 +204,7 @@ pub fn download_verified(
     for base in &order {
         let base: &str = base.as_str();
         let file_url = format!("{}/{}/{}", base, version, file);
-        let data = match http_get_bytes_progress(&file_url, Some(on_bytes)) {
+        let data = match http_get_bytes_progress(&file_url, None, Some(on_bytes)) {
             Ok(d) => d,
             Err(e) => { last_err = Some(e); continue; }
         };
