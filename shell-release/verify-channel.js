@@ -61,12 +61,10 @@ function loadPubKey(conf) {
 
 function sha256(buf) { return crypto.createHash('sha256').update(buf).digest('hex'); }
 
-// 清单里的 signature 是**双层 base64**：外层解出一段 4 行 minisign 文本（untrusted comment /
-// 签名块 / trusted comment / 全局签名），签名块再 base64 解出 alg(2) + keyId(8) + ed25519(64) = 74 字节。
-// 本脚本对它只判两件事：这把钥匙是不是配置里那把（keyId 相等）、这份字节是不是本次构建的那份（sha256 相等）。
-// 「签名本身成不成立」不在这里判 —— 那是 src-tauri/tests/updater_artifacts.rs 的 V2/V3/V4，
-// 它用 tauri-plugin-updater 内部的同一个 minisign-verify crate，与用户端逐字同口径；
-// 在 node 里重实现只有两种结局：口径不对就年年假红，口径错了还判绿。
+// 清单里的 signature 是双层 base64：外层解出 4 行 minisign 文本，第二行再解出 alg(2)+keyId(8)+ed25519(64)=74 字节。
+// 这里只判「钥匙是不是配置里那把」「字节是不是本次构建那份」；签名有效性归 updater_artifacts V2/V3/V4
+// （与用户端同一个 minisign-verify crate）。在 node 里重实现验签只有两种结局：口径不对年年假红，
+// 口径错了还判绿 —— minisign 的 "ED" 是 prehash 变体，Node stdlib 的纯 Ed25519 对已知正确三元组也验不过。
 function unwrapSig(key, b64, wantKeyId, wantId) {
   const text = Buffer.from(b64, 'base64').toString('utf8');
   const lines = text.split(/\r?\n/).filter((l) => l.trim().length);
