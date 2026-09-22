@@ -169,7 +169,7 @@ impl ServiceControl for Impl {
     }
 
     /// 建立 systemd 用户单元（幂等，且内容过时时自愈）：
-    /// 先算期望内容与磁盘比对，不存在则写入、不同则重写并 reload、一致则不触碰。
+    /// 先算期望内容与磁盘比对，不存在则写入并首次启用、不同则只重写定义、一致则不触碰。
     fn ensure_defined(&self, spec: &LaunchSpec) -> Result<String, String> {
         let path = self.definition_path();
         // 模板内嵌（不依赖外部 systemd/*.service 文件）。
@@ -201,6 +201,11 @@ impl ServiceControl for Impl {
             Command::new("systemctl").args(["--user", "daemon-reload"]),
             SVC_QUICK,
         );
+        // 自愈重写只换定义，绝不重放 enable/enable-linger：自启开关的唯一写者是内核面板（D5）。
+        //   在升级路径上重放 = 用户关掉自启后，任何一次模板演进都会把它偷偷打开。
+        if is_update {
+            return Ok(format!("已更新定义（自启位未改动） {}", path.display()));
+        }
         let en = crate::bounded::run(
             Command::new("systemctl").args(["--user", "enable", "dsh-supervisor.service"]),
             SVC_NORMAL,
@@ -212,19 +217,15 @@ impl ServiceControl for Impl {
         );
         // 注意：enable 失败不算致命 —— 服务定义已写入，start 时仍可拉起（并另有 spawn 兜底）。
         // 故这里只如实描述状态，不返回 Err（否则会把「可继续」的情形误判为彻底失败）。
-        // 文案区分「新建」与「更新」（自愈时用户从 shell.log 就能看出定义被升级过）。
-        let verb = if is_update { "已更新并启用" } else { "已建立并启用" };
         match en {
-            Ok(o) if o.success => Ok(format!("{} {}", verb, path.display())),
+            Ok(o) if o.success => Ok(format!("已建立并启用 {}", path.display())),
             Ok(o) => Ok(format!(
-                "{}（enable 未成功：{}，start 时重试）{}",
-                verb,
+                "已建立（enable 未成功：{}，start 时重试）{}",
                 o.stderr.trim(),
                 path.display()
             )),
             Err(e) => Ok(format!(
-                "{}（enable 超时/失败：{}，start 时重试）{}",
-                verb,
+                "已建立（enable 超时/失败：{}，start 时重试）{}",
                 e,
                 path.display()
             )),
@@ -339,5 +340,77 @@ mod tests {
         }
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(got, Some("pkexec"), "A-2 FAIL 未按 PATH 命中伪造的 pkexec");
+    }
+
+    /// D5 判据（IL-2 壳仓半边）：自启位（systemctl enable / loginctl enable-linger）
+    /// 只允许写在「定义首次建立」分支里。违规返回 Some(说明)，合法返回 None。
+    fn autostart_written_outside_first_creation(body: &str) -> Option<String> {
+        let enable = "\"enable\"";
+        let linger = "enable-linger";
+        let guard = match body.find("if is_update") {
+            Some(i) => i,
+            None => return Some("没有「更新即早返回」守卫".to_string()),
+        };
+        let (before, after) = body.split_at(guard);
+        if before.contains(enable) || before.contains(linger) {
+            return Some("自启位写在守卫之前（更新路径必然执行到）".to_string());
+        }
+        let ret = match after.find("return Ok(") {
+            Some(i) => i,
+            None => return Some("守卫没有提前返回，enable 仍会重放".to_string()),
+        };
+        for needle in [enable, linger] {
+            if let Some(at) = after.find(needle) {
+                if at < ret {
+                    return Some(format!("自启位早于守卫返回: {}", needle));
+                }
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn d5_definition_self_heal_does_not_rewrite_autostart() {
+        let raw = include_str!("linux.rs");
+        let code = strip_comments(raw);
+        let body = code
+            .split("fn ensure_defined")
+            .nth(1)
+            .expect("D5 FAIL 未找到 ensure_defined")
+            .split("\n    fn start(&self)")
+            .next()
+            .expect("D5 FAIL ensure_defined 尾部边界未找到");
+
+        assert_eq!(
+            autostart_written_outside_first_creation(body),
+            None,
+            "D5 FAIL 自愈重写重放了自启位 —— 用户关闭自启后会被下一次定义升级打开"
+        );
+        // 能力零损伤：首次建立仍必须落 enable + linger（否则新装无自启、注销即停守卫）。
+        assert!(
+            body.contains("\"enable\"") && body.contains("enable-linger"),
+            "D5 FAIL 首次建立分支缺 enable 或 enable-linger（收窄不应砍掉建立能力）"
+        );
+
+        // 反向合成样本：证明判据不空转。
+        let regressions = [
+            ("无守卫", "  w();\n  s(\"enable\");\n  l(\"enable-linger\");\n"),
+            ("守卫前就写", "  s(\"enable\");\n  if is_update {\n    return Ok(());\n  }\n"),
+            ("守卫不返回", "  if is_update {\n    log();\n  }\n  s(\"enable-linger\");\n"),
+        ];
+        for (name, src) in regressions {
+            assert!(
+                autostart_written_outside_first_creation(src).is_some(),
+                "D5 FAIL 反向样本「{}」未被判红",
+                name
+            );
+        }
+        assert_eq!(
+            autostart_written_outside_first_creation(
+                "  if is_update {\n    return Ok(());\n  }\n  s(\"enable\");\n  l(\"enable-linger\");\n"
+            ),
+            None,
+            "D5 FAIL 合法形态被误判"
+        );
     }
 }
