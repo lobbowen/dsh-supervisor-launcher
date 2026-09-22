@@ -98,11 +98,16 @@ pub(crate) fn shutdown_all(port: u16) {
             _ => std::thread::sleep(std::time::Duration::from_millis(250)),
         }
     }
-    if let Err(e) = crate::platform::service().stop() {
-  // ：除 stderr（GUI 下常丢）外**必须落盘** —— 退出未真正停掉守卫是用户
-  //  可感知的严重缺陷（"程序关不掉"），必须留下可诊断痕迹。
-        eprintln!("[shell] 停止守卫失败: {}（可手动 systemctl --user stop dsh-supervisor）", e);
-        crate::update::log(&format!("[shell] 停止守卫失败: {}", e));
+    // 完成的断言只能在 stop() 真的成功时说：三平台的自启/看护通道都不会在本次登录内把守卫
+    //   拉回（Windows 会 /Delete 看护任务、Linux unit 保持 enabled 只在下次登录起、macOS 已 bootout），
+    //   这句话是「为什么重开程序才恢复」的唯一线索，说错了就把排错方向整个带偏。
+    //   失败分支仍双写：GUI 下 stderr 常丢，而「程序关不掉」是用户可感知缺陷，必须留下痕迹。
+    match crate::platform::service().stop() {
+        Ok(()) => crate::update::log("[shell] 退出握手完成：守卫已停止，本次登录内不会自动拉起；重新打开程序即恢复"),
+        Err(e) => {
+            eprintln!("[shell] 停止守卫失败: {}（可手动 systemctl --user stop dsh-supervisor）", e);
+            crate::update::log(&format!("[shell] 停止守卫失败: {}", e));
+        }
     }
 }
 
@@ -176,22 +181,41 @@ pub(crate) fn ensure_guard(app: &tauri::AppHandle) -> Result<(), LaunchError> {
         let _ = app.emit("guard_progress", serde_json::json!({ "status": s }));
         crate::update::log(s);
     };
+    // 早退必须回答「这个守卫还在为本产品服役吗」，而不是「端口上有没有人」：走完 /session/stop
+    //   握手的守卫进程还占着端口，服务链却已拆光，据此早退会把面板交给一个不再干活的守卫
+    //   （观感＝127.0.0.1 拒绝连接），而 P5 的即时启动只会让新守卫撞守卫锁退出。
     if port_open(port) {
-        step("守卫端口已开 · 跳过启动");
-        // 守卫已活时也确保一次服务定义：退出时 Windows stop() 会 /Delete 看护任务，而登录任务可能已先拉起
-        // 守卫使本函数提前返回，那样看护任务永不重建、崩溃自愈在整个会话内失效。ensure_defined 三平台幂等且自愈。
-        // 不复用 spec 变量名以免 K-3 的顺序判据锚到本提前返回分支；不得在此引入平台条件编译（platform/ 之外禁止平台分支）。
-        if let Some((rt_wd, guard_wd)) = resolve_local(None) {
-            match crate::platform::LaunchSpec::from_runtime(&rt_wd, guard_wd) {
-                Ok(spec_wd) => {
-                    if let Err(e) = crate::platform::service().ensure_defined(&spec_wd) {
-                        crate::update::log(&format!("守卫已在运行，但服务定义确保失败: {}", e));
+        let verdict = serving_state(port);
+        step(&verdict.note());
+        if matches!(verdict, Serving::Alive | Serving::Sick) {
+            // 守卫已在服役（或只是还没应答）时也确保一次服务定义：退出时 Windows stop() 会 /Delete
+            // 看护任务，而登录任务可能已先拉起守卫使本函数提前返回，那样看护任务永不重建、崩溃自愈
+            // 在整个会话内失效。ensure_defined 三平台幂等且自愈。不复用 spec 变量名以免 K-3 的顺序
+            // 判据锚到本提前返回分支；不得在此引入平台条件编译（platform/ 之外禁止平台分支）。
+            if let Some((rt_wd, guard_wd)) = resolve_local(None) {
+                match crate::platform::LaunchSpec::from_runtime(&rt_wd, guard_wd) {
+                    Ok(spec_wd) => {
+                        if let Err(e) = crate::platform::service().ensure_defined(&spec_wd) {
+                            crate::update::log(&format!("守卫已在运行，但服务定义确保失败: {}", e));
+                        }
                     }
+                    Err(e) => crate::update::log(&format!("守卫已在运行，但启动规格组装失败: {}", e)),
                 }
-                Err(e) => crate::update::log(&format!("守卫已在运行，但启动规格组装失败: {}", e)),
             }
+            return Ok(());
         }
-        return Ok(());
+        // 唯一的例外：进程活着但服务链已拆（走过 /session/stop）。由所有者先把它停干净，再落回
+        //   下面的正常启动序列 —— 看护通道刚被 stop() 摘掉，没有第二条恢复路径。
+        if !stop_and_await_release(port) {
+            return Err(LaunchError::new(
+                "GUARD_STOP_FAILED",
+                format!(
+                    "守卫会话已停但进程未在预算内让出端口 {}，故未重拉。守卫日志末段：{}",
+                    port,
+                    guard_log_tail()
+                ),
+            ));
+        }
     }
 
   // P0 运行期契约：Node/npm 的**单一事实源**（缺失则先解析并原子落盘）。
@@ -379,6 +403,68 @@ pub(crate) fn ready(port: u16, http_timeout: std::time::Duration) -> Readiness {
     }
 }
 
+/// 「守卫还在为本产品服役吗」——`ready()`（TCP + /healthz 2xx）**且**会话没在退出链里。
+/// 裸 TCP 单独回答不了这个问题（`port_open` 的文档已把它限死为「否定问题」判据）：
+/// 服务链拆完的守卫照样 accept 连接，`/healthz` 也照样 2xx，只有 `/session/status` 说真话。
+#[derive(Debug)]
+pub(crate) enum Serving {
+  /// 在服役：可以跳过启动。
+    Alive,
+  /// 端口通而 /healthz 不通（启动中或病了）：仍不去重启动，就绪与否交给 `await_ready` 说。
+    Sick,
+  /// /healthz 2xx 但会话态为 stopping/stopped：进程活着，服务链已拆。
+    SessionHalted(String),
+}
+
+impl Serving {
+  /// 启动过程里的一句话证据（规范 H8）：静默等待与卡死要能区分，两种「跳过」的下一步也不同。
+    pub(crate) fn note(&self) -> String {
+        match self {
+            Serving::Alive => "守卫在服役 · 跳过启动".to_string(),
+            Serving::Sick => "守卫端口已开但未应答 /healthz · 不重复启动，等待就绪判定".to_string(),
+            Serving::SessionHalted(state) => {
+                format!("守卫在监听但会话已停（{}）· 由所有者先停干净再重拉", state)
+            }
+        }
+    }
+}
+
+/// 问一次「还在为本产品服役吗」：先 `ready()`，再读 `/session/status`（两个端点、两次往返）。
+pub(crate) fn serving_state(port: u16) -> Serving {
+    if ready(port, SERVING_PROBE_TIMEOUT) != Readiness::Ready {
+        return Serving::Sick;
+    }
+    match crate::domain::localhttp::get_session_state(port) {
+        Some(s) if s == "stopping" || s == "stopped" => Serving::SessionHalted(s),
+        // 读不到会话态就按「在服役」处理：探针抖动不得升级成「停掉一个健康守卫」。
+        _ => Serving::Alive,
+    }
+}
+
+/// 由所有者把守卫停干净：`service().stop()` + 等端口**不再可达**（裸 TCP 在此问的是
+/// 「还在不在」，是 `port_open` 的合法用途）。返回 false = 预算内端口仍被占，
+/// 此时重拉只会撞守卫锁退出，调用方必须如实失败而不是假装重启过。
+fn stop_and_await_release(port: u16) -> bool {
+    if let Err(e) = crate::platform::service().stop() {
+        crate::update::log(&format!("重拉前的停止请求失败: {}", e));
+    }
+    let start = std::time::Instant::now();
+    while start.elapsed() < GUARD_RELEASE_BUDGET {
+        if !port_open(port) {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    !port_open(port)
+}
+
+/// 等守卫让出端口的预算：`stop()` 是异步的（杀进程 + 内核回收），15 秒覆盖真机上观察到的
+/// 退出耗时；再长就是在启动路径上干等，不如把失败如实报出去。
+const GUARD_RELEASE_BUDGET: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// 服役判定里单次 HTTP 的超时：判定结果只用于「要不要跳过启动」，不该占满启动预算。
+const SERVING_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(1200);
+
 /// 等待预算内轮询就绪（每 tick 500ms），返回最后一次判定。每 tick 重读实际端口：
 /// 内核可能因端口占用而顺延并持久化（见 env::current_api_port），只盯固定端口会永远等不到已健康的守卫。
 /// 用时长而非 tick 数计预算：每 tick 成本不是常数（多了 /healthz 一次往返），按 tick 计数会让
@@ -476,6 +562,50 @@ mod tests {
         assert!(all[2].contains("500"), "HTTP 判定必须带状态码: {}", all[2]);
         let uniq: std::collections::HashSet<_> = all.iter().collect();
         assert_eq!(uniq.len(), 4, "四种判定文案不得撞车: {:?}", all);
+    }
+
+    const HEALTHZ_OK: &[u8] = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nok";
+    const HEALTHZ_503: &[u8] = b"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n";
+    const SESSION_ACTIVE: &[u8] =
+        b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n{\"sessionState\":\"active\"}";
+    const SESSION_STOPPED: &[u8] =
+        b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n{\"sessionState\":\"stopped\"}";
+    const SESSION_UNKNOWN: &[u8] = b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\nnot json";
+
+  /// 会**按路径分别应答**的假守卫：`/healthz` 回 `healthz`，其余请求（`/session/status`）回 `session`。
+  /// 服役判定一次问两个端点，固定应答的 `fake_guard` 分不开「进程活着」与「服务链已拆」。
+    fn fake_serving(healthz: &'static [u8], session: &'static [u8]) -> u16 {
+        let l = TcpListener::bind("127.0.0.1:0").expect("假守卫应能绑定回环端口");
+        let port = l.local_addr().expect("回环监听必有地址").port();
+        std::thread::spawn(move || {
+            for stream in l.incoming().flatten() {
+                std::thread::spawn(move || {
+                    let mut stream = stream;
+                    let mut buf = [0u8; 256];
+                    let n = stream.read(&mut buf).unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]).into_owned();
+                    let reply = if req.contains("GET /healthz") { healthz } else { session };
+                    let _ = stream.write_all(reply);
+                    let _ = stream.flush();
+                });
+            }
+        });
+        port
+    }
+
+  /// 桌面真机现场：守卫还在监听、`/healthz` 还回 200，服务链却已拆完 —— 「端口通」既不等于
+  /// 「在服役」，也不等于「该重拉」。三态必须各自成立，且探针抖动（问不出会话态）只许降级成
+  /// 且探针抖动（问不出会话态）只许降级成 Alive：把健康守卫停掉重拉是把缺陷放大。
+    #[test]
+    fn serving_state_separates_alive_from_halted_but_listening() {
+        assert!(matches!(serving_state(fake_serving(HEALTHZ_OK, SESSION_ACTIVE)), Serving::Alive));
+        assert!(matches!(serving_state(fake_serving(HEALTHZ_OK, SESSION_UNKNOWN)), Serving::Alive));
+        assert!(matches!(serving_state(fake_serving(HEALTHZ_503, SESSION_STOPPED)), Serving::Sick));
+        assert!(matches!(serving_state(closed_port()), Serving::Sick));
+        match serving_state(fake_serving(HEALTHZ_OK, SESSION_STOPPED)) {
+            Serving::SessionHalted(s) => assert_eq!(s, "stopped"),
+            other => panic!("停链守卫必须判为 SessionHalted，实得 {:?}", other),
+        }
     }
 }
 

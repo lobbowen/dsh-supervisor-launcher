@@ -203,16 +203,20 @@ fn config_json() -> Option<serde_json::Value> {
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
 }
 
-/// 守卫本地 API 基址：读 config.json 的 apiPort（用户可改），失败/缺失回退默认端口。
-/// 壳极少更新但内核配置可演进——硬编码会让改过 apiPort 的用户导航到死端口（F7）。
+/// 守卫本地 API 基址：**与就绪判据同一个端口源**。优先 ports.json 的实际登记（契约 D3 的
+/// 权威），其次 config.json 的 apiPort（用户可改），最后才落回默认常量。只认期望值会把面板
+/// 导航到一个没人监听的端口 —— 守卫因占用顺延过端口时必然失配，而就绪侧早已改读实际值，
+/// 导航侧不许留着第二套答案。
 pub fn api_base_url() -> String {
-    // 默认端口只允许 DEFAULT_API_PORT 这一个事实源（api_port 的回退共用它）。
+    // 默认端口只允许 DEFAULT_API_PORT 这一个事实源（本函数与 api_port 的回退共用它）。
     let default_port = DEFAULT_API_PORT;
-    let port = config_json()
-        .and_then(|v| v.get("apiPort").and_then(|x| x.as_u64()))
-        .filter(|n| *n > 0 && *n <= u16::MAX as u64)
-        .map(|n| n as u16)
-        .unwrap_or(default_port);
+    let from_config = || {
+        config_json()
+            .and_then(|v| v.get("apiPort").and_then(|x| x.as_u64()))
+            .filter(|n| *n > 0 && *n <= u16::MAX as u64)
+            .map(|n| n as u16)
+    };
+    let port = discovered_api_port().or_else(from_config).unwrap_or(default_port);
     format!("http://127.0.0.1:{}/", port)
 }
 
