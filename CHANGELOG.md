@@ -2,7 +2,7 @@
 
 本文件记录桌面壳（`dsh-supervisor-gui`，公开仓 `lobbowen/dsh-supervisor-launcher`）的重要变更。
 
-## [未发布]
+## [1.2.3]（2026-09-22）
 
 ### 内核下载第一次有了真分母：壳按 dist 元数据先取包，再装本地 tarball（T-7 反转）
 
