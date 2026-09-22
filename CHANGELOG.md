@@ -2,6 +2,39 @@
 
 本文件记录桌面壳（`dsh-supervisor-gui`，公开仓 `lobbowen/dsh-supervisor-launcher`）的重要变更。
 
+## [1.2.6]（2026-09-23）
+
+本版是 1.2.5 那条判据的接续收口：真机回报「没有任何改变，进内核就是 127.0.0.1 拒绝连接」，
+复查代码确认 1.2.5 的判据结构上从未参与过那次导航。不含内核版本要求变化。
+版本三处互锁（`Cargo.toml` = `tauri.conf.json` = `Cargo.lock`）由 `scripts/bump-shell.sh` 同步提升。
+
+### 面板的 URL 与「此刻能不能投」同出一个答案；面板显示后壳持续看护服役
+
+- 判据收回唯一出口（`guardctl::panel_view`）：返回 `(url, serving)`，`serving` = 当前端口的
+  `serving_state()` 为 `Alive`。`shell_panel_url` 改回 `{url, serving}`，`shell.html` 主帧加载时
+  未服役就 `backToBootstrap()`（引导页重跑 `guard_start` + 就绪轮询，是全仓唯一恢复链）；
+  `go_panel` 不再自行问一次服役。**同一个事实只允许一处判定**：判据与 URL 分两处问，
+  走了 URL 那条而没走判定那条，就是 1.2.5 的失效形态。
+- 面板稳态看护（新增 `watch_panel`，由 `finish_boot` 武装）：5s 一拍复核 `serving_state`，
+  连续 3 拍（约 15s）不在服役才发 `shell:goto-bootstrap`。此前壳只在「进入面板」那一刻判一次，
+  之后守卫因任何原因消失（更新后重启失败、被所有者停掉、崩溃）界面都永久停在引擎自己的拒绝连接页。
+  纯决策抽成 `panel_watch_tick`，单次抖动不甩页、回一次引导页即解除观察态、`EXITING` 握手中闭嘴，
+  看护线程只允许一个。门槛 3 拍是权衡结果：短于用户对「页面死了」的判断，长到能骑过守卫正常重启的间隙。
+- 内核更新后的重载（`shell.html::reloadPanelWhenReady`）：固定 900ms 延时导航改成有界等
+  `guard_ready` 后再取 `shell_panel_url`，URL 现取（守卫可能已顺延端口），预算耗尽（40 拍 / 20s）
+  回引导页 —— 固定延时等于赌新守卫已在新端口听完请求。
+- 端口取值两处「同一个事实两套答案」：
+  `env::discovered_api_port` 原取 records **首条**，而登记表按端口号为键、避让的新记录是追加的
+  （内核侧 `release(旧端口)` 被 `catch {}` 吞掉时旧记录会留着），改为按 `createdAt` 取最新；
+  托盘端口原在 setup 期一次性快照 `config.apiPort`，守卫顺延后启动/停止/退出全打在没人监听的端口上，
+  改为每次点击现取 `current_api_port()`。
+- 门禁：K-16 改写为钉「`panel_view` 是判据唯一实现、三条导航路径（主帧加载 / goto-panel /
+  更新后重载）都问它」，并补齐 1.2.5 没钉的看护与重载两侧；各反向样本保留，`panel_watch_tick`
+  的决策表由单元测试逐个档位钉住。壳侧 `shell.log` 新增「服役判定=」一行，使真机可从日志区分
+  「URL 错」与「URL 对但未服役」。
+- 已知未验证：安装产物四平台冒烟（H9 的 1.2.4 遗留项）仍未做；面板空白一侧的内核 CSP 修复
+  走内核发布链，不随本版。
+
 ## [1.2.5]（2026-09-22）
 
 本版是一处真机缺陷的四处收口（判据 / 导航 / 端口源 / 退出留痕），不含内核版本要求变化。
@@ -24,6 +57,10 @@ http://127.0.0.1:36360/」，进面板就是引擎自己的「拒绝连接」页
   最后一拍仍不在服役就发 `shell:goto-bootstrap` 回引导页（那里重跑 `guard_start` + 就绪轮询）。
   这条兜底只能做在 Rust 侧：WebKit 对「连接被拒」的 iframe 导航不触发 `error` 事件，
   `shell.html` 原有的两次重试兜底在这种现场形同不存在。
+  **1.2.6 更正**：本条描述的收口在真机上没有生效过，上面的根因也不完整。真正必然发生的面板
+  导航是 `shell.html` 主帧加载时向 `shell_panel_url` 取 URL 并直接写进 `iframe.src`，它不经
+  `go_panel`；且 `iframe.src` 已被写成同一个值之后，`force=false` 的 goto-panel 不再覆盖，
+  所以 `go_panel` 里那次复核根本来不及参与。判据已收回 URL 与结论同源的那一处（见 1.2.6）。
 - 端口源收口（`env.rs::api_base_url`）：面板 URL 与就绪判据取同一个端口源
   （`ports.json` 的 `supervisor-api` 实际登记优先，其次 `config.json` 的 `apiPort`，最后默认常量）。
   此前导航侧只认 `config.json`，守卫一旦因端口占用顺延并持久化，就绪判定看 36361 而窗口导航去 36360。
