@@ -791,7 +791,8 @@ mod launch_spec_tests {
         //   只能钉形态：判据读的是本文件里那段实现，函数改名/分支变化都会立刻判红。
         let (out, err) = guard_stdio_streams(None);
         spawn_marker_child(out, err).wait().expect("无日志时也必须能拉起");
-        let src = include_str!("mod.rs");
+        //   include_str! 嵌的是**磁盘字节**，Windows 检出可能是 CRLF → 锚点里的 `\n` 永不匹配。
+        let src = include_str!("mod.rs").replace("\r\n", "\n");
         let body = &src[src.find("fn guard_stdio_streams(").expect("guard_stdio_streams 已改名：同步本判据")..];
         let body = &body[..body.find("\n}\n").expect("guard_stdio_streams 边界") + 3];
         assert!(

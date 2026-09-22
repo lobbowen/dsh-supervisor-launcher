@@ -28,7 +28,9 @@ fn manifest_dir() -> PathBuf {
 ///   任何前端逻辑 —— 门禁变成空转。此函数保证「测的是真正会执行的代码」。
 fn bootstrap_html() -> String {
     let root = manifest_dir().join("bootstrap");
-    let html = fs::read_to_string(root.join("bootstrap.html")).expect("read bootstrap.html");
+    // 归一化换行：`function_body` 用 `\n  function ` 作边界取函数体，Windows 检出的 CRLF
+    //   会让该针脚永不匹配 → 退化成「取到文件末尾」，断言被别的函数满足（假绿）。
+    let html = lf(fs::read_to_string(root.join("bootstrap.html")).expect("read bootstrap.html"));
     let mut all = html.clone();
     // 按 HTML 中的出现顺序拼接外部模块，便于「先加载」类的断言仍然成立
     let mut rest = html.as_str();
@@ -75,8 +77,18 @@ fn function_body(src: &str, sig: &str) -> String {
     rest[..next].to_string()
 }
 
+/// 读源码文本并**归一化换行**（口径同 B57 与各 `tests/*.rs` 的 `read()`）。
+///
+/// Windows 检出可能是 CRLF，而本文件的针脚里有带 `\n` 的多行锚点
+/// （如 `#[cfg(windows)]\nfn decode_console`、`\n    { return "linux-x64"; }`）。
+/// 不归一化时这类锚点在 Windows leg 上**永不匹配**：正向判据变红还算次要，
+/// 反向判据由此**假绿**才是代价 —— 门禁不再检查它声称检查的事。
+fn lf(s: String) -> String {
+    if s.contains('\r') { s.replace("\r\n", "\n") } else { s }
+}
+
 fn main_rs() -> String {
-    fs::read_to_string(manifest_dir().join("src").join("main.rs")).expect("read main.rs")
+    lf(fs::read_to_string(manifest_dir().join("src").join("main.rs")).expect("read main.rs"))
 }
 
 /// 按出现位置给步骤 id 排序（取 HTML 中 id="st-xxx" 的声明顺序）。
@@ -352,7 +364,7 @@ fn b13_shell_owns_service_definition() {
     let mut all = String::new();
     for e in fs::read_dir(&dir).expect("B13 platform 目录").flatten() {
         if e.path().extension().and_then(|x| x.to_str()) == Some("rs") {
-            all.push_str(&fs::read_to_string(e.path()).unwrap_or_default());
+            all.push_str(&lf(fs::read_to_string(e.path()).unwrap_or_default()));
         }
     }
     // 断言须是**语义等价**而非字面量：macOS 的 plist 路径由常量拼接
@@ -374,9 +386,12 @@ fn b13_shell_owns_service_definition() {
 
     let m = main_rs();
     assert!(m.contains("mod platform;"), "B13 FAIL main.rs 未引入 platform 模块");
+    //   2026-09-22 轮4：建立服务定义的调用随启动序列一起迁入 domain（`guardctl.rs` 的
+    //   共享启动序列与 `cli.rs` 的无头入口各调一次），main.rs 只剩装配 —— 与下方
+    //   `spawn_daemon` 同一条产权理由，故判据范围同样取 crate_sources()。
     assert!(
-        m.contains("platform::service().ensure_defined"),
-        "B13 FAIL ensure_guard 未建立服务定义"
+        crate_sources().contains("platform::service().ensure_defined"),
+        "B13 FAIL 未建立服务定义"
     );
     // 2026-09-11：`ensure_guard` 已迁入 domain/guardctl.rs（分层），
     //   故「是否调用 spawn 兜底」须连同 domain 层一起查 ——
@@ -750,7 +765,7 @@ fn platform_sources() -> String {
     if let Ok(rd) = fs::read_dir(&dir) {
         for e in rd.flatten() {
             if e.path().extension().and_then(|x| x.to_str()) == Some("rs") {
-                out.push_str(&fs::read_to_string(e.path()).unwrap_or_default());
+                out.push_str(&lf(fs::read_to_string(e.path()).unwrap_or_default()));
             }
         }
     }
@@ -772,7 +787,7 @@ fn crate_sources() -> String {
         if let Ok(rd) = fs::read_dir(&dir) {
             for e in rd.flatten() {
                 if e.path().extension().and_then(|x| x.to_str()) == Some("rs") {
-                    out.push_str(&fs::read_to_string(e.path()).unwrap_or_default());
+                    out.push_str(&lf(fs::read_to_string(e.path()).unwrap_or_default()));
                 }
             }
         }
@@ -2034,15 +2049,19 @@ fn b60_service_definition_self_heals_on_content_drift() {
 //   GBK 字节回归用例，在 Windows CI leg 上执行）。
 #[test]
 fn b62_console_output_decoding_is_confirmed_by_codepage_at_one_point() {
-    let b = fs::read_to_string(manifest_dir().join("src").join("bounded.rs")).expect("bounded.rs");
-    let c = fs::read_to_string(manifest_dir().join("src").join("core.rs")).expect("core.rs");
+    let b = lf(fs::read_to_string(manifest_dir().join("src").join("bounded.rs")).expect("bounded.rs"));
+    let c = lf(fs::read_to_string(manifest_dir().join("src").join("core.rs")).expect("core.rs"));
 
     // ① read_log 必须把解码交给 decode_console，自己不做 lossy
     let i = match b.find("fn read_log") {
         Some(v) => v,
         None => panic!("B62 FAIL bounded.rs 未找到 read_log"),
     };
-    let body = &b[i..(i + 300).min(b.len())];
+    //   2026-09-22 轮4：原先取 `read_log` 起手的 300 字符窗口，而 `read_log` 本体只有 6 行，
+    //   窗口于是越进到**下一个函数的文档注释**（`decode_console` 写着「为什么不是
+    //   `String::from_utf8_lossy`」）→ 反向判据把「解释为什么不 lossy 的说明」当成 lossy
+    //   实现判红。与 ② 同一口径：边界用锚点取函数体，不靠字符窗口。
+    let body = &b[i..i + 3 + b[i..].find("\n}\n").expect("B62 FAIL read_log 函数体边界")];
     assert!(
         body.contains("decode_console("),
         "B62 FAIL read_log 未走唯一解码点 decode_console"

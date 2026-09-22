@@ -15,8 +15,15 @@ fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
+/// 读源码文本。换行一律归一化为 LF：Windows 检出可能是 CRLF（actions/checkout 的
+/// auto-normalize），而 G-12/G-13 的反向针脚是**跨行字面量**，带 `\r` 时永不匹配 →
+/// 「已收口」的假绿。口径同各 `tests/*.rs` 的 `read()` 与 B57。
+fn lf(s: String) -> String {
+    if s.contains('\r') { s.replace("\r\n", "\n") } else { s }
+}
+
 fn read(rel: &str) -> String {
-    fs::read_to_string(root().join(rel)).unwrap_or_else(|e| panic!("读取 {} 失败: {}", rel, e))
+    lf(fs::read_to_string(root().join(rel)).unwrap_or_else(|e| panic!("读取 {} 失败: {}", rel, e)))
 }
 
 /// 递归收集目录下所有常规文件。
@@ -39,7 +46,7 @@ fn walk(rel: &str) -> Vec<(PathBuf, String)> {
     walk_files(&root().join(rel), &mut files);
     files
         .into_iter()
-        .filter_map(|p| fs::read_to_string(&p).ok().map(|s| (p, s)))
+        .filter_map(|p| fs::read_to_string(&p).ok().map(|s| (p, lf(s))))
         .collect()
 }
 
