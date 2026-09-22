@@ -2,6 +2,47 @@
 
 本文件记录桌面壳（`dsh-supervisor-gui`，公开仓 `lobbowen/dsh-supervisor-launcher`）的重要变更。
 
+## [1.2.5]（2026-09-22）
+
+本版是一处真机缺陷的四处收口（判据 / 导航 / 端口源 / 退出留痕），不含内核版本要求变化。
+版本三处互锁（`Cargo.toml` = `tauri.conf.json` = `Cargo.lock`）由 `scripts/bump-shell.sh` 同步提升。
+
+### 「端口通」不再被当成「在服役」：面板不再停在 127.0.0.1 拒绝连接
+
+现场（Windows 真机，`guard.log` 13:50:27 与 13:56:49 两轮）：刚报完「启动完成 · 面板 URL
+http://127.0.0.1:36360/」，进面板就是引擎自己的「拒绝连接」页，且窗口自己再也回不来。
+不是崩溃：那两轮守卫都完整走过 `POST /session/stop`（唯一的调用者是壳的托盘「退出管家」），
+`shutdownAll` 拆光服务链之后**守卫进程仍在监听端口**、`/healthz` 仍回 200。
+
+- 判据收口（`guardctl.rs::ensure_guard`）：早退不再只看裸 TCP，改问 `serving_state()`
+  = `ready()`（TCP + `/healthz` 2xx）**且** `/session/status` ∉ {stopping, stopped}。
+  三态各自的下一步明确：`Alive`/`Sick` 跳过启动（病了也不重拉，交给就绪判定），
+  `SessionHalted` 由所有者 `stop()` + 等端口让出（预算 15s）后落回正常启动序列自愈；
+  等不到让出就如实报 `GUARD_STOP_FAILED` 并带上守卫日志末段，绝不假装重启过。
+  读不到会话态一律降级为 `Alive` —— 探针抖动不许升级成「停掉一个健康守卫」。
+- 导航收口（`windowing.rs::go_panel`）：三拍延时重发从「重复投递同一个 URL」改成**每拍复核**，
+  最后一拍仍不在服役就发 `shell:goto-bootstrap` 回引导页（那里重跑 `guard_start` + 就绪轮询）。
+  这条兜底只能做在 Rust 侧：WebKit 对「连接被拒」的 iframe 导航不触发 `error` 事件，
+  `shell.html` 原有的两次重试兜底在这种现场形同不存在。
+- 端口源收口（`env.rs::api_base_url`）：面板 URL 与就绪判据取同一个端口源
+  （`ports.json` 的 `supervisor-api` 实际登记优先，其次 `config.json` 的 `apiPort`，最后默认常量）。
+  此前导航侧只认 `config.json`，守卫一旦因端口占用顺延并持久化，就绪判定看 36361 而窗口导航去 36360。
+- 退出留痕（`guardctl.rs::shutdown_all`）：`stop()` 成功时补一行「本次登录内不会自动拉起；重新打开
+  程序即恢复」—— 三平台的自启/看护通道都不会在本次登录内把守卫拉回（Windows 的 `stop()` 会
+  `/Delete` 看护任务、Linux unit 保持 enabled 只在下次登录起、macOS 已 bootout），
+  不说清这句话，用户只会看到「重开窗口面板就废了」而无从下手。失败分支仍双写 stderr + 落盘。
+- 门禁：新增 **K-16**（形态，`kernel_launch_standard_test.rs`）—— `ensure_guard` 体内按
+  `if port_open` → `serving_state` → 服役判定 → **唯一**的 `return Ok(())` → `stop_and_await_release`
+  → `ensure_started` 的顺序链判定，`go_panel` 必须先复核再导航且留有 `shell:goto-bootstrap` 出口
+  （`shell.html` 侧同断言），`api_base_url` 必须取 `discovered_api_port()` 且不得绕道 `api_port`；
+  三种旧形态各有反向样本防空转。语义侧新增行为用例 `serving_state_separates_alive_from_halted_but_listening`
+  （`guardctl.rs` 的 `tests`，与 K-14 同一手法：`fake_serving` 按路径分别应答 `/healthz` 与 `/session/status`）。
+  同时补齐 §6 表缺失的 K-15 行。
+- 不改内核：`/healthz` 的契约语义是「进程活着」（`src/app/self/health.js` 明写），让停链的守卫回非 2xx
+  等于换掉一条已声明的契约；真相本来就暴露在 `/session/status`，判据该在消费侧收口。
+  看护入口（`--watchdog`）仍用 `ready()`：守卫进程活着而服务链被用户主动停掉，不是它该重拉的场景。
+- 已知未验证：安装产物四平台冒烟（H9 的 1.2.4 遗留项）仍未做，本次只到 CI 门禁与真机行为推理。
+
 ## [1.2.4]（2026-09-22）
 
 本版只含一处行为修复：守卫自启位的写者唯一化（IL-2 壳仓半边 / D5 扩展）。
