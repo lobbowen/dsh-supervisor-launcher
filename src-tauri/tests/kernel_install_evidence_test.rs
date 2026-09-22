@@ -179,6 +179,8 @@ fn k9_kernel_package_is_downloaded_with_a_real_denominator() {
     assert!(body.contains("crate::core::install_local("), "K-9 FAIL 没装已下载的本地包");
     assert!(body.contains("crate::core::install_version("), "K-9 FAIL 丢了 registry 直装回退（降级不得砍能力）");
     assert!(body.contains("install::kernel_direct("), "K-9 FAIL 降级没有可见文案（用户会看到进度凭空消失）");
+    // 取件文件没有复用方（每次换源重取并覆盖），装完必须删：留着就是状态根里按版本逐份累积的垃圾。
+    assert!(body.contains("std::fs::remove_file(tgz)"), "K-9 FAIL 取件文件装完不清理");
 
     let inst = read("src-tauri/src/domain/install.rs");
     assert!(inst.contains("pub(crate) fn kernel_fetch") && inst.contains("pub(crate) fn kernel_fetched")

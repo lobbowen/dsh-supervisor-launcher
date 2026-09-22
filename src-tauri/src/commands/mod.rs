@@ -355,6 +355,10 @@ async fn core_apply_inner(app: tauri::AppHandle) -> ShellResult<serde_json::Valu
                 Some(tgz) => crate::core::install_local(tgz, pref.as_deref(), Some(o.as_str()), beat_ref),
                 None => crate::core::install_version(&pkg2, &target2, pref.as_deref(), Some(o.as_str()), beat_ref),
             };
+            // 取件文件只服务这一次安装（每次换源都会重新取并覆盖），装完即删：否则状态根里按版本逐份累积。
+            if let Some(tgz) = &local {
+                let _ = std::fs::remove_file(tgz);
+            }
             match out {
                 Ok(out) => return Ok::<(String, String), String>((o.clone(), out)),
                 Err(e) => last = e,
