@@ -131,14 +131,14 @@ pub(crate) fn shutdown_all(port: u16) {
 ///
 /// `started` 只可能在 `defined` 为 `Ok` 时才是 `Some` —— 定义失败时那条出边是**关闭**的。
 /// 对不存在的任务发起 `/Run` 不产生命中信息，只产出一条误导性的退出码 1。
-pub(crate) struct ServiceAttempt {
+pub(crate) struct ServiceLaunch {
     /// P4：服务定义的结果（成功时带平台给出的状态描述）。
     defined: Result<String, String>,
     /// P5：仅在 P4 成功时才有值；`None` = **未向服务管理器发起请求**（出边已关）。
     started: Option<Result<(), String>>,
 }
 
-impl ServiceAttempt {
+impl ServiceLaunch {
     /// 跑 P4 → P5（不跑 P6：等待由调用方决定预算，见 `await_ready`）。
     ///
     /// `report` 用于把阶段名上报给引导页（静默等待与卡死必须可区分）。
@@ -165,7 +165,7 @@ impl ServiceAttempt {
             }
             Err(_) => None,
         };
-        ServiceAttempt { defined, started }
+        ServiceLaunch { defined, started }
     }
 
     /// 是否真的向服务管理器发过请求 —— 没发过就不该为它等 30 秒。
@@ -258,12 +258,12 @@ pub(crate) fn ensure_started(
     spec: &crate::platform::LaunchSpec,
     step: &dyn Fn(&str),
 ) -> Result<(), LaunchError> {
-    // P4 建立服务定义 + P5 请求服务管理器启动（**定义失败则不出边**，见 ServiceAttempt）。
+    // P4 建立服务定义 + P5 请求服务管理器启动（**定义失败则不出边**，见 ServiceLaunch）。
     step("正在建立守卫服务定义…");
-    let attempt = ServiceAttempt::define_and_start(spec, step);
+    let launch = ServiceLaunch::define_and_start(spec, step);
 
     // P6 就绪（只在真的向服务管理器发过请求时等；否则这 30s 是纯粹地卡住用户）。
-    if attempt.start_requested() {
+    if launch.start_requested() {
         step("等待守卫就绪（服务管理器路径）…");
         if await_ready(SERVICE_READY_BUDGET) == Readiness::Ready {
             return Ok(());
@@ -273,7 +273,7 @@ pub(crate) fn ensure_started(
     // P5 兜底：直接拉起守护进程（容器/无 user session/策略拦截等场景）。
     step("服务管理器未能拉起守卫 · 改用直接启动兜底…");
     // 服务管理器那一段的**阶段证据**必须在最终报错里出现（规范 H8）：真机上它才是根因所在。
-    let evidence = attempt.evidence();
+    let evidence = launch.evidence();
     match crate::platform::service().spawn_daemon(spec) {
         Ok(pid) => {
             crate::update::log(&format!("兜底 spawn 守卫 pid={}", pid));

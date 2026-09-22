@@ -78,7 +78,7 @@ fn covers_contract(src: &str) -> bool {
 // ── K-3：先对齐后启动 + **定义失败关闭 P5 出边**（阶段产物化）──
 //
 // 2026-09-21 改：顺序断言从「全文件字符串位置」改为**函数体切片**，因为
-//   `ensure_defined` 与 `start` 现已收进 `ServiceAttempt::define_and_start`（同一职责
+//   `ensure_defined` 与 `start` 现已收进 `ServiceLaunch::define_and_start`（同一职责
 //   只有一个所有者），文件级位置比较会因函数摆放顺序而误判。更关键的是新增断言：
 //   **start 只能出现在定义成功的分支里** —— 旧实现无论定义成败都照样 `/Run`，于是真机
 //   报错只剩「退出码 1」，而「定义环节到底有没有成」在报错里完全看不见（H8 的反例）。
@@ -91,7 +91,7 @@ fn k3_align_before_start_and_define_failure_closes_start_edge() {
         "KERNEL_NOT_ALIGNED",
         "ALIGN_RESOLVE_FAILED",
         // P4/P5 的阶段产物（H8 的载体）
-        "struct ServiceAttempt",
+        "struct ServiceLaunch",
         "fn define_and_start",
         "fn evidence",
     ]);
@@ -106,13 +106,13 @@ fn k3_align_before_start_and_define_failure_closes_start_edge() {
     let started = body.find("ensure_started(&spec").expect("K-3 失败：ensure_guard 未进启动序列");
     assert!(align < spec && spec < started, "K-3 失败：ensure_guard 未按「对齐 → 建规格 → 启动序列」顺序");
     // 反空转：切片必须真的停在启动序列 **之前**（越界则顺序判据漂到别的函数里凑符号）。
-    assert!(!body.contains("ServiceAttempt::define_and_start("), "K-3：ensure_guard 切片越界，已进入启动序列本体");
+    assert!(!body.contains("ServiceLaunch::define_and_start("), "K-3：ensure_guard 切片越界，已进入启动序列本体");
     // 序列本体（GUI 与无头看护共用这一份）：定义 → 就绪 → 兜底，且证据进 LaunchError。
     let seq = fn_slice(&src, "pub(crate) fn ensure_started", "const SERVICE_READY_BUDGET");
     let define = seq
-        .find("ServiceAttempt::define_and_start(spec")
+        .find("ServiceLaunch::define_and_start(spec")
         .expect("K-3 失败：启动序列未走服务管理器路径");
-    let evidence = seq.find("attempt.evidence()").expect("K-3 失败：阶段证据未进入 LaunchError");
+    let evidence = seq.find("launch.evidence()").expect("K-3 失败：阶段证据未进入 LaunchError");
     assert!(define < evidence, "K-3 失败：证据取自尚未产生它的阶段");
     assert!(seq.contains("spawn_daemon") && seq.contains("READY_TIMEOUT"),
         "K-3 失败：启动序列缺兜底或缺兜底后的就绪判定");

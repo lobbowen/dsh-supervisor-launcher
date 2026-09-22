@@ -49,7 +49,7 @@
   事后回读不到当时写的值），另两处把失败咽成 `null`。现签名返回 `Result`：取不到必须报错、
   取到必须规范。`LaunchSpec` 四个路径字段**构造即归一**（唯一装配点），故三平台的服务定义与
   spawn 拿到的路径形态一致；装配失败新增 code `LAUNCH_SPEC_FAILED`（规范 §4）。
-- **P4/P5 有了阶段产物 `ServiceAttempt`**，「定义失败 ⇒ 不请求服务管理器启动」从此是**结构**
+- **P4/P5 有了阶段产物 `ServiceLaunch`**，「定义失败 ⇒ 不请求服务管理器启动」从此是**结构**
   而非注释：`started` 只在 `defined` 为 `Ok` 的分支里赋值（出边关闭），也就不再为一条必然
   失败的请求空等 30 秒。`evidence()` 的五种阶段结论进 `READY_TIMEOUT` / `SERVICE_START_FAILED`
   正文（H8），报错从此能说明「走到了哪一步、为什么停在那一步」。
@@ -235,7 +235,7 @@ B1–B5 把事实收回单点之后，剩下一个更早的问题：**门禁声�
   假象。全部重锚到代码符号（`hex::encode(Sha256::digest(…))`、`GetDriveTypeW(root.as_ptr())` 等），
   切片边界改指 `fn try_probe(`。
 - **K-3 是一条必红的门禁**（不是判据太松，是判据写错了）：B2 把调用形态改成
-  `ServiceAttempt::define_and_start(spec`，而门禁仍搜 `define_and_start(&spec`，`expect` 直接炸。
+  `ServiceLaunch::define_and_start(spec`，而门禁仍搜 `define_and_start(&spec`，`expect` 直接炸。
   正向锚点同步换成新形态，并加一条负向锚点（`ensure_guard` 切片内**不得**出现该调用 = 防越界恒真）。
 - **就绪探针把「问不出状态行」糊成 `(0, "")`** —— 于是 B3 引入的 `Readiness::NoHttpResponse`
   是一条**不可达**分支：端口通着却不回字节的现场（守卫刚绑定、还没能服务）被报成「/healthz 返回 0」，
@@ -268,7 +268,7 @@ B1–B5 把事实收回单点之后，剩下一个更早的问题：**门禁声�
   进程也能确定状态根」的受支持口子，登记待议，不在本轮顺手发明。
 - **文档**：`KERNEL-LAUNCH-STANDARD` §0 H6 改写为四态判据（含 `None` 语义与「不得糊成 `Http(0)`」）、
   §1 的 P6 行随之、§6 新增 **K-14** 与「CI 真机冒烟」行（含上面那个已知缺口的出处指引）。
-- **CI 轮1–2 抓到的三处自身缺陷（发布链记录，不粉饰）**：本批代码在本机从未编译（无 Rust toolchain），
+- **CI 轮1–5 抓到的自身缺陷（发布链记录，不粉饰）**：本批代码在本机从未编译（无 Rust toolchain），
   轮1 红在四处编译错（`kernel_update_apply` 里四个引用点漏改 `install_out`、`npm_heartbeat` 的 `if/else`
   两支 `&str`/`String`、`NpmFact` 派生 `Clone` 但字段 `NpmUsable` 没有、`fn_slice` 返回 `&str` 缺生命周期）；
   轮2 红在三条单测，其中两条是**断言写错**而非实现错：
@@ -281,6 +281,28 @@ B1–B5 把事实收回单点之后，剩下一个更早的问题：**门禁声�
   英文 runner 的 OEM 码页是 437，同一批 936 字节被如实解成另一副样子（实现没错，用例把「机器语言」当成了
   判据）。现把 Windows 解码拆成 `decode_console`（唯一入口）+ `console_code_page`（问 OS）+
   `decode_codepage`（可显式传码页），回归用例显式传 936，B62 的切片锚点随之路径化（不再用字符窗口）。
+- **轮3 是一处极小的编译错**：B62 新文案里为说明「原先的断言用了 `{:?}`」而把这个占位符原样写进了
+  `assert!` 的消息串，Rust 把它当成无实参的位置参数（`1 positional argument in format string, but no
+  arguments were given`）—— 四平台同时红在同一个字符上。
+- **轮4 是判据自己不合格**（四平台编译已过、门禁首次真正执行）：① B13 把「建立服务定义」的调用点钉在
+  `main.rs`，而该调用本轮已随启动序列迁入 domain（`guardctl` 的共享序列 + `cli` 的无头入口），main.rs
+  只剩装配 —— 判据范围随产权迁到 `crate_sources()`，与同一测试里 `spawn_daemon` 的既有口径对齐；
+  ② B62 ① 用「`read_log` 起手 300 字符」取函数体，而函数体只有 6 行，窗口越进了下一个函数的文档注释
+  （那里正好写着「为什么不是 `String::from_utf8_lossy`」），反向判据于是把**说明**当成**实现**判红 ——
+  改与 ② 同口径：锚点定界；③ **Windows 检出是 CRLF**（`actions/checkout` 的 auto-normalize 按平台归一
+  换行），带 `\n` 的跨行针脚在该腿永不匹配：正向判据变红还算次要，反向判据由此**假绿**才是代价（门禁不再
+  检查它声称检查的事）。修法是在取文本的单点归一化（`bootstrap_flow` 的 `lf()` 覆盖 main_rs /
+  crate_sources / platform_sources / bootstrap_html / B13 / B62，`env_toolchain` 的 `read()`+`walk()`，
+  以及 `include_str!` 的内嵌文本），与各 `tests/*.rs` 已有的 `read()` 口径统一，不发明第二套做法。
+- **轮5 之前一直在为 fail-fast 买单**：`cargo test` 默认在第一个红的 target 处中止，19 个 target 一轮
+  只暴露一个 —— 轮2/3/4 各只推进一条信息即此因。门禁步改为 `cargo test --bins --no-fail-fast`（一条都
+  不会少跑，只是把「一轮一问」变成「一轮全量」），并把 `tail -80` 放宽到 `-400`：原值与本步开头那句
+  「不截断：门禁失败时断言文案就是排障依据」自相矛盾，多个 target 同时红时先出现的失败会被后面的输出冲掉。
+  轮5 因此在四平台上一次性跑完 19 个 target，只剩**一条**失败：反拉黑门禁（`no_suppression_machinery_test`）
+  按子串命中新增的 `ServiceAttempt`。该门禁的边界条款（2026-09-21）与先例 `f110843` 都写明：禁的是那套
+  **按版本记账并抑制重试的机构**，被机构名 token 命中的普通标识符应改名而非放宽判据 —— 故
+  `ServiceAttempt` → `ServiceLaunch`（它承载的是一次「建定义 → 请求启动」的阶段产物，本就不含重试语义），
+  判据与 K-3 锚点同步，未删任何一条断言。
 
 - **本机验证边界**：夹具的 HTTP 行为（`/healthz` 状态行、端口顺延与 `ports.json` 持久化）在本机
   用真 node 起服务实测过；三条 workflow 脚本经 YAML 解析 + `bash -n` 校验。Rust 编译、
