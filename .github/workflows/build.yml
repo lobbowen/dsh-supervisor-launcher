@@ -141,7 +141,12 @@ jobs:
           #   排除 updater_artifacts（需打包产物 SHELL_REHEARSAL_DIR，下方单独跑）。
           TARGETS=$(ls tests/*.rs | sed 's#tests/##; s#\.rs$##' | grep -v '^updater_artifacts$' | sed 's/^/--test /' | tr '\n' ' ')
           echo "CI 将执行的 test target: ${TARGETS}"
-          cargo test --bins ${TARGETS} 2>&1 | tail -80
+          #   2026-09-22（1.2.2 发布链实测）：默认 fail-fast 下，19 个 target 里第一个红就中止，
+          #   于是**一轮 CI 只暴露一个 target 的问题** —— 本轮连续三轮因此各多烧一次四平台构建。
+          #   `--no-fail-fast` 不是放宽门禁（一条都不会少跑），是把「一轮一问」变成「一轮全量」。
+          #   行数相应放宽到 400：原先的 80 与本步开头那句「不截断：断言文案就是排障依据」相互矛盾，
+          #   多个 target 同时红时前面的失败会被后面的输出冲掉。
+          cargo test --bins --no-fail-fast ${TARGETS} 2>&1 | tail -400
         working-directory: src-tauri
 
       - name: Windows 工具链实测（官方归档 -> npm 真实可用）
