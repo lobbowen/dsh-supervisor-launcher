@@ -1,10 +1,6 @@
-// 00-runtime —— NS 命名空间、共享状态、全局错误处理与窗口栏（拆分自 bootstrap.html，2026-09-11）。
-//
-// 拆分原因：原 802 行单块脚本，一处语法错会导致**全页不执行**（已真实发生）。
-// 现按职责分为 9 个文件，每个文件独立语法检查（门禁 G5）。
-//
-// 本文件必须**最先加载**：全局 onerror / unhandledrejection 若不先注册，
-//   后续文件里的错误就无人捕获（不变量 F2 失效）。
+// 00-runtime：NS 命名空间、共享状态、全局错误处理与窗口栏。
+// 必须最先加载 - onerror / unhandledrejection 未先注册时，后续文件的错误无人捕获（不变量 F2）。
+// 按职责分文件让一处语法错不再导致全页不执行；每文件独立语法检查（门禁 G5）。
 window.__BOOT_NS = window.__BOOT_NS || {};
 (function (NS) {
   NS.core = (window.__TAURI__ && window.__TAURI__.core) || null;
@@ -86,7 +82,7 @@ window.__BOOT_NS = window.__BOOT_NS || {};
     NS.evt.listen('shell:goto-panel', function () { NS.gotoShell(); });
   }
 
-  // ── 导出到 NS（跨模块可调用）──
+  // -- 导出到 NS（跨模块可调用）--
   NS.showFatal = showFatal;
   NS.gotoShell = gotoShell;
 })(window.__BOOT_NS);

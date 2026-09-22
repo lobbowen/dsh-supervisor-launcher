@@ -1,10 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 // dsh-supervisor-gui：桌面壳 + 环境引导器（开源：dsh-supervisor-launcher）。
-// 职责：
-//   1. 探测系统 Node.js；缺失/过旧 → 内嵌引导页 → 一键安装官方最新 LTS（下载/校验/授权）。
-//   2. Node 就绪 → 定位已安装内核（dsh-supervisor SEA 二进制，npm 子包 / ~/.local/bin / PATH）
-//      → 拉起守卫 daemon → 面板（端口由内核 config.apiPort 决定）。内核闭源（npm 安装），壳不内嵌任何内核资产。
+// 职责：探测系统 Node.js，缺失/过旧时经引导页一键安装官方最新 LTS；就绪后定位已装内核、
+//   拉起守卫 daemon、打开面板（端口由内核 config.apiPort 决定）。内核闭源，壳不内嵌内核资产。
 // 托盘常驻：关窗 = 隐藏；菜单动作直发本地 API（裸 TCP，无额外依赖）。
 
 // 有界子进程执行（公共设施）：所有外部命令一律经它，避免「无界阻塞分散潜伏」。
@@ -13,7 +11,7 @@ mod error;
 mod bounded;
 mod core;
 mod env;
-// 面板→壳 消息桥契约（2026-09-15）：内核更新单写入者；版本/消息类型/命令名的唯一事实源。
+// 面板与壳的消息桥契约：内核更新单写入者；版本/消息类型/命令名的唯一事实源。
 mod bridge;
 // 镜像源适配（壳自持）：装机时无内核，三处下载都必须自带镜像能力。
 mod mirror;
@@ -21,26 +19,24 @@ mod mirror;
 // 根因：探测内含无界阻塞系统调用，且被命令 await —— 详见本文件根因说明。
 mod nodeprobe;
 mod node;
-// 运行期启动契约（2026-09-15）：Node/npm 的**单一事实源**；安装/服务定义/spawn 都只读它。
+// 运行期启动契约：Node/npm 的**单一事实源**；安装/服务定义/spawn 都只读它。
 mod runtime_contract;
-// 内核位置契约（2026-09-15）：内核**位置**的单一事实源（core.json）；安装成功后壳写，locate 先读。
+// 内核位置契约：内核**位置**的单一事实源（core.json）；安装成功后壳写，locate 先读。
 mod core_contract;
-// 平台适配层（2026-09-11）：**全仓唯一的平台分支所在地**。
-// 它接管了原先分居两处的「服务定义」（service.rs）与「服务启停」（原本文件），
-// 消除「同一概念分居两层」的分层违规 —— 加平台不再需要改两处不同层。
+// 平台适配层：**全仓唯一的平台分支所在地**（门禁 G1）。
+// 服务定义与启停在同一对象（platform::service::ServiceControl），加平台不需要改两处不同层。
 /// 业务层（平台无关）：从 main.rs 拆出的可独立测试的模块。
 /// IPC 命令边界层（只做校验与委托）。
 mod commands;
 mod domain;
 mod platform;
-// 桌面壳自更新 + 落盘日志 + 身份上报（2026-09-11）
+// 桌面壳自更新 + 落盘日志 + 身份上报
 mod update;
-// 统一更新决策模型（2026-09-15）：壳与内核**同一形状**（问题 1 的机制层统一）。
+// 统一更新决策模型：壳与内核**同一形状**（机制层统一）。
 mod update_plan;
-// 发布通道选版（2026-09-16）：**契约 §3 冻结算法**的唯一实现。
-//   为什么单独成模块：选版是"版本如何被选择"这件事的全部规则（rollback/canary/latest/
-//   versions 兜底 + §5 灰度名单），与"怎么装/怎么探测镜像"无关；
-//   独立后 §3 的每个分支都能被纯函数单元测试直接覆盖（契约 §6 门禁 RC-G1/RC-G2）。
+// 发布通道选版：**契约冻结算法**的唯一实现。
+//   选版规则（rollback/canary/latest/versions 兜底 + 灰度名单）与"怎么装/怎么探测镜像"无关；
+//   独立成模块后每个分支都能被纯函数单元测试直接覆盖（门禁 RC-G1/RC-G2）。
 mod release_channel;
 
 use std::sync::Mutex;
@@ -55,10 +51,8 @@ pub(crate) struct RunState {
     installed: Option<String>, // 系统当前 node 版本
     latest: Option<String>,    // 官方最新 LTS
     /// 可测分母的进度比值（0.0~1.0）；`None` = 本步骤**没有**可测分母。
-    ///
-    /// 为什么不是 `f32`：原实现用 0.0 兼作「没开始」「没有分母」「刚起步」三种含义，
-    ///   而阶段分数（0.1 / 0.3 / 0.85）是按代码顺序编出来的假数 —— 前端因此删掉了进度条。
-    ///   只有真实可测的量（下载字节比）才允许写 `Some`。
+    /// 只有真实可测的量（下载字节比）才允许写 `Some`：0.0 会同时被读成
+    /// 「没开始」「没有分母」「刚起步」三种含义，按代码顺序编的阶段分数是假数。
     progress: Option<f32>,
     status: String,
     logs: Vec<String>,
@@ -83,25 +77,10 @@ pub(crate) fn log(state: &RunState) -> serde_json::Value {
     })
 }
 
-// 安装/下载进度的语义（InstallKind / InstallFailure / 事件发射 / 工具链管线）
-//   已于 2026-09-21（B4）整体迁入 `domain::install` —— 那里是全仓**唯一**的发射点。
-//   main.rs 只做组装（门禁 G3），不留第二处能形装事件形态的地方。
+// 安装/下载进度的语义（InstallKind / InstallFailure / 事件发射）唯一发射点在 `domain::install`。
+// main.rs 只做组装（门禁 G3），不留第二处能构造事件形态的地方。
 
-// 此处原有孤立文档注释「内核可执行名候选（跨平台）…」+ 6 行空行（2026-09-12 清理）：
-//   它描述的函数在更早的重构中已删除（候选名现由 platform trait 的 core_exe_names 提供），
-//   留下一条**没有宿主**的文档注释与连续空行 —— clippy 报 empty_lines_after_doc_comments。
 
-// ── 守卫服务的「启停」已迁入 platform 层（2026-09-11）──
-//
-// 此处原定义 start_guard_service / stop_guard_service（含 8 份 #[cfg]），
-// 与**原** service.rs 的「服务定义」（另 4 份 #[cfg]，该文件已并入本层）分居两层 —— 同一概念的 per-OS
-// 知识被切开，加一个平台要改两处**不同层**，且很容易只改一处。
-//
-// 现统一在 platform::service::ServiceControl：**定义与启停永远是同一个对象**。
-//
-// · 原 GUARD_CMD_TIMEOUT=20s 的有界性 → platform::SVC_NORMAL
-// · 原「壳绝不直接 spawn 守卫」的政策 → platform::service::spawn_daemon 的文档
-//   （该约束不凌驾于可用性：容器/无 user session/策略拦截等场景需 spawn 兜底）
 
 
 /// 无头输出：壳自更新基线（供 CI 冒烟与人工诊断）。
@@ -121,7 +100,7 @@ fn shell_update_plan_text() -> String {
 
 
 
-// ── 超时预算（防「无超时网络请求 → 引导页永久卡住」）──
+// 超时预算（防「无超时网络请求把引导页永久卡住」）：
 // 不变量：check 短超时（快速失败）、下载长超时（大包 + 慢网），外层再加 tokio 兜底
 // （reqwest 的 request timeout 不保证覆盖 DNS 等阶段）。
 
@@ -133,9 +112,8 @@ fn shell_updater(
     timeout: std::time::Duration,
 ) -> Result<tauri_plugin_updater::Updater, String> {
     let mut builder = app.updater_builder().timeout(timeout);
-    // 端点运行时覆盖（2026-09-11）：Tauri 配置里写死的 endpoints 是编译期常量，
-    // 而不同网络环境下 CDN 可达性差异很大。此处用壳自持的镜像配置覆盖，
-    // 使用户（或壳自身测速结果）可以在**不重新编译**的前提下切换更新源。
+    // 端点运行时覆盖：Tauri 配置里写死的 endpoints 是编译期常量，而不同网络环境下
+    // CDN 可达性差异很大。用壳自持的镜像配置覆盖，使用户（或壳测速结果）能**不重新编译**切换更新源。
     let endpoints: Vec<tauri::Url> = crate::mirror::load()
         .shell
         .iter()
@@ -176,11 +154,9 @@ fn main() {
     if std::env::args().any(|a| a == "--node-plan") {
         std::process::exit(domain::cli::cli_plan());
     }
-    // 无头自检：**平台矩阵**（2026-09-11，门禁 A4/G4）。
-    //
-    // 目的：把「平台矩阵」从**文档承诺**变成**可执行断言** ——
-    //   文档说支持某能力但代码没实现，这一输出会在三平台 CI 上暴露。
-    //   同时它是「平台适配层真的被接上」的活体证据（否则全是 dead_code 警告）。
+    // 无头自检：**平台矩阵**（门禁 A4/G4）。目的：把「平台矩阵」从**文档承诺**变成
+    //   **可执行断言** —— 文档说支持某能力但代码没实现，这一输出会在三平台 CI 上暴露；
+    //   同时它是「平台适配层真的被接上」的活体证据。
     if std::env::args().any(|a| a == "--platform-matrix") {
         println!("{}", platform::matrix_text());
         std::process::exit(0);
@@ -209,7 +185,7 @@ fn main() {
     }
     bt!("building app");
     tauri::Builder::default()
-        // 单实例管控（2026-09）：同一 user 会话内只允许一个壳实例——重复启动第二实例时
+        // 单实例管控：同一 user 会话内只允许一个壳实例——重复启动第二实例时
         // 插件自动让新进程退出，回调里唤起既有主窗口（show+focus+导航面板），避免双壳/多壳并存。
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             domain::windowing::show_main(app);
@@ -223,7 +199,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![commands::node_status, commands::core_status, commands::core_plan, commands::core_apply, commands::kernel_update_apply, commands::shell_bridge_contract, commands::shell_state_root, commands::guard_start, commands::guard_ready, commands::start_node_install, commands::finish_boot, commands::win_ctl, commands::shell_identity, commands::shell_update_check, commands::shell_update_apply, commands::shell_restart, commands::shell_set_phase, commands::mirror_status, commands::mirror_set, commands::node_latest, commands::mirror_warmup, commands::mirror_cached, commands::shell_panel_url])
         .setup(|app| {
             bt!("setup enter");
-            // 状态根迁移（前向自愈）：旧位置 ~/.dsh/{supervisor,shell} → 产品状态根。
+            // 状态根迁移（前向自愈）：把旧位置 ~/.dsh/{supervisor,shell} 的内容并入产品状态根。
             // 必须在任何读写状态之前执行；失败不阻断。
             env::migrate_legacy();
             // 托盘直发本地 API 的端口：显式 DSH_SUPERVISOR_TRAY_PORT 优先，否则从用户 config.apiPort 解析
@@ -231,7 +207,7 @@ fn main() {
                 .ok().and_then(|p| p.parse().ok()).unwrap_or_else(env::api_port);
             let handle = app.handle().clone();
 
-            // 壳身份初始化（2026-09-11）：写 <状态根>/shell/identity.json + shell.log（独立于 DSH），
+            // 壳身份初始化：写 <状态根>/shell/identity.json + shell.log（独立于 DSH）。
             // 必须尽量早执行：即使后续任一环节失败，也留下可诊断的落盘痕迹。
             bt!("init_identity...");
             let _ = update::init_identity(&app.package_info().version.to_string());
@@ -240,7 +216,7 @@ fn main() {
             // 无条件导出镜像契约（启动即导出；不依赖 latest_lts() 成功，失败只记日志）。
             crate::mirror::export_on_boot();
 
-            // 环境判定：Node 缺失或低于最低标准（>=22.12）→ 由引导页安装；达标直接进面板。
+            // 环境判定：Node 缺失或低于最低标准（>=22.12）时由引导页安装；达标直接进面板。
             // 探测只触发（分离线程），不得阻塞 setup —— 窗口必须先出现。
             nodeprobe::start();
             {
@@ -256,7 +232,7 @@ fn main() {
                 });
             }
             // 单一引导流程：守卫的安装/升级/启动全部由引导页显式驱动
-            // （core_plan → core_apply → guard_start → guard_ready），壳启动不并行拉起。
+            // （core_plan、core_apply、guard_start、guard_ready），壳启动不并行拉起。
             std::thread::spawn(move || {
                 if let Ok(c) = node::latest_lts() {
                     let v = c.version.clone();
@@ -264,17 +240,15 @@ fn main() {
                     let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
                     s.latest = Some(v.clone());
                     drop(s);
-                    // 2026-09-13（失效模式 c/f）：**删除这个死广播**。
-                    //   env_status 全仓**零监听**（bootstrap 只监听 shell:goto-panel /
+                    // 不发 env_status 广播：全仓**零监听**（bootstrap 只监听 shell:goto-panel /
                     //   shell:goto-bootstrap / guard_progress 与统一的 install_* 安装事件）。
-                    //   而它携带的 latest 已由 node_status 轮询（单一事实源）提供 ——
-                    //   再加监听反而制造第二真源（本仓明确反对）。故按「要么接线、要么删除」
-                    //   的纪律选择删除；s.latest 仍保留（node_status 从状态读取）。
+                    //   它携带的 latest 由 node_status 轮询提供（单一事实源），再加监听反而
+                    //   制造第二真源。s.latest 仍保留（node_status 从状态读取）。
                 }
             });
 
             bt!("setup: building tray");
-            // ── 托盘 ──
+            // 托盘
             let show_m = tauri::menu::MenuItem::with_id(app, "show", "显示控制面板", true, None::<&str>)?;
             let start = tauri::menu::MenuItem::with_id(app, "start", "启动 DSH", true, None::<&str>)?;
             let stop = tauri::menu::MenuItem::with_id(app, "stop", "停止 DSH", true, None::<&str>)?;
@@ -286,31 +260,25 @@ fn main() {
                 .icon(app.default_window_icon().expect("no default icon").clone())
                 .tooltip("dsh-supervisor")
                 .menu(&menu)
-                // 左键=显示窗口 / 右键=弹出菜单（Windows·Linux 惯例）。
-                // 原为 true（左键也弹菜单），叠加下方 on_tray_icon_event 不区分按键，
-                //   导致右键时既弹菜单又调用 domain::windowing::show_main() 抢焦点 → 菜单被顶掉，
-                //   用户感知为「右键不好用」（2026-09-11 Windows 真机实测）。
-                // 注：上游文档明确 Linux 不支持该开关（菜单由桌面环境决定）——
-                //     故 Linux 上左键可能仍显示菜单，属平台限制，非本仓可控。
+                // 左键=显示窗口 / 右键=弹出菜单（Windows/Linux 惯例）。
+                // 左键若也弹菜单，叠加下方 on_tray_icon_event 不区分按键，右键时菜单会被
+                //   show_main() 抢焦点顶掉。注：上游文档明确 Linux 不支持该开关（菜单由桌面环境决定）。
                 .show_menu_on_left_click(false)
                 .on_menu_event(move |app, event| {
                     match event.id.as_ref() {
                         "show" => domain::windowing::show_main(app),
-                        // 网络 I/O **必须离开 UI 线程**（2026-09-11 架构修复）。
-                        //   托盘菜单事件由 UI 线程派发，而 post_local 最多阻塞 60 秒
-                        //   （TCP 连接 + 读写超时）。守卫挂起或端口无响应时，
-                        //   点击「启动/停止/重启」会**把整个界面冻结 60 秒** ——
-                        //   用户看到的是「点了没反应」，且期间窗口无法重绘。
-                        //   改为派发到独立线程：菜单立即响应，结果异步生效。
+                        // 网络 I/O **必须离开 UI 线程**：托盘菜单事件由 UI 线程派发，而
+                        //   post_local 最多阻塞 60 秒（TCP 连接 + 读写超时）；守卫挂起时
+                        //   点击会把整个界面冻结。改为派发到独立线程：菜单立即响应，结果异步生效。
                         "start" => domain::localhttp::spawn_local_post(port, "/lifecycle/dsh/start"),
                         "stop" => domain::localhttp::spawn_local_post(port, "/lifecycle/dsh/stop"),
                         "restart" => domain::localhttp::spawn_local_post(port, "/lifecycle/dsh/restart"),
                         // 退出管家 = 完全退出：通知守卫停止全部服务链，随后壳退出
                         "quit" => {
-                            // 契约 §4.1：请求内核停被管对象（等回执）→ 由所有者停止守卫 → 壳退出。
+                            // 契约：请求内核停被管对象（等回执）-> 由所有者停止守卫 -> 壳退出。
                             // 同样离开 UI 线程：退出握手最坏可耗时约 70 秒（/session/stop 60s
-                            //   + 轮询 10s）。若在 UI 线程做，用户会看到窗口卡住不动，
-                            //   误以为「程序关不掉」而强杀 —— 那会跳过退出握手，留下未停的 DSH。
+                            //   + 轮询 10s）。若在 UI 线程做，窗口卡住会被误认为「程序关不掉」
+                            //   而遭强杀 —— 那会跳过退出握手，留下未停的 DSH。
                             let h = app.clone();
                             std::thread::spawn(move || {
                                 domain::guardctl::shutdown_all(port);
@@ -321,9 +289,8 @@ fn main() {
                     }
                 })
                 .on_tray_icon_event(|tray, event| {
-                    // 必须区分按键与状态（2026-09-11 修复）：
-                    //   原实现匹配 `Click { .. }`（任意键、任意状态）→ **右键**也会 show_main，
-                    //   把刚要弹出的右键菜单顶掉/抢走焦点。现只响应「左键 + 抬起」，
+                    // 必须区分按键与状态：匹配 `Click { .. }`（任意键）会让**右键**也 show_main，
+                    //   把刚要弹出的右键菜单顶掉/抢走焦点。只响应「左键 + 抬起」，
                     //   右键交由系统弹出 .menu() 设置的菜单。
                     if let tauri::tray::TrayIconEvent::Click {
                         button: tauri::tray::MouseButton::Left,
@@ -340,10 +307,10 @@ fn main() {
         })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                // 关闭窗口行为（读守卫 config.closeAction，系统级开关 2026-09）：
+                // 关闭窗口行为（读守卫 config.closeAction，系统级开关）：
                 // 'exit' = 退出管家（通知守卫停止全部服务链 + 壳退出）；默认 'hide' = 隐藏至托盘常驻。
                 if env::close_action() == "exit" {
-                    // 2026-09-12（P2 修复）：必须离开 UI 线程（与托盘 quit 同一纪律）。
+                    // 必须离开 UI 线程（与托盘 quit 同一纪律）。
                     let h = window.app_handle().clone();
                     let port = env::api_port();
                     api.prevent_close();

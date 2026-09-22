@@ -1,4 +1,4 @@
-// 40-shell-update —— 桌面版本阶段（检测 → 强制更新）。
+// 40-shell-update —— 桌面版本阶段（检测 -> 强制更新）。
 // 硬规则：检测到桌面壳有更新就必须更新，不得绕开。
 // 允许失败停住并重试；不允许跳过 / 暂停 / 冷却 / 继续使用当前版本。
 (function (NS) {
@@ -24,8 +24,8 @@
       if (r.__error) return showUpdRetry('桌面版本检查异常：' + r.__error);
       if (r.ok === false) return showUpdRetry('桌面版本检查失败：' + (r.error || '未知'));
       NS.updPlan = r;
-      // ⚠ 2026-09-18 S2A-9 修：Rust 从不下发 cannotSelfUpdate，真值是 shell_identity 的 selfUpdateCapable；
-      //   不修则 deb 无提权通道时仍走强更 → 必失败。
+      // Rust 从不下发 cannotSelfUpdate，真值是 shell_identity 的 selfUpdateCapable；
+      //   不修则 deb 无提权通道时仍走强更 -> 必失败。
       if (r.cannotSelfUpdate === true || (NS.shellId && NS.shellId.selfUpdateCapable === false)) {
         NS.status('当前安装形态不支持自更新，继续');
         return NS.wait(400).then(NS.stepCorePlan);
@@ -39,7 +39,7 @@
   }
   function stepShellApply() {
     var target = (NS.updPlan && NS.updPlan.latest) || '';
-    // 下载态一律经统一入口（SSOT §3.2/T-6）：本模块不自拼下载样式、不画进度条。
+    // 下载态一律经统一入口（SSOT  节 3.2/T-6）：本模块不自拼下载样式、不画进度条。
     //   进度细节由 install_progress 事件接续刷新同一行文字（80-init.js）。
     NS.install.begin('shell', '发现桌面新版本 ' + target + ' · 正在下载…');
     return NS.withTimeout(NS.core.invoke('shell_update_apply'), NS.SHELL_DOWNLOAD_BUDGET_MS, '下载长时间无进展')

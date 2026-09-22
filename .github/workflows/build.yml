@@ -40,6 +40,11 @@ jobs:
       #   由 docs/RELEASE-STANDARD.md 规定，并由 release_spec_consistency_test.rs 的 R-6 强制。
       - name: 版本三处互锁校验（Cargo.toml = tauri.conf.json = Cargo.lock）
         run: node scripts/verify-shell-versions.js
+      # 注释纪律门禁（CS-1..CS-7，规范 docs/DEVELOPMENT-TRACK.md 第 4 节）：静态扫描，无需编译。
+      #   放在 version job 而不是门禁测试步骤：它校验的是源码文本，与 Rust 编译结果无关，
+      #   且必须在四条构建腿起飞前就判红，省一轮矩阵。
+      - name: 注释纪律门禁（scripts/check-comment-discipline.js）
+        run: node scripts/check-comment-discipline.js
 
   build:
     needs: version

@@ -1,18 +1,13 @@
-//! macOS 平台实现（LaunchAgent + launchctl）。
+//! macOS 平台实现（LaunchAgent + launchctl，门禁 G1 要求平台知识集中于此）。
 //!
-//! 本文件是 macOS 的**全部**平台知识（门禁 G1）。
-//!
-//! `launchctl` 的子命令语义（易错，此处固定）：
-//!   · `bootstrap gui/<uid> <plist>`  —— 载入（RunAtLoad → 立即启动；KeepAlive → 崩溃重启）
-//!   · `bootout  gui/<uid>/<label>`   —— 卸载
-//!   · `kickstart -k gui/<uid>/<label>` —— 重启（本文件的 start）
-// `stop`（bootout）会完全移除任务，`start` 前需 bootstrap 兜底；语义固定于此。
+//! launchctl 子命令语义（易错，固定于此）：bootstrap 载入（RunAtLoad 立即启动、
+//! KeepAlive 崩溃重启）；bootout 卸载；kickstart -k 重启；stop 用 bootout 会移除任务。
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use super::service::ServiceControl;
-// 必须导入 SVC_QUICK：子模块不继承父模块作用域（漏导入 → macOS 构建 E0425）。
+// 必须导入 SVC_QUICK：子模块不继承父模块作用域（漏导入 -> macOS 构建 E0425）。
 use super::{home_dir, Capabilities, LaunchSpec, Platform, SVC_NORMAL, SVC_QUICK};
 
 pub const NAME: &str = "macos";
@@ -58,9 +53,8 @@ impl Platform for Impl {
     }
 
     fn node_artifact(&self, version: &str) -> Option<super::NodeArtifact> {
-        // 用户级安装：官方 tarball 双架构齐全（osx-x64-tar / osx-arm64-tar），
-        //   解包到 <状态根>/node，**不需要管理员**（2026-09-18 权限模型重写）。
-        //   官方**没有** osx-arm64-pkg，且 .pkg 需要系统授权 —— 故弃用 pkg。
+        // 用户级安装：官方 tarball 双架构齐全（osx-x64-tar / osx-arm64-tar），零权限。
+        //   官方没有 osx-arm64-pkg 且 .pkg 需系统授权，故用 tar 归档而非 pkg。
         let arch = match std::env::consts::ARCH {
             "x86_64" => "x64",
             "aarch64" => "arm64",
@@ -103,9 +97,7 @@ impl Platform for Impl {
     }
 
     fn install_node(&self, file: &Path) -> Result<PathBuf, String> {
-        // 用户级解包（tar.gz），**不需要管理员**（2026-09-18 权限模型重写）。
-        //   原 .pkg + osascript「with administrator privileges」需要系统授权；用户级
-        //   tarball 三平台一致、零权限，且 macOS 官方无 arm64 pkg（tarball 双架构齐全）。
+        // 用户级解包到 <状态根>/node，零权限（不需要管理员）。
         let root = crate::env::node_install_root();
         let staging = root.with_file_name("node.extract");
         let _ = std::fs::remove_dir_all(&staging);
@@ -151,7 +143,7 @@ impl Platform for Impl {
         true
     }
 
-    // ── 可执行文件名的平台差异（P2/G1：原为平台层之外的 cfg!() 宏）──
+    // 可执行文件名的平台差异（P2/G1：原为平台层之外的 cfg!() 宏）
     fn node_exe_name(&self) -> &'static str { "node" }
     fn npm_exe_name(&self) -> &'static str { "npm" }
     fn core_exe_names(&self) -> &'static [&'static str] { &["dsh-supervisor"] }
@@ -171,29 +163,21 @@ impl ServiceControl for Impl {
             .join(format!("{}.plist", GUARD_LABEL))
     }
 
-    /// 建立 LaunchAgent plist 并 bootstrap（幂等，且**内容过时时自愈**）。
-    ///
-    /// 2026-09-12（P2）：原实现「`is_file()` → 直接返回」= **只创建、永不更新**，
-    ///   模板演进后老用户永远跑旧 plist。与 Linux unit / Windows 计划任务同病。
-    ///   现：算期望内容 → 比对 → 一致不动、不同则重写（并重新 bootstrap）。
+    /// 建立 LaunchAgent plist 并 bootstrap（幂等，且内容过时时自愈）：
+    /// 先算期望内容、与磁盘比对，一致不动、不同则重写并重新 bootstrap。
     fn ensure_defined(&self, spec: &LaunchSpec) -> Result<String, String> {
         let path = self.definition_path();
-        // 日志落在**产品状态根**（独立于 DSH 的 ~/.dsh）。
+        // 日志落在产品状态根（独立于 DSH 的 ~/.dsh）。
         let log = crate::env::supervisor_dir().join("log").join("guard-stdio.log");
-        // 2026-09-12（P3）：路径嵌入 plist 前**必须做 XML 转义**。
-        //   plist 是 XML —— 家目录/用户名含 `&`、`<`、`>` 时（如 `/Users/a&b/...`），
-        //   未转义会写出**非法 XML** → `launchctl bootstrap` 失败，
-        //   而报错只是含糊的 syntax error（且本函数会降级为「已建立但未加载」→ **自启静默失效**）。
-        //
-        //   转义三类最小必要字符（& 必须最先替换，否则会二次转义）。
+        // plist 是 XML：路径嵌入前必须转义 &、<、>（家目录可含它们，未转义则
+        //   bootstrap 报含糊 syntax error、自启静默失效）。& 必须最先替换，否则二次转义。
         let xml_escape = |s: &str| -> String {
             s.replace('&', "&amp;")
                 .replace('<', "&lt;")
                 .replace('>', "&gt;")
         };
-        // 架构（2026-09-15 二次修正）：ProgramArguments 只指向**稳定入口** `<壳> --run-guard`。
-        //   node/guard **不写进 plist** —— launchd 的 PATH 与否都不再影响启动：
-        //   --run-guard 每次启动重新检测 node（含 nvm/fnm/volta 落点与运行期契约）。
+        // ProgramArguments 只指向稳定入口 <壳> --run-guard；node/guard 不写进 plist，
+        //   由 --run-guard 每次启动重新检测，launchd 的 PATH 与否不再影响启动。
         let (shell, args) = spec.service_command();
         let mut prog = format!("<string>{}</string>", xml_escape(&shell.display().to_string()));
         for a in args {
@@ -203,7 +187,7 @@ impl ServiceControl for Impl {
             .replace("@PROG@", &prog)
             .replace("@ROOT@", &xml_escape(&spec.state_root.display().to_string()))
             .replace("@LOG@", &xml_escape(&log.display().to_string()));
-        // ── 内容比对：决定「新写」「重写」还是「不动」──
+        // 内容比对：决定「新写」「重写」还是「不动」
         let existing = std::fs::read_to_string(&path).ok();
         let needs_write = match &existing {
             Some(cur) => cur != &body,
@@ -220,7 +204,7 @@ impl ServiceControl for Impl {
             let _ = std::fs::create_dir_all(dir);
         }
         std::fs::write(&path, &body).map_err(|e| format!("写入 plist 失败: {}", e))?;
-        // 内容变了必须**重新加载**：先 bootout 旧的，再 bootstrap 新的（否则 launchd 仍跑旧定义）。
+        // 内容变了必须重新加载：先 bootout 旧的再 bootstrap 新的，否则 launchd 仍跑旧定义。
         if is_update {
             let off = format!("launchctl bootout gui/$(id -u)/{}", GUARD_LABEL);
             crate::bounded::run_lossy(Command::new("sh").args(["-c", &off]), SVC_QUICK);
@@ -243,7 +227,7 @@ impl ServiceControl for Impl {
 
     fn start(&self) -> Result<(), String> {
         // `kickstart -k` = 若在运行则先杀再启，否则启动。
-        // 若任务已被 `stop`（bootout）移除，kickstart 会失败 → 退回 bootstrap 兜底。
+        // 若任务已被 `stop`（bootout）移除，kickstart 会失败 -> 退回 bootstrap 兜底。
         let uid = "$(id -u)";
         let kick = format!("launchctl kickstart -k gui/{}/{}", uid, GUARD_LABEL);
         let r = crate::bounded::run(Command::new("sh").args(["-c", &kick]), SVC_NORMAL);

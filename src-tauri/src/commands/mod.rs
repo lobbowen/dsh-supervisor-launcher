@@ -1,13 +1,7 @@
-//! IPC 命令边界层（**只做校验与委托**）—— 2026-09-11 从 main.rs 拆出。
-//!
-//! 分层职责（硬约束，门禁 G2/G3）：
-//!
-//! commands -> domain -> platform -> infra
-//!
-//! · 命令体**只**允许：参数校验 → 调 domain/platform → 组装返回值；
-//! · **禁止**平台分支 #[cfg(target_os)]（那属于 platform 层，门禁 G1）；
-//!
-//! 拆出的直接收益：main.rs 从「定义全部命令」变成「只注册它们」。
+//! IPC 命令边界层（**只做校验与委托**）。
+//! 分层（硬约束，门禁 G2/G3）：commands 调 domain/platform 再组装返回值，
+//! 命令体**禁止**平台分支 #[cfg(target_os)]（那属于 platform 层，门禁 G1）。
+//! 收益：main.rs 从「定义全部命令」变成「只注册它们」。
 
 use std::sync::Mutex;
 
@@ -28,16 +22,9 @@ use crate::domain::probes;
 const SHELL_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 const SHELL_DOWNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20 * 60);
 
-/// 环境状态查询（**纯本地、有界、可轮询**）。
-///
-/// == 架构修复（2026-09-11 二次，根因见 nodeprobe.rs） ==
-///
-/// 不变量：本命令必须快速返回（探测在分离线程，未完成即返回 probing=true）。
-///
-/// 不变量：不含网络 I/O（网络侧信息由 node_latest 单独提供）。registry 维度只读镜像
-///   预热的**缓存**结果，故同样成立。
-///
-/// 不变量：npm 的结论只有一个来源（`domain::probes`），面板字段与契约落盘都从它取。
+/// 环境状态查询（**纯本地、有界、可轮询**）。不变量（根因见 nodeprobe.rs）：必须快速返回
+/// （探测在分离线程，未完成即返回 probing=true）、不含网络 I/O（网络侧信息由 node_latest
+/// 提供；registry 维度只读镜像预热的**缓存**结果）。npm 的结论只有一个来源 `domain::probes`。
 #[tauri::command]
 pub async fn node_status(app: tauri::AppHandle) -> serde_json::Value {
     // 首次调用会启动探测线程；此后每次调用都复用在飞结果（不会堆积线程）。
@@ -68,7 +55,7 @@ pub async fn node_status(app: tauri::AppHandle) -> serde_json::Value {
         if let Some(latest) = &st.latest {
             o["outdated"] = serde_json::json!(crate::node::outdated(installed.as_deref(), latest));
         }
-        // 工具链契约（2026-09-16 / 2026-09-18 强化）：npm 与 node **同等必需**，且必须**可用**。
+        // 工具链契约：npm 与 node **同等必需**，且必须**可用**。
         //   三态：true=真实执行通过；false=node 已知但 npm 解析/执行失败；null=本轮未取到 node，未知。
         o["npmOk"] = match npm.ok() {
             Some(b) => serde_json::json!(b),
@@ -116,8 +103,7 @@ pub async fn node_status(app: tauri::AppHandle) -> serde_json::Value {
 }
 
 /// 预热镜像测速（立即返回，结果稍后经 mirror_cached 读取）。
-///
-/// 为什么单独成命令：镜像信息必须**与「是否需要下载 Node」解耦** ——
+/// 单独成命令：镜像信息必须**与「是否需要下载 Node」解耦** ——
 /// 否则 Node 已达标的用户（主力用户）永远看不到壳选了哪个源。
 #[tauri::command]
 pub fn mirror_warmup() -> serde_json::Value {
@@ -171,13 +157,8 @@ pub fn finish_boot(app: tauri::AppHandle) -> ShellResult<()> {
     Ok(())
 }
 
-/// 互斥锁中毒恢复的**统一约定**（2026-09-11 架构修复）：
-///
-/// 全部 `RunState` 加锁点使用 `.unwrap_or_else(|e| e.into_inner())` 而非 `.unwrap()`。
-/// 原实现一旦有任何线程在持锁期间 panic，该锁**永久中毒**，此后**所有**命令
-/// 都在加锁处 panic —— 用户看到的是「重启也没用、功能永久失效」。
-/// 锁内是普通状态快照（不承载跨字段不变式），中毒后仍可用，故取回内部值继续。
-///
+/// 互斥锁中毒恢复的**统一约定**：全部 `RunState` 加锁点用 `.unwrap_or_else(|e| e.into_inner())`。
+/// 锁内是普通状态快照（不承载跨字段不变式），中毒后仍可用，故取回内部值继续——
 /// 原则：**一次 panic 不应让整个应用的功能不可恢复地失效。**
 #[tauri::command]
 pub fn start_node_install(state: tauri::State<Mutex<RunState>>, app: tauri::AppHandle) -> ShellResult<()> {
@@ -185,7 +166,7 @@ pub fn start_node_install(state: tauri::State<Mutex<RunState>>, app: tauri::AppH
     if st.busy { return Ok(()); }
     st.busy = true;
     st.error = None;
-    // 起步没有可测分母 → None（原来的 0.0 会被读成「进度为零」，而那并不是一个测出来的量）。
+    // 起步没有可测分母 -> None（原来的 0.0 会被读成「进度为零」，而那并不是一个测出来的量）。
     st.progress = None;
     st.status = "准备安装 Node.js LTS…".into();
     st.logs.clear();
@@ -209,10 +190,9 @@ pub fn start_node_install(state: tauri::State<Mutex<RunState>>, app: tauri::AppH
                 // （否则引导页会在「已装好」之后仍报未检测到）。
                 probes::invalidate_all();
                 drop(s);
-                // 完成播报按 kind 各发一条，version 各归各的（SSOT §2.4：`install_done { kind,
-                //   version }` 里的 version 就是该 kind 自己的版本）。旧实现只发一条 kind=npm
-                //   却带 node 版本，于是引导页念出的「npm 已就绪（v22.x）」从来不是 npm 的版本。
-                // npm 未回读版本号时发 null：发射点只有 install::done 一处，形态在它那侧冻结。
+                // 完成播报按 kind 各发一条，version 各归各的：`install_done { kind, version }`
+                //   里的 version 就是该 kind 自己的版本（npm 未回读版本号时发 null）。
+                //   发射点只有 install::done 一处，形态在它那侧冻结。
                 install::done(&handle, InstallKind::Node, serde_json::json!(rt.version));
                 install::done(&handle, InstallKind::Npm, serde_json::json!(rt.npm_version));
             }
@@ -230,13 +210,7 @@ pub fn start_node_install(state: tauri::State<Mutex<RunState>>, app: tauri::AppH
 }
 
 /// 引导页查询用：内核是否已安装 + 当前版本 + 真实包名提示（不再硬编码平台字符串）。
-///
-/// 内核状态查询。
-///
-/// == 架构修复（2026-09-11）==
-///
 /// 必须 async：工作放阻塞线程池，主线程立即返回。
-///
 /// 不重复执行：locate_core 已取过版本，直接复用其返回。
 #[tauri::command]
 pub async fn core_status(app: tauri::AppHandle) -> serde_json::Value {
@@ -266,7 +240,7 @@ pub async fn core_status(app: tauri::AppHandle) -> serde_json::Value {
 /// 两段都必须 spawn_blocking：locate_core 是同步阻塞调用，放主线程会拖慢整个 IPC。
 #[tauri::command]
 pub async fn core_plan(app: tauri::AppHandle) -> ShellResult<serde_json::Value> {
-    // ① 本地定位 + 版本探测（阻塞，逐候选执行二进制）
+    // 1) 本地定位 + 版本探测（阻塞，逐候选执行二进制）
     let installed = tauri::async_runtime::spawn_blocking(move || {
         let a = app.clone();
         crate::domain::coreloc::locate_core(&a).and_then(|b| crate::core::installed_version(&b))
@@ -274,7 +248,7 @@ pub async fn core_plan(app: tauri::AppHandle) -> ShellResult<serde_json::Value> 
     .await
     .ok()
     .flatten();
-    // ② 远端最高版本（网络，同样经线程池）
+    // 2) 远端最高版本（网络，同样经线程池）
     let pkg = crate::core::package_name()?;
     // 用 latest_pick（**带选版依据 via**）：build_plan 需要它判断"这是不是回退指令"
     //   —— 回退目标低于当前版本，纯版本比较会误判为"无需动手"（契约 RC-2 端到端）。
@@ -283,16 +257,9 @@ pub async fn core_plan(app: tauri::AppHandle) -> ShellResult<serde_json::Value> 
     Ok(crate::core::build_plan(installed, latest))
 }
 
-/// 安装/升级内核到**选出的目标版本**（强制更新；回退只能由 rollback tag 显式触发）。
-///   - 目标版本来自 `core::latest_version`（发布通道契约 §3：rollback > canary > latest > versions 兜底）；
-///   - 显式 `--prefix`（从现有内核路径反推）确保装回同一前缀（跨平台布局差异见 core.rs）；
-///   - 逐个镜像回退（**源**回退，与**版本**回退是两件事）；
-///   - 如实回传成败（含退出码/stderr），绝不吞错。
-///
-/// ⚠ 已知缺口（回退的端到端）：本命令**会照装选出的目标版本**（不做版本比较），
-///   所以"回退"在**被调用时**是生效的；但调用它的前置判据在 `core::build_plan`
-///   ——那里只按 `目标 > 已装` 判 upgrade，回退目标低于当前时会被判成 `none`，
-///   前端因而不会来调本命令。收口点与理由见 `core::build_plan` 的文档。
+/// 安装/升级内核到**选出的目标版本**（按发布通道契约 rollback/canary/latest/versions 兜底选出；
+/// 回退只能由 rollback tag 显式触发）。显式 `--prefix` 装回同一前缀；逐个**镜像源**回退
+/// （与**版本**回退是两件事）；如实回传成败。已知缺口：`core::build_plan` 只按 `目标 > 已装` 判 upgrade。
 #[tauri::command]
 pub async fn core_apply(app: tauri::AppHandle) -> ShellResult<serde_json::Value> {
     core_apply_inner(app).await
@@ -300,14 +267,14 @@ pub async fn core_apply(app: tauri::AppHandle) -> ShellResult<serde_json::Value>
 
 /// `core_apply` 的实现体（安装/升级到**选出的目标版本**；见上方缺口说明）。
 /// 抽成独立函数：启动门 2（`core_apply`）与面板请求（`kernel_update_apply`）**共用同一实现** ——
-/// 内核包只能经这一处写入，符合「单写入者」契约（docs/DESIGN-SHELL-ARCHITECTURE.md §3.2c）。
+/// 内核包只能经这一处写入，符合「单写入者」契约（docs/DESIGN-SHELL-ARCHITECTURE.md）。
 async fn core_apply_inner(app: tauri::AppHandle) -> ShellResult<serde_json::Value> {
     // 契约先行：安装内核需要 npm，而 npm 的单一来源是运行期契约（缺失则解析并落盘）。
     let _ = crate::runtime_contract::ensure();
     let pkg = crate::core::package_name()?;
     let prefix = crate::domain::coreloc::locate_core(&app).and_then(|b| crate::core::global_prefix_for(&b));
     let origins = crate::core::registry_origins();
-    // 目标版本由选版算法决定（契约 §3：rollback / canary / latest / versions 兜底）——
+    // 目标版本由选版算法决定（契约：rollback / canary / latest / versions 兜底）——
     //   本命令**不做版本比较、不接受调用方指定版本**：目标高于本机就是升级，低于本机就是回退，
     //   同一个写入路径，避免"升级与回退两套逻辑"再次分叉。
     let target = {
@@ -326,9 +293,8 @@ async fn core_apply_inner(app: tauri::AppHandle) -> ShellResult<serde_json::Valu
     let pref = prefix.clone();
     let app2 = app.clone();
     let res = tauri::async_runtime::spawn_blocking(move || {
-        // 总预算（S2B-1 修）：与桥契约下发给面板/引导页的 `bridge::KERNEL_UPDATE_BUDGET_MS` 是
-        //   **同一个数**（此前 Rust 与 JS 各写一份 17min，改一处即静默失配）—— 否则前端已报超时放弃，
-        //   后端仍按「每源 15min」串行继续，最坏 6×15min，用户重试还会并发写同一 prefix。
+        // 总预算必须与桥契约下发给面板/引导页的 `bridge::KERNEL_UPDATE_BUDGET_MS` 是**同一个数**
+        //   （两处各写一份改一处即静默失配；前端已报超时放弃时后端不得继续串行烧源）。
         //   耗尽即停并如实回报「已尝试 N/M 个源」。
         let deadline = std::time::Instant::now()
             + std::time::Duration::from_millis(crate::bridge::KERNEL_UPDATE_BUDGET_MS);
@@ -404,22 +370,18 @@ async fn core_apply_inner(app: tauri::AppHandle) -> ShellResult<serde_json::Valu
     })
 }
 
-/// 内核更新（**唯一写入者 = 壳**）：安装最新内核 → 由所有者停守卫 → 等端口释放 → 重新拉起。
-///
-/// 面板由内核托管、运行在壳主帧的内容 iframe 内，**没有 Tauri IPC**（IPC 仅主帧）；
-/// 它经 postMessage 请求本命令（见 crate::bridge）。启动门 2 走 \`core_apply\`。
-/// 两者共用同一个安装实现 \`core_apply_inner\` —— 内核包只有这一处写入。
-///
-/// 重启必须由**所有者（服务管理器）**完成：守卫从不重启自己（所有权契约 §2.2 V2/V3）。
+/// 内核更新（**唯一写入者 = 壳**）：安装最新内核，由所有者停守卫、等端口释放后重新拉起。
+/// 面板由内核托管、没有 Tauri IPC（IPC 仅主帧），经 postMessage 请求本命令（见 crate::bridge）；
+/// 启动门 2 与本命令共用 `core_apply_inner` —— 内核包只有这一处写入，守卫从不重启自己。
 #[tauri::command]
 pub async fn kernel_update_apply(app: tauri::AppHandle) -> ShellResult<serde_json::Value> {
-    // ① 安装/升级到最新（与启动门 2 完全同一实现）
+    // 1) 安装/升级到最新（与启动门 2 完全同一实现）
     //   变量名不叫 `install`：那是安装语义模块的别名（见文件头），同名局部变量会在本函数里遮住它。
     let install_out = core_apply_inner(app.clone()).await?;
     if install_out.get("ok").and_then(|v| v.as_bool()) != Some(true) {
         return Ok(serde_json::json!({ "ok": false, "stage": "install", "detail": install_out }));
     }
-    // ②+③ 停守卫 → 等端口释放 → 重新拉起，**全部放线程池**（含阻塞 sleep，绝不占 async 运行时）。
+    // 2)+3) 停守卫、等端口释放、重新拉起，**全部放线程池**（含阻塞 sleep，绝不占 async 运行时）。
     //    等端口释放是必须的：否则 ensure_guard 会在「端口已开」的早退分支里直接返回，重启被静默跳过。
     //    这里问的是「还在不在」，不是「就绪没就绪」—— 故用 port_open（裸 TCP），不用 ready。
     let restart = tauri::async_runtime::spawn_blocking(move || -> Result<(bool, Option<String>), crate::domain::guardctl::LaunchError> {
@@ -430,7 +392,7 @@ pub async fn kernel_update_apply(app: tauri::AppHandle) -> ShellResult<serde_jso
             if !crate::domain::guardctl::port_open(port) { stopped = true; break; }
             std::thread::sleep(std::time::Duration::from_millis(250));
         }
-        // ensure_guard：P1 对齐 → 建定义 → 请求所有者启动（不可用则 spawn 兜底）。
+        // ensure_guard：P1 对齐 -> 建定义 -> 请求所有者启动（不可用则 spawn 兜底）。
         crate::domain::guardctl::ensure_guard(&app)?;
         Ok((stopped, stop_error))
     }).await;
@@ -449,14 +411,9 @@ pub async fn kernel_update_apply(app: tauri::AppHandle) -> ShellResult<serde_jso
     }
 }
 
-/// 面板→壳 消息桥契约（单一事实源在 crate::bridge）：把协议版本、命令名与消息类型下发给 shell.html，
-/// 使 shell.html **不硬编码**这些字面量（门禁 SW-1 锁常量、SW-2 锁接线）。
-///
-/// 除消息类型外还下发两件「面板自己不该知道的 Facts」：
-///   · `kernelKind` —— 中继时用来筛事件的 kind 字面量，唯一来源是 `InstallKind::as_str`（G-12B）；
-///     在 JS 里再写一份 `"kernel"` 就等于给「哪些东西可被安装」开出第二份账。
-///   · `maxWaitMs` —— 面板等待终结消息的上界（见 `bridge::KERNEL_UPDATE_MAX_WAIT_MS` 的理由：
-///     面板此前自己写 6 分钟，而壳的预算是 17 分钟，于是正常安装被误报成「壳无响应」。
+/// 面板与壳 消息桥契约（单一事实源在 crate::bridge）：下发协议版本/命令名/消息类型，
+/// 使 shell.html **不硬编码**这些字面量（门禁 SW-1 锁常量、SW-2 锁接线）。另下发 kernelKind
+/// （筛事件的 kind 字面量，唯一来源是 `InstallKind::as_str`，门禁 G-12B）与 maxWaitMs（须与壳侧预算一致）。
 #[tauri::command]
 pub fn shell_bridge_contract() -> serde_json::Value {
     serde_json::json!({
@@ -508,15 +465,13 @@ pub async fn guard_start(app: tauri::AppHandle) -> ShellResult<serde_json::Value
     };
     Ok(match r {
         Ok(()) => serde_json::json!({"ok": true}),
-        // code：结构化阶段（规范 §4）；error 保持**字符串**——前端多处做 `'...' + e` 拼接。
+        // code：结构化阶段（规范文档定义）；error 保持**字符串**——前端多处做 `'...' + e` 拼接。
         Err(e) => serde_json::json!({"ok": false, "code": e.code, "error": e.message}),
     })
 }
 
-/// 守卫就绪探针：引导页据此决定进面板，替代固定延时（K6）。
-///
-/// 判据本身**不在这里**：`guardctl::ready` 是全仓唯一的就绪实现（规范 §0 H6），
-///   本命令只负责如实转述它（`reason` 保持旧值域，前端与既有门禁都读它）。
+/// 守卫就绪探针：引导页据此决定进面板，替代固定延时（K6）。判据本身**不在这里**：
+/// `guardctl::ready` 是全仓唯一的就绪实现（规范 H6），本命令只如实转述（`reason` 保持旧值域）。
 /// 必须 async：探测最长数秒且被高频轮询，必须放阻塞线程池，主线程立即返回。
 #[tauri::command]
 pub async fn guard_ready() -> serde_json::Value {
@@ -538,7 +493,7 @@ pub async fn guard_ready() -> serde_json::Value {
 const GUARD_READY_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// 桌面自定义窗口控制（Phase 3b：无边框窗口 + 自绘标题栏）。
-/// 前端 WindowTitlebar 按钮 → invoke("win_ctl", {action})：
+/// 前端 WindowTitlebar 按钮 invoke("win_ctl", {action})：
 ///   "minimize" / "toggle-maximize" / "hide"（关闭按钮 = 隐藏到托盘，与 CloseRequested 语义一致）。
 #[tauri::command]
 pub fn win_ctl(app: tauri::AppHandle, action: String) -> ShellResult<()> {
@@ -560,7 +515,7 @@ pub fn win_ctl(app: tauri::AppHandle, action: String) -> ShellResult<()> {
         }
         "drag" => {
             // 显式窗口拖动（Linux WebKitGTK drag-region 属性常不生效的可靠替代）：
-            // 前端标题栏拖动区 mousedown → invoke win_ctl drag → 走 Rust start_dragging
+            // 前端标题栏拖动区 mousedown 时 invoke win_ctl drag，走 Rust start_dragging
             win.start_dragging().map_err(|e| ShellError::ipc(e.to_string()))
         }
         _ => Err(format!("不支持的窗口动作: {}（minimize/toggle-maximize/maximize/unmaximize/hide/drag）", action).into()),
@@ -573,7 +528,7 @@ pub fn win_ctl(app: tauri::AppHandle, action: String) -> ShellResult<()> {
 #[tauri::command]
 pub fn shell_panel_url() -> serde_json::Value {
     let url = crate::env::api_base_url();
-    // 落盘一行：**证明主帧导航确实完成**（引导页 → 壳框架）。
+    // 落盘一行：**证明主帧导航确实完成**（引导页转入壳框架）。
     // 这条日志也是可观测性的关键一环：从 shell.log 就能看出卡在引导页还是壳框架。
     crate::update::log(&format!("壳框架就绪（主帧导航完成），面板 URL: {}", url));
     serde_json::json!({ "url": url })
@@ -654,7 +609,7 @@ pub fn mirror_set(kind: String, urls: Vec<String>) -> ShellResult<serde_json::Va
     }
     m.checked_at = None; // 使缓存失效，下次重新测速
     if kind == "npm" {
-        m.selected_npm = None; // 用户改了候选集 → 旧的选择结果失效
+        m.selected_npm = None; // 用户改了候选集，旧的选择结果失效
     }
     crate::mirror::save(&m)?;
     if kind == "npm" {
@@ -665,13 +620,10 @@ pub fn mirror_set(kind: String, urls: Vec<String>) -> ShellResult<serde_json::Va
     Ok(serde_json::json!({ "ok": true, "kind": kind, "urls": list }))
 }
 
-/// 检查是否有壳更新。
-/// 返回 { ok, available, current, latest, notes, skipped?, reason? }
+/// 检查是否有壳更新。返回 { ok, available, current, latest, notes, skipped?, reason? }。
 /// 语义：跳过的原因一律**不阻断启动**（有界失败即放行）。
-/// 桌面自更新的统一决策形状（与内核 core_plan 同一组键：artifact/current/latest/available/channel/source/error）。
-///
-/// 问题 1 的机制层统一：两侧用同一形状，前端不再是"两套流程"。执行器按产物分派
-/// （壳=Tauri updater，内核=npm），但**决策模型是一套**。
+/// 桌面自更新的统一决策形状（与内核 core_plan 同一组键：artifact/current/latest/available/
+/// channel/source/error）：两侧同一形状、执行器按产物分派，但**决策模型是一套**。
 fn shell_plan(
     cur: &str,
     latest: Option<String>,
@@ -728,7 +680,7 @@ pub async fn shell_update_check(app: tauri::AppHandle) -> ShellResult<serde_json
             Ok(shell_plan(&cur, None, false, None, String::new(), String::new()))
         }
         Ok(Err(e)) => {
-            // 网络失败/清单不可达/验签失败 → 一律「失败放行」，由引导页决定是否重试
+            // 网络失败/清单不可达/验签失败，一律「失败放行」，由引导页决定是否重试
             let msg = format!("{}", e);
             crate::update::log(&format!("桌面更新检查失败：{}", msg));
             Ok(shell_plan(&cur, None, false, Some(msg), String::new(), String::new()))
@@ -737,9 +689,7 @@ pub async fn shell_update_check(app: tauri::AppHandle) -> ShellResult<serde_json
 }
 
 /// 换源重试的判据：**只有「这个源没把字节给全」才换下一个源**。
-///
-/// 验签类失败（Minisign / Base64 / SignatureUtf8）说明拿到的东西不对，
-/// 换源重试只会反复下载大包并掩盖真实故障，必须立刻报出来。
+/// 验签类失败说明拿到的东西不对，换源重试只会反复下载大包并掩盖真实故障，必须立刻报出来；
 /// 其余（安装/解压/环境）失败与源无关，同样不重试。
 /// `Error` 是 `#[non_exhaustive]`，故新变体默认落到「不重试」—— 保守方向正确。
 fn worth_next_source(err: &tauri_plugin_updater::Error) -> bool {
@@ -752,7 +702,7 @@ fn worth_next_source(err: &tauri_plugin_updater::Error) -> bool {
 #[tauri::command]
 pub async fn shell_update_apply(app: tauri::AppHandle) -> ShellResult<serde_json::Value> {
     crate::update::set_phase("shell-update-download");
-    // 下载需要长超时；但 check 不能等那么久 → check 单独用 tokio 包短超时。
+    // 下载需要长超时；但 check 不能等那么久，check 单独用 tokio 包短超时。
     let updater = crate::shell_updater(&app, SHELL_DOWNLOAD_TIMEOUT)?;
     let found = match tokio::time::timeout(SHELL_CHECK_TIMEOUT, updater.check()).await {
         Err(_) => {
@@ -768,7 +718,7 @@ pub async fn shell_update_apply(app: tauri::AppHandle) -> ShellResult<serde_json
     };
     let target = u.version.clone();
 
-    // 清单每平台只有一个绝对产物 URL，而插件下载阶段不会自己换源 → 由壳按
+    // 清单每平台只有一个绝对产物 URL，而插件下载阶段不会自己换源，故由壳按
     // `mirror::artifact_candidates` 逐个试（换源不换字节，验签仍在插件内做）。
     let candidates = crate::mirror::artifact_candidates(&u.download_url, &u.version);
     crate::update::log(&format!("桌面更新开始下载 {}（{} 个候选源）", target, candidates.len()));
@@ -786,7 +736,7 @@ pub async fn shell_update_apply(app: tauri::AppHandle) -> ShellResult<serde_json
             candidate.download(
                 |chunk, total| {
                     got += chunk as u64;
-                    // 统一安装事件（SSOT §2.4）：与 node/npm/内核走**同一个发射点**，kind=shell。
+                    // 统一安装事件：与 node/npm/内核走**同一个发射点**，kind=shell。
                     //   文案与比值都由 install::download_line 从 (done, total) 一次算出，
                     //   因此不会出现「文字说 12MB、比值说 30%」这种两处各写一半的自相矛盾。
                     install::download(&app, InstallKind::Shell, got, total.map(|t| t as u64));
@@ -829,7 +779,7 @@ pub async fn shell_update_apply(app: tauri::AppHandle) -> ShellResult<serde_json
     };
 
     let downloaded_bytes = bytes.len() as u64;
-    // 下载完成 → 安装态：同一个发射点，比值 1.0 是**测出来的**（安装包字节已全部取回）。
+    // 下载完成后转安装态：同一个发射点，比值 1.0 是**测出来的**（安装包字节已全部取回）。
     install::push(
         &app,
         InstallKind::Shell,

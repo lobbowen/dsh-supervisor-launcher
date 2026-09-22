@@ -1,28 +1,12 @@
-//! 镜像源适配（壳自持）。
-//!
-//! 装机时机器上没有内核，壳必须先于内核完成镜像选择；故镜像目录与探测方法的所有权在壳，
-//! 内核消费壳投放的 registry.json（见 `export_to_kernel`）。三条下载链路：
-//!   ① Node 运行时 —— node.rs（index.json + 安装包 + SHASUMS256）
-//!   ② 内核 npm 包 —— core.rs（包元数据 + npm install -g）
-//!   ③ 壳自更新 —— main.rs（Tauri updater 清单与安装包）
-//!
-//! 不变量：
-//!   · **并行**探测全部候选（串行会被最慢源拖死）；
-//!   · Node 版本取全部可达源中的**最高版本**（镜像同步滞后，「首个成功即采用」会装到旧版）；
-//!   · 选**最快**且确实提供该版本的源下载；结果缓存到 ~/.dsh/shell/mirrors.json 并导出内核。
+//! 镜像源适配（壳自持）：装机时机器上没有内核，壳必须先于内核完成镜像选择，内核消费壳投放的 registry.json。
+//! 不变量：并行探测全部候选（串行会被最慢源拖死）；Node 版本取全部可达源中的最高版本（镜像同步滞后，首个成功即采用会装到旧版）；
+//! 选最快且确实提供该版本的源下载，结果缓存到 ~/.dsh/shell/mirrors.json 并导出内核。
 
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-/// npm registry 预设（**全部经真实 tarball 下载验证**，2026-09-11）。
-///
-/// 验证方法：请求该源包元数据 → 取 dist.tarball → **真实下载** → 确认体积合理。
-/// 仅「元数据可读」不足以判定可用（部分镜像只代理元数据、不代理 tarball）。
-///
-/// 已排除（实测不可用）：
-///   · mirrors.aliyun.com/npm            —— 元数据不可用（非标准 registry 路径）
-///   · mirrors.tuna.tsinghua.edu.cn/npm  —— 同上
+/// npm registry 预设：全部经真实 tarball 下载验证过 - 仅元数据可读不算可用（部分镜像只代理元数据、不代理 tarball）。
 pub const NPM_PRESETS: [&str; 6] = [
     "https://registry.npmmirror.com",
     "https://registry.npmjs.org",
@@ -32,18 +16,9 @@ pub const NPM_PRESETS: [&str; 6] = [
     "https://r.cnpmjs.org",
 ];
 
-/// Node 发行镜像预设（**全部经真实下载 + SHA256 校验验证**，2026-09-11）。
-///
-/// 验证方法：对每个源，取它自己 index.json 里**最高的可用 LTS**，下载安装包，
-/// 并用该源 SHASUMS256.txt 的期望值做 SHA256 校验 —— 只有校验通过才算可用。
-/// 这比「URL 可达」严格得多：能过滤代理不完整、文件损坏、清单与文件不匹配的镜像。
-///
-/// 各源同步进度不同（官方/npmmirror/华为/阿里/上海交大有最新 LTS；
-///   腾讯云/南京大学滞后一版；清华/北外/北大滞后数版）。这不影响使用 ——
-///   latest_lts() 会**跨全部可达源取最高版本**，再在提供该版本的源中选最快者；
-///   滞后源仍可作为回退。
-///
-/// 已排除（实测 SHA256 校验失败）：mirrors.ustc.edu.cn/node
+/// Node 发行镜像预设：全部经真实下载 + 该源自身 SHASUMS256 校验通过，比「URL 可达」严格得多
+/// （能过滤代理不完整、文件损坏、清单与文件不匹配的镜像）。
+/// 各源同步进度不同不影响使用：latest_lts() 跨全部可达源取最高版本，再在提供该版本的源中选最快者，滞后源作回退。
 pub const NODE_PRESETS: [&str; 10] = [
     "https://nodejs.org/dist",
     "https://npmmirror.com/mirrors/node",
@@ -57,21 +32,16 @@ pub const NODE_PRESETS: [&str; 10] = [
     "https://mirrors.pku.edu.cn/nodejs-release",
 ];
 
-/// 壳自更新清单预设（Tauri updater 的 endpoints；此处存完整清单 URL）。
-///
-/// 仅 2 个可用（2026-09-11 实测）：Tauri updater 需要一个**静态 JSON 文件**直链，
-///   而多数 npm 镜像只提供 registry 元数据 API，不提供包内静态文件直链。
-///   实测排除：npmmirror /files/ 路径返回 403；npm 官方不提供静态文件服务。
+/// 壳自更新清单预设（Tauri updater 的 endpoints，完整清单 URL）：必须是能直链**静态 JSON 文件**的源 -
+/// 多数 npm 镜像只提供 registry 元数据 API，npmmirror /files/ 返回 403，npm 官方无静态文件服务。
 pub const SHELL_PRESETS: [&str; 2] = [
     "https://unpkg.com/@dsh-sup/shell-release@latest/shell-manifest.json",
     "https://cdn.jsdelivr.net/npm/@dsh-sup/shell-release@latest/shell-manifest.json",
 ];
 
 /// 安装包（清单里 `platforms.*.url` 指向的东西）的可换主机 npm CDN。
-///
-/// 入选判据：实测能把**本平台安装包的完整字节**取回（HTTP 200 + 全量），
-/// 只看清单或包元数据可达不算。逐源取样与全部排除理由见
-/// `docs/SHELL-UPDATE-CHANNEL-VERIFICATION.md` §九。
+/// 入选判据：实测能把本平台安装包的完整字节取回（HTTP 200 + 全量），只看清单或元数据可达不算；
+/// 逐源取样与排除理由见 docs/SHELL-UPDATE-CHANNEL-VERIFICATION.md。
 pub const SHELL_ARTIFACT_NPM_CDNS: [&str; 2] = [
     "https://unpkg.com",
     "https://cdn.jsdelivr.net/npm",
@@ -82,22 +52,9 @@ pub const SHELL_ARTIFACT_RELEASE_BASE: &str =
     "https://github.com/lobbowen/dsh-supervisor-launcher/releases/download";
 
 /// 除清单声明的那一个 URL 外，安装包还该按序尝试哪些源（声明源永远第一）。
-///
-/// ## 为什么换源要在壳侧推
-///
-/// Tauri 的清单每平台**只有一个绝对产物 URL**，插件下载阶段不会自己换源 ——
-/// `endpoints`（含 `SHELL_PRESETS`）只覆盖**清单**那一次请求。声明的那台 CDN 一挂，
-/// 自动更新就只剩「下载失败」。`Update::download_url` 是公开字段，故壳可以在调用
-/// `download()` 前改写它；字节不变、验签仍在插件内按清单签名做，
-/// 所以**任何源都没有让 updater 装上篡改包的能力**（见 §二 的源码级验证）。
-///
-/// ## 两条已知形态差异（都是预期，不是缺陷）
-///
-/// · jsdelivr 对 `.exe` 按其自身的扩展名策略返 403 → Windows 上它必然落到下一个源；
-///   仍留在表里，因为 deb 与 app.tar.gz 它给得出，且哪天放开就自动多一条源。
-/// · 文件名不含架构标识时**不给** Release 候选：macOS 两架构的产物同名
-///   （`dsh-supervisor.app.tar.gz`），Release 上互相覆盖，换过去取到的是错架构的包 ——
-///   表现为验签失败，比直连失败更难排障。
+/// Tauri 清单每平台只有一个产物 URL，插件下载阶段不会自己换源；Update::download_url 是公开字段，壳可改写它，
+/// 验签仍在插件内按清单签名做，任何源都没有让 updater 装上篡改包的能力。
+/// 文件名不含架构标识时不挂 Release 候选：macOS 两架构产物同名，换过去取到的是错架构的包（表现为验签失败，更难排障）。
 pub fn artifact_candidates(declared: &tauri::Url, ver: &str) -> Vec<tauri::Url> {
     let mut out = vec![declared.clone()];
     let path = declared.path().to_string();
@@ -124,21 +81,13 @@ pub fn artifact_candidates(declared: &tauri::Url, ver: &str) -> Vec<tauri::Url> 
 const ARCH_TOKENS: [&str; 5] = ["x64", "amd64", "x86_64", "arm64", "aarch64"];
 
 /// 单次探测的总超时。
-///
-/// 为什么不是 8 秒（2026-09-18 修）：index.json 单个就有 1.5~2MB（90+ 版本），
-///   8 秒在慢网/代理下会让全部镜像一起超时 —— 用户看到「全部 Node 镜像均不可用」，
-///   而真实原因只是探针过短。20 秒仍远小于前端 node_latest 的 45 秒预算。
+/// index.json 单个就有 1.5~2MB（90+ 版本）：过短的超时会让全部镜像在慢网/代理下一起超时，
+/// 把「探针过短」误报成「全部 Node 镜像均不可用」。
 pub const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
 
-/// 进程级 HTTP agent（统一代理与超时）。
-///
-/// 不变量：壳自己的全部 HTTP（镜像探测 / index.json / Node 包 / SHASUMS256）都必须
-///   经本 agent —— 否则探测与下载会出现两套代理/超时行为。
-///
-/// 为什么必须显式处理代理（2026-09-18 修）：ureq 默认既不读环境变量也不读系统代理，
-///   在「只有代理、没有直连」的机器上，全部镜像直连必失败，用户只会看到一句
-///   「全部 Node 镜像均不可用」，无从得知是代理没生效。此处按
-///   ALL_PROXY / HTTPS_PROXY / HTTP_PROXY（大小写）解析；无效地址忽略并记日志。
+/// 进程级 HTTP agent（统一代理与超时）：壳的全部 HTTP 都必须经本 agent，否则探测与下载会出现两套代理/超时行为。
+/// ureq 默认既不读环境变量也不读系统代理，「只有代理、没有直连」的机器上会全源直连必败而无从得知原因；
+/// 故此处按 ALL_PROXY / HTTPS_PROXY / HTTP_PROXY（大小写）显式解析，无效地址忽略并记日志。
 pub fn agent() -> &'static ureq::Agent {
     static A: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
     A.get_or_init(|| {
@@ -269,28 +218,13 @@ pub fn save(m: &Mirrors) -> Result<(), String> {
     Ok(())
 }
 
-/// 契约版本（内核据此判断格式是否兼容）。
-///
-/// 变更历史：
-///   1 —— 仅 `mode` / `origins` / `manualOrigin`（旧格式）
-///   2 —— 增加 `catalog`（全集）/ `selected`（选择结果）/ `probe`（**探测规格**）
-///
-/// 为什么要 `probe`：修复「两侧选源不一致」——
-///   内核用 `/-/ping`、壳用真实包元数据，同一镜像测出的延迟可差 **6.7 倍**
-///   （实测 ustclug 2613ms vs 389ms），导致内核选 huaweicloud、壳选 npmmirror ——
-///   用户看到「面板显示一个源、实际用另一个」。把探测规格随契约投放，
-///   内核照做即可得到**同一答案**。
+/// 契约 schema 版本（内核据此判断格式是否兼容）：v2 在 mode/origins/manualOrigin 之外
+/// 增加 catalog（全集）/ selected（选择结果）/ probe（探测规格）- 内核照 probe 规格执行即可与壳得到同一答案。
 pub const CONTRACT_SCHEMA: u64 = 2;
 
 /// 导出镜像契约给内核（`<产品状态根>/supervisor/registry.json`）。
-///
-/// ## 为什么由**壳**写（所有权）
-///
-/// 用户在装壳那一刻机器上**没有内核** —— 壳必须先于内核完成镜像选择
-/// （否则连内核都装不上）。故目录与探测方法的所有权在壳，内核**消费产物**。
-///
-/// 写全集 catalog + selected + probe（而非仅 origins），使内核与壳选源同源；
-/// 由 main.rs setup 在启动时无条件导出；内核已写 manual 时不覆盖。
+/// 所有权在壳：装壳那一刻机器上没有内核，壳必须先于内核完成镜像选择，内核只消费产物。
+/// 写全集 catalog + selected + probe（而非仅 origins）；由 main.rs setup 在启动时无条件导出；内核已写 manual 时不覆盖。
 pub fn export_to_kernel(m: &Mirrors) -> Result<(), String> {
     export_to_kernel_with(m, None)
 }
@@ -304,7 +238,7 @@ pub fn export_to_kernel_with(m: &Mirrors, latency_ms: Option<u128>) -> Result<()
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("创建内核状态目录失败: {}", e))?;
     }
-    // 用户在内核面板手动固定过 → 不覆盖（尊重显式意图）。
+    // 用户在内核面板手动固定过源，不覆盖（尊重显式意图）。
     if let Ok(s) = std::fs::read_to_string(&path) {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
             if v.get("mode").and_then(|x| x.as_str()) == Some("manual") {
@@ -333,20 +267,14 @@ pub fn export_to_kernel_with(m: &Mirrors, latency_ms: Option<u128>) -> Result<()
         // 既有字段：保持向后兼容（旧内核只读这三项也能工作）
         "origins": m.npm,
         "manualOrigin": m.selected_npm.clone().unwrap_or_else(|| m.npm.first().cloned().unwrap_or_default()),
-        // v2 新增：全集 + 选择结果 + 探测规格
+        // v2 字段：全集 + 选择结果 + 探测规格
         "catalog": m.npm,
         "selected": selected,
         "probe": {
             "kind": "package-metadata",
             "pathTemplate": npm_probe_path(),
-            // P1 修复（2026-09-12）：**必须与壳实际探测用的超时一致**。
-            //
-            //   缺陷：此处硬编码 6000，而 `probe_all` 用 `PROBE_TIMEOUT`（见上）。
-            //     `probe` 字段的全部目的就是让两侧**选源一致**（见文件头说明与
-            //     内核 `registry-contract.js` 的注释）—— 介于两者之间的源会被壳判可达、
-            //     内核判不可达，选源**再次分叉**。
-            //
-            //   修法：直接由 `PROBE_TIMEOUT` 派生（单一事实源），永不漂移。
+            // 必须由 PROBE_TIMEOUT 派生（单一事实源）：两侧探测超时不一致时，
+            //   介于两者之间的源会一侧判可达、另一侧判不可达，选源再次分叉。
             "timeoutMs": PROBE_TIMEOUT.as_millis() as u64,
         },
     });
@@ -357,10 +285,8 @@ pub fn export_to_kernel_with(m: &Mirrors, latency_ms: Option<u128>) -> Result<()
     Ok(())
 }
 
-/// **壳启动时无条件导出契约**（修复「`latest_lts()` 失败 ⇒ 契约完全不写」）。
-///
-/// 时机：`main.rs` 的 `setup()` 中、`init_identity` 之后（此时 HOME/状态目录已就绪）。
-/// 失败只记日志，**绝不阻断引导** —— 契约是增强，不是壳启动的前提。
+/// 壳启动时无条件导出契约：探测失败时也必须写，否则内核完全拿不到源。
+/// 失败只记日志，绝不阻断引导 - 契约是增强，不是壳启动的前提。
 pub fn export_on_boot() {
     let m = load();
     if let Err(e) = export_to_kernel(&m) {
@@ -374,34 +300,23 @@ pub struct Probe {
     pub ok: bool,
     pub latency_ms: u128,
     pub body: Option<String>,
-    /// 失败原因（HTTP / DNS / TLS / 代理 / 读体）。**必须保留**：旧实现把它丢掉，
-    ///   用户只看到「不可达」，排障时无法区分是断网、证书、代理还是镜像 404。
+    /// 失败原因（HTTP / DNS / TLS / 代理 / 读体）。必须保留：
+    ///   排障时要能区分是断网、证书、代理还是镜像 404。
     pub error: Option<String>,
 }
 
-/// npm registry 的探测探针包名（**必须是一个真实存在的包**）。
-///
-/// 为什么不能用空路径或根路径（2026-09-11 修复）：
-///   原实现对 npm 源传 `""`，实际请求 `https://<源>/`—— 而多数 registry 根路径返回
-///   **404**（它们只服务包元数据 API）。于是**健康的源被判为「不可达」**：
-///   实测腾讯云 npm 镜像连测 3 次均 HTTP 200、能正确返回我们的包，
-///   却因为根路径 404 而在测速中显示「不可达」，进而被排除在选择之外。
-///   这是**探测方法错误**，不是源失效 —— 会让壳无谓地少一个可用镜像。
-///
-/// 改用我们自己的平台包做探针：它是真实存在的包，且与最终用途一致。
+/// npm registry 的探测探针包名（必须是一个真实存在的包）：多数 registry 根路径返回 404，
+/// 用根路径会把健康源判为不可达、无谓地少一个可用镜像。用我们自己的平台包：真实存在，且与最终用途一致。
 fn npm_probe_path() -> String {
     // 探测用包：优先内核平台包（真实存在）；失败时退回一个必然存在的小包。
     crate::core::package_name().unwrap_or_else(|_| "@dsh-sup/dsh-core-linux-x64".to_string())
 }
 
 /// **并行**探测全部候选：对每个源请求 path，记录延迟与响应体。
-///
-/// 用 std::thread::scope（std 自带，无需新依赖）实现并发；
-/// 单源超时 PROBE_TIMEOUT，整体耗时约为其中最慢者而非累加。
-///
-/// `path` 为空时视为 **npm registry 探测**：自动使用真实包名而非根路径。
+/// 用 std::thread::scope 实现并发（std 自带，无需新依赖）；单源超时 PROBE_TIMEOUT，整体耗时约为最慢者而非累加。
+/// `path` 为空时视为 npm registry 探测：自动使用真实包名而非根路径。
 pub fn probe_all(sources: &[String], path: &str) -> Vec<Probe> {
-    // 空 path → npm 探测：用真实包名（根路径会 404，导致健康源被误判不可达）。
+    // 空 path -> npm 探测：用真实包名（根路径会 404，导致健康源被误判不可达）。
     let owned;
     let path = if path.is_empty() {
         owned = npm_probe_path();
@@ -461,27 +376,9 @@ pub fn probe_all(sources: &[String], path: &str) -> Vec<Probe> {
     v
 }
 
-// ════════════════════════════════════════════════════════════════════
-// 镜像「一等公民」：全程可见 + 预热缓存（2026-09-11 架构修复）
-//
-// == 问题（用户实测指出） ==
-//
-// 用户反馈「连镜像源都看不到，根本不会去选择镜像源」。查代码后确证：
-//   `afterEnv` 只在「未装 Node」或「Node 版本过低」时才调 probeMirrorThen ——
-//   **Node 达标的用户（主力用户）永远看不到镜像**，诊断串必然 mirror=none。
-//   而 `core_plan` / `core_apply` 内部算了镜像源，却**完全不回传** ——
-//   用户看着「正在检查内核版本」，无从知晓壳选了哪个源。
-//
-// == 修复思路 ==
-//
-// 镜像不是「下载 Node 的辅助」，而是**壳所有网络动作的基础设施**。
-// 故把它提升为一等公民：
-//   1) **预热**：引导开始即在后台并行测速（不阻塞任何步骤）；
-//   2) **全程可读**：任何时刻查询都返回缓存结果（无网络 I/O）；
-//   3) **写透诊断**：诊断串始终带 mirror / mirror_probes。
-//
-// 这样「有没有选镜像、选了谁、延迟多少」在任何情况下都是**事实**，而不是观感。
-// ════════════════════════════════════════════════════════════════════
+// 镜像是壳全部网络动作的基础设施，不是「下载 Node 的辅助」：引导开始即后台预热（不阻塞任何步骤），
+// 结果任何时刻经 cached() 可读（无网络 I/O）并写透诊断串。旧引导只在缺 Node/版本过低才调 probeMirrorThen，
+// Node 达标的主力用户永远看不到镜像结果，现与「是否需要下载 Node」解耦。
 
 /// 预热结果缓存：`None` 表示尚未测速完成。
 static WARM: std::sync::OnceLock<Mutex<Option<ProbeSnapshot>>> = std::sync::OnceLock::new();
@@ -513,10 +410,8 @@ pub fn cached() -> Option<ProbeSnapshot> {
 /// 是否已在飞（避免重复预热）。
 static WARMING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// 后台预热镜像测速：**立即返回**，结果稍后经 `cached()` 读取。
-///
-/// 设计要点：预热在独立线程中做全部网络 I/O，故调用方（引导页）**绝不阻塞**；
-/// 这使「镜像全程可见」不再与「是否需要下载 Node」耦合。
+/// 后台预热镜像测速：立即返回，结果稍后经 `cached()` 读取。
+/// 全部网络 I/O 在独立线程完成，调用方（引导页）绝不阻塞。
 pub fn warmup_async() {
     if WARMING.swap(true, std::sync::atomic::Ordering::SeqCst) {
         return; // 已有在飞预热
@@ -533,8 +428,7 @@ pub fn warmup_async() {
                 let best = v.iter().find(|p| p.ok);
                 (best.map(|p| p.source.clone()), best.map(|p| p.latency_ms))
             };
-            // 逐源明细：只给 npm（`ProbeSnapshot::npm_probes` 消费）；
-            // node 侧的明细此前也返回，但**从未被读取** —— 2026-09-11 清理时去掉。
+            // 逐源明细只给 npm（`ProbeSnapshot::npm_probes` 消费）；node 侧明细无消费方，不返回。
             let pick_all = |v: &[Probe]| -> Vec<(String, bool, u128)> {
                 v.iter().map(|p| (p.source.clone(), p.ok, p.latency_ms)).collect()
             };
@@ -549,18 +443,10 @@ pub fn warmup_async() {
                 npm_probes: mp,
                 at: now_secs(),
             };
-            // P2 修复（2026-09-13，失效模式 f + i）：**必须把选中的 npm 源落盘**。
-            //
-            //   缺陷：本函数算出了 npm 最快源与延迟，却只放进内存 ProbeSnapshot，
-            //     **从不写入 m.selected_npm** —— 全仓没有任何地方把它设成一个被选中的源
-            //     （只在 load 时从磁盘读、在 mirror_set 时置 None）。
-            //   后果：export_to_kernel 里 `m.selected_npm.as_ref().map(...)` 恒为 None →
-            //     写进 registry.json 的 `selected` **永远是 null** →
-            //     内核 domains/dist/index.js「优先采用壳投放的 selected……两侧必然同源」
-            //     那条分支**永不执行**（内核每次仍自测选源），
-            //     跨仓「同源」承诺与 selected.checkedAt 的 TTL 路径全部失效。
-            //   修法：把本次实测的最快 npm 源与其延迟落盘（同时刷新 checked_at）。
-            //     只在探测确实得到结果时写，避免把「全不可达」写成一次有效选择。
+            // 必须把选中的 npm 源与延迟落盘（并刷新 checked_at）：只放内存快照的话，
+            //   registry.json 的 selected 永远是 null，内核「优先采用壳投放的 selected」分支
+            //   永不执行，跨仓「同源」承诺失效。只在探测确实得到结果时写，
+            //   避免把「全不可达」写成一次有效选择。
             let mut m = m;
             if let (Some(best), Some(ms)) = (snap.npm_best.clone(), snap.npm_latency_ms) {
                 m.selected_npm = Some(best);
@@ -608,7 +494,7 @@ mod tests {
             "jsdelivr 的 npm 路径要在（它对 .exe 会给 403，换下一个源是预期）: {:?}", all);
         assert!(all.contains(&"https://github.com/lobbowen/dsh-supervisor-launcher/releases/download/v1.2.0/dsh-supervisor_1.2.0_x64-setup.exe".to_string()),
             "文件名带架构 → 同名 Release 资产要在: {:?}", all);
-        // 实测取不到安装包字节的，一律不许回到表里（判据与理由见 §九）。
+        // 实测取不到安装包字节的源，一律不许回到表里（判据与理由见 SHELL-UPDATE-CHANNEL-VERIFICATION.md）。
         for banned in [
             "npmmirror", "jsdmirror", "fastly", "gcore", "testingcf",
             "tencent", "aliyun", "huaweicloud", "unpkg.net", "gh-proxy", "ghfast", "gitmirror",
@@ -618,7 +504,7 @@ mod tests {
         }
     }
 
-    /// macOS 两架构产物同名 → 不给 Release 候选（拿到的会是错架构的包）。
+    /// macOS 两架构产物同名，不给 Release 候选（拿到的会是错架构的包）。
     #[test]
     fn ambiguous_asset_name_loses_the_release_candidate() {
         let d = url("https://unpkg.com/@dsh-sup/shell-darwin-arm64@1.2.0/artifact/dsh-supervisor.app.tar.gz");

@@ -1,42 +1,13 @@
-//! 有界子进程执行（**公共设施**，2026-09-11）。
-//!
-//! == 为什么需要它（同一根因的第二次出现） ==
-//!
-//! 「环境探测卡死」的根因是「无界阻塞调用 + 被 await」。审计发现**同一模式散布在多处**：
-//!
-//!   · 当时的 service.rs 与 main.rs —— systemctl / loginctl / launchctl / schtasks 全用 .output()（无界）；
-//!   · 当时的 main.rs —— start_guard_service / stop_guard_service / taskkill 同样无界；
-//!   · node.rs    —— pkexec / osascript / powershell 同样无界。
-//!
-//! 而这些调用**几乎都在引导的关键路径上**（建立服务定义 → 启动守卫 → 进入面板）。
-//! systemctl 在 dbus 会话异常、systemd 无响应时会长时间挂起 —— 此时
-//! guard_start 永不返回，引导页永久停在「正在启动守卫…」。
-//!
-//! 故把「有界执行」提取为公共设施，**所有**外部命令一律经它执行，
-//! 而不是在每个调用点各写一遍（那正是缺陷能够分散潜伏的原因）。
-//!
-//! == 实现要点 ==
-//!
-//! · 输出重定向到**临时文件**而非管道：若用 Stdio::piped() 且不读取，
-//!   冗长输出填满 OS 管道缓冲区（约 64KB）后子进程会阻塞，反而制造死锁。
-//! · 轮询 try_wait + 超时 kill：std 无跨平台的 wait-with-timeout，
-//!   而子进程一旦挂起，同步 wait 就是无界的 —— 必须自己轮询。
-//! · Windows 加 CREATE_NO_WINDOW：GUI 进程调控制台程序不弹黑框。
+//! 有界子进程执行（公共设施）：全仓外部命令一律经此文件，`.output()` 这类无界调用统一包装为超时 + kill。
+//! 输出重定向到临时文件而非管道（不抽读的管道填满 64KB 后子进程会阻塞成死锁）；
+//! 超时用轮询 try_wait 实现（std 无跨平台的 wait-with-timeout，挂起后同步 wait 就是无界的）。
 
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-/// 一次外部命令的**完整执行记录**（全仓唯一的子进程结果形态）。
-///
-/// 原 `struct Output { code: Option<String> }` 有两个问题，都是线上故障的直接成因：
-///
-/// · **命令原文一律丢失**。`run()` 只回传退出码与输出，于是「schtasks 失败（退出码 1）」
-///   就是用户能拿到的全部信息 —— 不知道是哪个任务、什么动作、由哪条命令产出。
-///   现在 `program`/`args` 在 `run()` 内部从 `Command` 直接捕获，调用方**无法**漏记。
-/// · `code: Option<String>` 把「未取到退出码」这一实现细节当成了文案载体
-///   （各调用点分别往里塞 `"killed"` / `"超时被终止"`），于是「超时」与「被信号终止」
-///   两种含义不同的事实在类型上塌成同一个字符串。现 `code: Option<i32>` 只装真退出码，
-///   「超时」由 `timed_out` 承载，措辞统一由 [`ExecRecord::code_label`] 决定。
+/// 一次外部命令的完整执行记录（全仓唯一的子进程结果形态）。
+/// program/args 在 run() 内部捕获，调用方无法漏记；code 只装真退出码，
+/// 「超时」由 timed_out 承载，措辞统一由 [`ExecRecord::code_label`] 决定。
 pub struct ExecRecord {
     pub program: String,
     pub args: Vec<String>,
@@ -66,7 +37,7 @@ impl ExecRecord {
         cmd_line_of(&self.program, &self.args)
     }
 
-    /// 退出状态的**统一措辞**（原 4 处各写一份："killed" / "超时被终止" / 裸数字）。
+    /// 退出状态的统一措辞；调用点不得各自再拼一份。
     pub fn code_label(&self) -> String {
         if self.timed_out {
             return format!("超时被终止（>{}s）", self.timeout_secs);
@@ -77,11 +48,8 @@ impl ExecRecord {
         }
     }
 
-    /// **唯一**的失败文案渲染点：`<什么事> 失败（<退出状态> · <命令>）：<正文>`。
-    ///
-    /// 收敛理由：`core.rs`（npm）、`runtime_contract.rs`（版本探针）、`platform/windows.rs`
-    /// （tar / Expand-Archive）此前各自 `format!` 一遍，四处措辞不一致且都不带命令原文 ——
-    /// 报错越不一致，跨阶段对比现场时越难判断是同一条路还是两条路。
+    /// 唯一的失败文案渲染点：所有消费方（npm、版本探针、tar 解压等）必须经此处出文案，
+    /// 且必含命令原文，否则跨阶段对比现场时无法判断是同一条路还是两条路。
     pub fn failure(&self, what: &str) -> String {
         let detail = self.detail();
         format!(
@@ -103,8 +71,7 @@ impl ExecRecord {
     }
 }
 
-/// 命令行的唯一拼装点：`ExecRecord::command_line` 与「命令没能跑起来」的 `Err` 共用，
-/// 避免同一条命令在两种出口下长得不一样（那会让跨阶段比对现场失效）。
+/// 命令行的唯一拼装点：成功记录与「命令没能跑起来」的 Err 共用同一形状。
 fn cmd_line_of(program: &str, args: &[String]) -> String {
     if args.is_empty() {
         return program.to_string();
@@ -125,11 +92,8 @@ pub fn prepare(cmd: &mut Command) {
     }
 }
 
-/// 子进程**运行期间**的现场（只含测得到的量）。
-///
-/// 为什么需要：`npm install` 不吐百分比，输出又被重定向到临时文件（不经管道，见模块头），
-///   所以运行期唯一能如实说出的是「已经等多久 + 它自己写了多少行 + 最后一行写了什么」。
-///   此前这些信息一个字都没传给 UI，于是「正在安装内核…」可以静默 15 分钟。
+/// 子进程运行期间的现场（只含测得到的量）：npm 不吐百分比、输出又落在临时文件里，
+/// 运行期能如实说出的只有「已等多久 + 产出行数 + 最后一行」。
 pub struct Live {
     pub elapsed: Duration,
     /// 已产出的**非空**行数（stdout + stderr 合计）。
@@ -138,10 +102,8 @@ pub struct Live {
     pub last_line: String,
 }
 
-/// 有界执行子进程 + **运行期心跳**：每 `heartbeat` 把 [`Live`] 交给 `on_live`。
-///
-/// 与 [`run`] 的唯一区别就是这条心跳；超时/终止/临时文件清理语义完全相同
-///   （二者共用 [`run_inner`]，因此不存在「两条路行为分叉」的可能）。
+/// 有界执行子进程 + 运行期心跳：每 `heartbeat` 把 [`Live`] 交给 `on_live`。
+/// 与 [`run`] 的唯一区别是这条心跳；二者共用 [`run_inner`]，行为不可能分叉。
 pub fn run_watch(
     cmd: &mut Command,
     timeout: Duration,
@@ -151,13 +113,9 @@ pub fn run_watch(
     run_inner(cmd, timeout, Some((heartbeat, on_live)))
 }
 
-/// 有界执行子进程：超出 timeout 即 kill（**绝不无限阻塞调用方**）。
-///
-/// 返回值语义（2026-09-21 收口）：只有「**没能跑起来**」才是 `Err`（临时文件建不了、
-/// spawn 失败、等待子进程出错）；「跑完了但没成功」**含超时被杀**一律是 `Ok(ExecRecord)`。
-/// 原实现在超时这条路上 `return Err(format!(...))`，把已经拿到的 stdout/stderr 与退出状态
-/// 一起降格成一条字符串 —— 调用方无法区分「命令不存在」与「命令挂了」，
-/// 而这两件事对用户的可操作结论完全不同。
+/// 有界执行子进程：超出 timeout 即 kill，绝不无限阻塞调用方。
+/// 只有「没能跑起来」才是 Err；「跑完了但没成功」含超时被杀，一律返回 Ok(记录)，
+/// 输出与退出状态作为证据保留，调用方才能区分「命令不存在」与「命令挂了」。
 pub fn run(cmd: &mut Command, timeout: Duration) -> Result<ExecRecord, String> {
     run_inner(cmd, timeout, None)
 }
@@ -168,7 +126,7 @@ fn run_inner(
     timeout: Duration,
     watch: Option<(Duration, &dyn Fn(&Live))>,
 ) -> Result<ExecRecord, String> {
-    // 命令原文在此捕获（而不是让每个调用方自己记得带上）：这是「诊断必含命令」的唯一保证。
+    // 命令原文在此捕获，不让每个调用方自己记得带上：这是「诊断必含命令」的唯一保证。
     let program = cmd.get_program().to_string_lossy().into_owned();
     let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
     let timeout_secs = timeout.as_secs();
@@ -187,9 +145,7 @@ fn run_inner(
 
     let out_file = std::fs::File::create(&out_path)
         .map_err(|e| format!("{} 无法执行（创建临时输出文件失败）: {}", cmd_line, e))?;
-    // 不变量：任一临时文件创建失败时必须清掉已建的文件（不留残渣）。
-    //   空的 dsh-cmd-out-*.log 在 temp 目录（本仓另有清理脚本会竞争，见 AUDIT-HANDOFF 9.4）。
-    //   同理，spawn 失败时两个文件都已建好，也必须一并清理。
+    // 不变量：任一临时文件创建失败或 spawn 失败时，必须清掉已建的文件（不留残渣）。
     let err_file = match std::fs::File::create(&err_path) {
         Ok(f) => f,
         Err(e) => {
@@ -202,7 +158,6 @@ fn run_inner(
     cmd.stdin(Stdio::null());
     prepare(cmd);
 
-    // spawn 失败（命令不存在/不可执行）此前直接返回 Err，两个临时文件永久残留。
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
@@ -223,8 +178,8 @@ fn run_inner(
                     let err = read_log(&err_path);
                     let out = read_log(&out_path);
                     cleanup(&out_path, &err_path);
-                    // 超时不再降格成一条 Err 字符串：已拿到的输出与「超时」这一事实
-                    //   一起留在记录里，调用方才能说出「挂了」而不是「失败了」。
+                    // 超时以记录承载：已拿到的输出与 timed_out 一起留下，
+                    //   调用方才能说出「挂了」而不是「失败了」。
                     return Ok(ExecRecord {
                         program,
                         args,
@@ -305,38 +260,10 @@ fn read_log(p: &std::path::Path) -> String {
     }
 }
 
-/// 子进程原始字节 → 字符串，**全仓唯一解码点**。
-///
-/// ## 为什么不是 `String::from_utf8_lossy`（原实现，2026-09-12）
-///
-/// 上一次「GBK 修复」只做到**详情不丢**，代价是**详情不可读**：中文 Windows 的控制台程序
-/// （`schtasks` / `taskkill` / `tar.exe`）按 **OEM 码页**（zh-CN 为 936/GBK）写 stderr，
-/// 按 UTF-8 做 lossy 解码会把每个双字节换成 U+FFFD。线上表现就是用户报来的那段乱码：
-///
-/// ```text
-/// schtasks /Run 失败（退出码 1）：<乱码>
-/// ```
-///
-/// `锟斤拷` 连排是「GBK 双字节被按 UTF-8 lossy」的指纹，所以能确定原文是一条**中文控制台
-/// 消息**（具体字串已被 lossy 抹掉、不可恢复；`schtasks /Run` 退 1 在中文 Windows 上最常见
-/// 的就是「系统找不到指定的文件。」）。无论具体是哪句，它都是整条链路上唯一的真话 ——
-/// 也就是说：缺陷不是「详情丢了」，是「真话被毁容」，
-/// 于是每一次 Windows 现场排障都只能靠猜。丢字节与丢可读性是同一个缺陷的两半。
-///
-/// ## 现在的做法
-///
-/// 1. 先按 UTF-8 试：`node` / `npm` / 新式 `powershell` 输出本就是 UTF-8；GBK 的 ASCII 半区
-///    与 UTF-8 同形，纯英文消息不会因这一步被跳过（这一步保证不回归现有正确输出）。
-/// 2. 不是 UTF-8 才交给**操作系统**按当前控制台输出码页做 MBCS→UTF-16
-///    （`MultiByteToWideChar`）。因此对 936/950/437/1251 等任意本地码页都成立 ——
-///    硬编码「中文 = GBK」只会把繁体与俄语用户留在乱码里。
-/// 3. 转换仍失败才 lossy，保底不丢字节。
-///
-/// ## 为什么落在 infra 而不是 `platform/`
-///
-/// 这是「**进程创建与交互**」这一原语的平台差异，与同文件的 [`prepare`]（`CREATE_NO_WINDOW`）
-/// 完全同类，G1 白名单登记的就是这一条理由；若下沉到 `platform/`，`platform` 已经依赖
-/// `bounded`（见 `platform/mod.rs` 分层说明），会形成反向依赖。
+/// 子进程原始字节 -> 字符串，全仓唯一解码点。
+/// Windows 控制台程序（schtasks / taskkill / tar）按 OEM 码页写 stderr，按 UTF-8 做
+/// lossy 解码会把双字节换成 U+FFFD（现场乱码即「真话被毁容」）。故：先试 UTF-8（不回归
+/// 现有正确输出），失败交操作系统按当前控制台码页转换，仍失败才 lossy 保底。
 #[cfg(windows)]
 fn decode_console(bytes: &[u8]) -> String {
     if bytes.is_empty() {
@@ -368,11 +295,8 @@ fn console_code_page() -> u32 {
     }
 }
 
-/// 按**指定码页**做 MBCS→UTF-16；转不动返回 `None`，由调用方 lossy 保底（不丢字节）。
-///
-/// 为什么允许显式传码页：生产路径传的是 `console_code_page()`，而「GBK 现场」的回归用例必须在
-///   **任意语言的 runner** 上确定性复现 —— 绑在 runner 的码页上，门禁就跟着机器抖（英文 runner
-///   的 OEM 码页是 437，同一批字节解出来是另一副样子）。
+/// 按指定码页做 MBCS -> UTF-16；转不动返回 `None`，由调用方 lossy 保底（不丢字节）。
+/// 允许显式传码页：回归用例须任意语言的 runner 上确定性复现，绑在 runner 码页上会跟着机器抖。
 #[cfg(windows)]
 fn decode_codepage(bytes: &[u8], cp: u32) -> Option<String> {
     extern "system" {
@@ -400,7 +324,8 @@ fn decode_codepage(bytes: &[u8], cp: u32) -> Option<String> {
     Some(String::from_utf16_lossy(&wide[..got as usize]))
 }
 
-/// POSIX：控制台输出即 UTF-8，lossy 保底（与历史行为一致，不引入新失败模式）。
+/// POSIX：控制台输出即 UTF-8，lossy 保底，不引入新失败模式。
+/// 解码属进程创建原语，故放 infra 而非 platform/：platform 已依赖 bounded，下沉会成反向依赖。
 #[cfg(not(windows))]
 fn decode_console(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).into_owned()
@@ -424,9 +349,8 @@ fn tail(s: &str, n: usize) -> String {
 mod tests {
     use super::*;
 
-    /// 本模块的测试**串行执行**（2026-09-13）。
-    /// 默认线程池会并发跑它们，而 A-4 需要数 temp 目录里的 dsh-cmd-*.log：
-    /// 并发用例的创建/清理会让计数抖动 → 断言假红。锁把本模块串起来即可消除。
+    /// 本模块的测试串行执行：有用例要数 temp 目录里的 dsh-cmd-*.log，
+    /// 并发用例的创建/清理会让计数抖动、断言误失败，锁把本模块串起来即可消除。
     static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     #[test]
@@ -446,8 +370,7 @@ mod tests {
     #[test]
     fn bounded_run_reports_timeout_as_evidence_not_error() {
         let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-        // 睡眠远超上限：必须被 kill，并且以**执行记录**的形式说明「超时」这件事
-        //   （原实现把超时压成 Err 字符串，输出与退出状态一并丢失 —— 见 run() 的说明）。
+        // 睡眠远超上限：必须被 kill，且超时以执行记录承载（见 run() 说明），不得降格成 Err。
         let mut c = Command::new(if cfg!(windows) { "cmd" } else { "sleep" });
         if cfg!(windows) {
             c.args(["/C", "ping -n 30 127.0.0.1 >NUL"]);
@@ -497,13 +420,9 @@ mod tests {
         assert_eq!(decode_console(b"plain ascii"), "plain ascii");
     }
 
-    /// 中文 Windows 现场回归：GBK 字节必须解出**可读的中文**。
-    ///
-    /// 这段字节就是 `schtasks /Run` 对不存在的任务所写的原文（cp936）。
-    /// 旧的 `from_utf8_lossy` 把它变成一串 U+FFFD，正是用户报来的乱码。
-    /// 显式传 936 而不是走 `decode_console`：runner 的控制台码页由机器决定（英文 runner 是 437，
-    ///   2026-09-22 CI 轮2 实测同一批字节被解成 mojibake），把判据绑在机器码页上等于跟着机器抖。
-    ///   「生产路径会问操作系统要码页」由 B62 的形态门禁锁住。
+    /// 中文 Windows 现场回归：GBK 字节（cp936，schtasks /Run 对不存在任务写的原文）必须解出可读中文。
+    /// 显式传 936 而不是走 decode_console：runner 的控制台码页由机器决定，判据绑在它上会跟着机器抖；
+    /// 「生产路径会问操作系统要码页」由 B62 的形态门禁锁住。
     #[cfg(windows)]
     #[test]
     fn decode_console_reads_gbk_console_output() {
@@ -557,10 +476,8 @@ mod tests {
         assert!(run(&mut c, Duration::from_secs(2)).is_err());
     }
 
-    /// A-4 门禁：失败路径不得在 temp 目录留下 dsh-cmd-*.log 残渣（2026-09-13）。
-    ///
-/// 用 spawn 失败这一可复现路径验证「失败不留临时日志」。
-    /// 注入：把 spawn 的 match 改回 `cmd.spawn().map_err(...)?` → 本测试 FAIL。
+    /// A-4 门禁：失败路径不得在 temp 目录留下 dsh-cmd-*.log 残渣。
+    /// 注入：把 spawn 的 match 改回 `cmd.spawn().map_err(...)?` -> 本测试必须失败。
     #[test]
     fn a4_spawn_failure_leaves_no_temp_logs() {
         let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());

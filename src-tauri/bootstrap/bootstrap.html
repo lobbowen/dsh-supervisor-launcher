@@ -126,7 +126,7 @@
       <div class="startup-logo" id="logo" aria-hidden="true"><span class="startup-logo-image"></span></div>
       <div class="startup-name">DSH-SUP</div>
       <div class="startup-status" id="status">正在检测环境…</div>
-      <!-- 阶段固定五步：检测环境 → 桌面版本 → 内核版本 → 服务就绪 → 进入面板。 -->
+      <!-- 阶段固定五步：检测环境 -> 桌面版本 -> 内核版本 -> 服务就绪 -> 进入面板。 -->
       <div class="steps" id="steps" style="display:none">
         <span class="step active" id="st-env"><span class="dot"></span>检测环境</span>
         <span class="step-arrow">›</span>
@@ -142,7 +142,7 @@
         <div class="fail-msg" id="failMsg"></div>
         <div class="fail-actions">
           <button id="btnRetry">重试</button>
-          <!-- 环境探测失败时的**关键出口**（架构修复 2026-09-11）：
+          <!-- 环境探测失败时的**关键出口**：
                下载 Node 并不需要本机已有 Node —— 故「检测不出来」不应是死胡同。
                仅在环境超时后出现，避免普通用户误用。 -->
           <button id="btnForceNode" style="display:none">跳过检测，直接安装 Node</button>
@@ -181,7 +181,7 @@
       </div>
     </div>
   </div>
-<!-- 引导脚本已按职责拆分为 9 个文件（2026-09-11）。
+<!-- 引导脚本按职责拆分为 9 个文件。
      原为 802 行单块脚本：一处语法错会导致**全页不执行**（已真实发生）。
      现每个文件独立语法检查（门禁 G5）；80-init 必须最后加载。 -->
   <script src="js/00-runtime.js"></script>

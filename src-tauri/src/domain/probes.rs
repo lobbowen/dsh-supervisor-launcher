@@ -1,33 +1,7 @@
-//! 环境探测记录的**唯一**所有者（B5，2026-09-22）。
-//!
-//! ## 为什么存在
-//!
-//! 同一条探测结论此前被拆在三处各写一遍：`nodeprobe` 的单维度候选追踪（只有 node）、
-//! `node_status` 里现拼的 npm 探测（结论进了 JSON，却从来不是一条可渲染的记录）、以及前端
-//! `diagText` 手工拼接的 `env_*` 片段。后果有两个，都是实测过的：
-//!   · 每加一个探测维度就要改一遍文案，漏改不报错，只显示成「检测不完整」；
-//!   · 「npm 全局前缀不可写」这类真正会打死内核安装的根因，从来没有被探测过 ——
-//!     于是 17 分钟的安装在最后一步失败时，面板只能给出一个退出码。
-//!
-//! 现由本文件冻结三件事：维度表（`Probe`）、记录形态（`Record`，`ok` 三态）、渲染
-//! （`render` 一行文本 / `json` 一份结构）。新增维度只需在 `Probe` 登记并写一个探测函数，
-//! CLI、诊断串与面板自动跟上。
-//!
-//! ## 与 nodeprobe 的分工
-//!
-//! `nodeprobe` 负责「有界地在分离线程里找 node」，它产出的逐候选结论就是 `Probe::Node`
-//! 的记录（含「某一步仍在进行」的挂起记录）；本文件负责 node 之外的其余维度。
-//!
-//! 依赖维度按 TTL 复用缓存：`node_status` 每 400ms 被轮询一次，而 npm 与 prefix 都是
-//! **真实子进程执行**（各有秒级上限）。每次都跑，等于把探针变成新的卡死源。
-//!
-//! ## 不变量
-//!
-//! · 本文件**不做网络 I/O**：registry 维度只读 `mirror::cached()` 的预热结果（并在 source
-//!   里写明是缓存，排障时才不会把它当成此刻的连通性）。node_status 的「纯本地」契约因此成立。
-//! · `ok = None` 表示「无从判定」，与 `Some(false)`（判过且失败）是两件事 —— 与安装进度
-//!   的 `progress: null`（T-13）同一形态：没有事实就不要伪造事实。把「未知」写成「失败」
-//!   会让探测尚未跑完的机器被判定为缺 npm，进而触发无谓重装。
+//! 环境探测记录的唯一所有者：维度表 `Probe`、记录形态 `Record`（`ok` 三态）、渲染（`render` / `json`）。
+//! 新增维度只需在 `Probe` 登记并写一个探测函数，CLI、诊断串与面板自动跟上；否则同一条结论拆在三处各写一遍，
+//! 漏改不报错。本文件不做网络 I/O（registry 只读 mirror::cached() 并写明是缓存），依赖维度按 TTL 复用缓存。
+//! `ok = None` 是「无从判定」，与 Some(false)（判过且失败）两件事 —— 没有事实就不要伪造事实。
 
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -59,14 +33,14 @@ impl Probe {
 #[derive(Clone)]
 pub struct Record {
     pub probe: Probe,
-    /// 结论从哪来（候选来源 / 缓存名 / 命令）。
+  /// 结论从哪来（候选来源 / 缓存名 / 命令）。
     pub source: String,
-    /// 被探测的对象（路径、源 URL 或目录）。
+  /// 被探测的对象（路径、源 URL 或目录）。
     pub target: String,
     pub ms: u128,
-    /// true=通过；false=判过且失败；None=无从判定。
+  /// true=通过；false=判过且失败；None=无从判定。
     pub ok: Option<bool>,
-    /// 版本、延迟或**失败原因**。失败时不得为空 —— 只报「缺失」等于把排障推给用户。
+  /// 版本、延迟或**失败原因**。失败时不得为空 —— 只报「缺失」等于把排障推给用户。
     pub note: String,
 }
 
@@ -82,8 +56,8 @@ impl Record {
         Record { probe, source: source.to_string(), target, ms, ok, note: note.into() }
     }
 
-    /// 「某一步还没返回」的记录：卡住时的唯一线索，形态与失败不同（`ok = None`）。
-    /// 旧实现把它记成 `ok = false`，于是诊断串里的「失败候选数」把在飞步骤也算成失败。
+  /// 「某一步还没返回」的记录：卡住时的唯一线索，形态与失败不同（`ok = None`）。
+  /// 旧实现把它记成 `ok = false`，于是诊断串里的「失败候选数」把在飞步骤也算成失败。
     pub fn pending(probe: Probe, source: &str, target: String, ms: u128, note: &str) -> Record {
         Record::new(probe, source, target, ms, None, note)
     }
@@ -99,7 +73,7 @@ impl Record {
         })
     }
 
-    /// 一行文本渲染（CLI 与 `--self-check` 共用；面板拿 `json`，两者同源）。
+  /// 一行文本渲染（CLI 与 `--self-check` 共用；面板拿 `json`，两者同源）。
     pub fn render(&self) -> String {
         let verdict = match self.ok {
             Some(true) => "ok",
@@ -130,14 +104,14 @@ pub fn render(records: &[Record]) -> String {
 /// npm 维度的结论：面板字段、契约落盘与失败文案**共用**这一个来源。
 #[derive(Clone)]
 pub struct NpmFact {
-    /// 本轮是否看到了 node 可执行文件。false = npm 无从判定，必须报「未知」而不是「缺失」。
+  /// 本轮是否看到了 node 可执行文件。false = npm 无从判定，必须报「未知」而不是「缺失」。
     pub node_seen: bool,
     pub usable: Option<NpmUsable>,
     pub why: Option<String>,
 }
 
 impl NpmFact {
-    /// 三态：true=真实执行通过；false=有 node 但 npm 不可用；None=未取到 node，未知。
+  /// 三态：true=真实执行通过；false=有 node 但 npm 不可用；None=未取到 node，未知。
     pub fn ok(&self) -> Option<bool> {
         if !self.node_seen {
             return None;
@@ -162,7 +136,7 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
-    /// 探测线程本身没给出结论（panic / 任务被丢）：如实登记为「未知」，不冒充失败。
+  /// 探测线程本身没给出结论（panic / 任务被丢）：如实登记为「未知」，不冒充失败。
     pub fn aborted(why: &str) -> Snapshot {
         Snapshot {
             records: vec![Record::pending(Probe::Npm, "在飞线程", String::new(), 0, why)],
@@ -268,7 +242,7 @@ fn probe_npm(node: Option<&Path>) -> (Record, NpmFact) {
             (r, NpmFact { node_seen: true, usable: Some(u), why: None })
         }
         Err(why) => {
-            // note 就是原因本身（`npm_search_summary` 已把「找过哪些路径、为什么都不行」写全）。
+  // note 就是原因本身（`npm_search_summary` 已把「找过哪些路径、为什么都不行」写全）。
             let r = Record::new(
                 Probe::Npm,
                 "与 node 同源",
@@ -310,11 +284,8 @@ fn registry_record() -> Record {
     }
 }
 
-/// npm 全局前缀的可写性 —— 内核安装真正落盘的那一步。
-///
-/// 为什么必须探测它：`EACCES`/只读前缀会让 `npm install -g` 在**跑了十几分钟之后**才失败，
-/// 而面板当时只剩一个退出码（用户实测：整个启动规范看起来「莫名其妙地不行」）。
-/// 环境阶段一条 `prefix` 记录就能把根因说清。
+/// npm 全局前缀的可写性 —— 内核安装真正落盘的那一步。EACCES/只读前缀会让
+/// `npm install -g` 在跑了十几分钟之后才失败，而面板当时只剩一个退出码；一条 `prefix` 记录就能说清根因。
 fn probe_prefix(npm: &NpmFact) -> Record {
     let t0 = Instant::now();
     let ms = || t0.elapsed().as_millis();
@@ -327,13 +298,13 @@ fn probe_prefix(npm: &NpmFact) -> Record {
             "npm 未通过可用性探针，全局前缀无从判定",
         );
     };
-    // 与可用性探针同一条 spawn 路径：同一程序 + 同一前置参数，只换尾参。
+  // 与可用性探针同一条 spawn 路径：同一程序 + 同一前置参数，只换尾参。
     let dir = match crate::runtime_contract::run_npm_line(&u.path, &u.args, &["prefix", "-g"]) {
         Err(why) => return Record::new(Probe::Prefix, "npm prefix -g", String::new(), ms(), Some(false), why),
         Ok(line) => PathBuf::from(line.trim()),
     };
-    // 先做盘符判定**再**碰这个目录：网络盘/UNC 上的 `exists()` 本身就可能是无界阻塞调用，
-    // 那正是本仓反复消除的一类故障 —— 不能为了诊断卡死而引入新的卡死点。
+  // 先做盘符判定**再**碰这个目录：网络盘/UNC 上的 `exists()` 本身就可能是无界阻塞调用，
+  // 那正是本仓反复消除的一类故障 —— 不能为了诊断卡死而引入新的卡死点。
     if !crate::env::is_local_fixed_dir(&dir) {
         return Record::pending(
             Probe::Prefix,
@@ -368,8 +339,8 @@ fn write_probe(dir: &Path) -> Result<(), String> {
     let probe = dir.join(format!(".dsh-supervisor-writability-{}-{}", std::process::id(), nanos));
     match std::fs::write(&probe, b"") {
         Ok(()) => {
-            // 删不掉不是失败（前缀仍可写），但必须留在 note 之外由日志承担 ——
-            // 此处静默删除失败，失败面比「写不进去」小得多。
+  // 删不掉不是失败（前缀仍可写），但必须留在 note 之外由日志承担 ——
+  // 此处静默删除失败，失败面比「写不进去」小得多。
             let _ = std::fs::remove_file(&probe);
             Ok(())
         }
@@ -381,7 +352,7 @@ fn write_probe(dir: &Path) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    /// 维度名是面板与 CLI 的公共词汇：改名必须**显式**发生在这里，而不是散在渲染里。
+  /// 维度名是面板与 CLI 的公共词汇：改名必须**显式**发生在这里，而不是散在渲染里。
     #[test]
     fn probe_names_are_stable() {
         assert_eq!(Probe::Node.as_str(), "node");
@@ -390,7 +361,7 @@ mod tests {
         assert_eq!(Probe::Prefix.as_str(), "prefix");
     }
 
-    /// 「未知」与「失败」必须在两种渲染下都可分辨 —— 把未知渲染成失败会触发无谓重装。
+  /// 「未知」与「失败」必须在两种渲染下都可分辨 —— 把未知渲染成失败会触发无谓重装。
     #[test]
     fn unknown_is_not_failure_in_both_renders() {
         let r = Record::pending(Probe::Npm, "与 node 同源", String::new(), 3, "本次未探测到 node 路径");
@@ -399,7 +370,7 @@ mod tests {
         assert!(!r.render().contains(" no "), "未知不得渲染成失败：{}", r.render());
     }
 
-    /// 失败记录必须自带原因（否则面板只能显示「npm 缺失」，三类根因无从分辨）。
+  /// 失败记录必须自带原因（否则面板只能显示「npm 缺失」，三类根因无从分辨）。
     #[test]
     fn failure_record_carries_reason() {
         let r = Record::new(Probe::Npm, "s", "t".to_string(), 1, Some(false), "已查找 3 条路径");
@@ -407,7 +378,7 @@ mod tests {
         assert!(r.render().contains("已查找 3 条路径"));
     }
 
-    /// npm 三态判据：node 未知时不得判失败。
+  /// npm 三态判据：node 未知时不得判失败。
     #[test]
     fn npm_fact_tri_state() {
         assert_eq!(NpmFact { node_seen: false, usable: None, why: None }.ok(), None);
@@ -417,13 +388,10 @@ mod tests {
         );
     }
 
-    /// 本轮没探到 node 时，**node 派生的**维度必须是「未知」而不是「失败」。
-    ///
-    /// 这是引导页最容易被误读的一格：探测还在跑（或 PATH 尚未扫完）时把 npm 判成缺失，
-    /// 前端就会据此发起一次无根因的 npm 重装（T-1b 的 `npmOk !== true` 放行同一条纪律）。
-    /// registry 与 node **无关**（读镜像预热缓存），所以它有结论是正当的 —— 本用例只锁
-    /// 「每个维度都留依据」，不锁它的取值（否则就成了对缓存状态的第二个事实源）。
-    /// 全程不 spawn 子进程、不碰网络。
+    /// 本轮没探到 node 时，node 派生的维度必须是「未知」而不是「失败」：探测还在跑时把 npm
+    /// 判成缺失，前端就会据此发起一次无根因的重装（与 T-1b 的放行同一纪律）。
+    /// registry 与 node 无关（读镜像预热缓存），有结论是正当的 —— 本用例只锁「每个维度都留依据」，
+    /// 不锁取值（否则就成了缓存状态的第二个事实源）。全程不 spawn 子进程、不碰网络。
     #[test]
     fn without_node_node_derived_dimensions_are_unknown() {
         let s = dependents(None);
@@ -440,7 +408,7 @@ mod tests {
         invalidate();
     }
 
-    /// TTL 缓存的复用判据：换 node 必须重探，过期必须重探（否则探针就成了新的卡死源）。
+  /// TTL 缓存的复用判据：换 node 必须重探，过期必须重探（否则探针就成了新的卡死源）。
     #[test]
     fn cache_key_includes_node_path() {
         let n = || Some(PathBuf::from("/opt/node/bin/node"));

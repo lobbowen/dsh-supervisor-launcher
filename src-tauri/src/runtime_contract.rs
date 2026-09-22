@@ -1,27 +1,7 @@
-//! 运行期启动契约（Runtime Launch Contract）—— 壳写、内核读（schema 2）。
-//!
-//! ## 为什么存在（根因，2026-09-15）
-//!
-//! 守卫是 `#!/usr/bin/env node` 脚本。旧实现里「Node 在每个运行时一致」这条事实被
-//! **四处独立推导**：
-//!   ① `nodeprobe`（把 nodePath 写进 runtime.json）、
-//!   ② 内核安装 `Command::new(\"npm\")`（裸名，ambient PATH）、
-//!   ③ systemd `ExecStart=\"<guard>\" daemon`（靠 shebang 找 node）、
-//!   ④ `spawn_daemon`（ambient PATH）。
-//! 四处必然分叉。实测（nvm 用户）：交互 shell 的 PATH 含 nvm 的 node 目录，
-//! 而 systemd --user / GUI 启动的壳的 PATH 不含 —— 于是「内核装得上（②在 shell 环境）
-//! 却永远拉不起来（③④在 service/GUI 环境）」。这不是某个函数的 bug，是缺少单一事实源。
-//!
-//! ## 所有权（符合 DESIGN-BOUNDARY R1 / R3-②）
-//!
-//! 装壳那一刻机器上**没有内核**，壳必须先解析环境才能装内核 —— 故本契约的**所有者是壳**，
-//! 内核只**消费产物**。本文件是壳侧唯一的读/写入口；安装内核、建立服务定义、spawn 守卫
-//! 三处都必须从这里取事实。
-//!
-//! ## 兼容
-//!
-//! 保留内核 `env-catalog` 已读的旧键（`nodePath` / `nodeVersion` / `minNode`）。
-//! schema 只向前自愈（旧壳 + 新内核仍可读旧键；新壳 + 旧内核因强制更新同步升级）。
+//! 运行期启动契约（Runtime Launch Contract）- 壳写、内核读（schema 2）：「Node 在每个运行时用哪一个」的单一事实源。
+//! 此前这条事实被四处独立推导（nodeprobe 写 runtime.json、npm install、systemd ExecStart 靠 shebang、spawn_daemon 走 ambient PATH），
+//! 而交互 shell 的 PATH 含 nvm 目录、systemd/GUI 的 PATH 不含 —— 「内核装得上却永远拉不起来」。
+//! 所有权在壳（装壳时机器上没有内核，壳必须先解析环境）；本文件是壳侧唯一读写入口，并保留内核 env-catalog 已读的旧键（nodePath/nodeVersion/minNode）。
 
 use std::path::{Path, PathBuf};
 
@@ -89,19 +69,10 @@ pub fn npm_cli_js(bin_dir: &Path) -> PathBuf {
         .join("npm-cli.js")
 }
 
-/// 解析 npm 可执行（**工具链契约的一部分**）。
-///
-/// 返回 `(program, prefix_args)`：program 可直接 spawn；npm 仅有包内 JS（或垫片在本平台
-///   根本拉不起来）时 program=node、prefix=[npm-cli.js]。
-/// **找不到返回 None** —— 绝不伪造一个不存在的路径（旧实现恒拼 `bin_dir/npm[.cmd]`，
-///   于是「环境就绪」可以指向一个不存在的 npm）。
-///
-/// 为什么垫片还要过 `is_directly_spawnable`（Windows 实测根因，2026-09-21）：
-///   本函数给出的 program 会被 `Command::new` 直接执行（安装内核、`npm prefix -g`），
-///   而 Windows 的 CreateProcessW **执行不了 .cmd/.bat**（那是 cmd.exe 的脚本，不是 PE 程序），
-///   连无扩展名的 `npm`（POSIX sh 脚本）也一样。旧实现只判 `is_file()`，探针却经
-///   `cmd /C` 包装 —— 「探针能跑、真装必挂」的不对称就此形成，面板显示 npm 缺失。
-///   现由同一判据收口：契约里的程序必须与消费者用**同一条 spawn 路径**。
+/// 解析 npm 可执行（工具链契约的一部分）。返回 (program, prefix_args)：program 可直接 spawn；
+/// npm 仅有包内 JS（或垫片在本平台根本拉不起来）时 program=node、prefix=[npm-cli.js]。
+/// 找不到返回 None，绝不伪造路径；给出的 program 会被 Command::new 直接执行，故必须过
+/// is_directly_spawnable：探针与消费者共用同一条 spawn 路径（Windows CreateProcessW 不认 .cmd/.bat/sh 脚本）。
 pub fn probe_npm(node: &Path, bin_dir: &Path) -> Option<(PathBuf, Vec<String>)> {
     let plat = crate::platform::current();
     for p in npm_shim_candidates(bin_dir) {
@@ -123,10 +94,9 @@ pub fn npm_unspawnable_hint() -> &'static str {
 }
 
 /// 由 Node 路径 + 版本推导 npm 路径与 bin 目录（npm 与 node 同目录）。
-/// npm 缺失 → None（环境不就绪，由壳安装/修复，绝不伪造）。
-///
-/// 只做**路径解析**、不执行 npm：本函数服务启动路径（`ensure`），在那里执行外部进程一旦挂住
-///   就把「拉起守卫」变成不可恢复的停顿。代价是 npm_version 只能留 None（不猜版本号）。
+/// npm 缺失返回 None（环境不就绪，由壳安装/修复，绝不伪造）。
+/// 只做路径解析、不执行 npm：本函数服务启动路径（ensure），在那里执行外部进程一旦挂住就是不可恢复的停顿；
+/// 代价是 npm_version 只能留 None（不猜版本号）。
 pub fn derive(node: &Path, version: &str) -> Option<NodeRuntime> {
     let node_bin_dir = node.parent()?.to_path_buf();
     let (npm, npm_prefix) = probe_npm(node, &node_bin_dir)?;
@@ -140,10 +110,8 @@ pub fn derive(node: &Path, version: &str) -> Option<NodeRuntime> {
     })
 }
 
-/// 「找不到可用 npm」的**如实**说明：列出真正查过的每一条路径，并区分「不存在」与
-///   「在磁盘上但本平台拉不起来」。
-/// 为什么必须分开：这两句话指向完全不同的处置（补装 Node / 换 node + npm-cli.js 承载），
-///   把它们合成一句「npm 缺失」正是本轮 Windows 现场无从定位的原因。
+/// 「找不到可用 npm」的如实说明：列出真正查过的每一条路径，并区分「不存在」与「在磁盘上但本平台拉不起来」。
+/// 两者必须分开：处置完全不同（补装 Node 或 换 node + npm-cli.js 承载），合成一句「npm 缺失」现场就无从定位。
 pub fn npm_search_summary(bin_dir: &Path) -> String {
     let searched: Vec<String> = {
         let mut v: Vec<String> = npm_shim_candidates(bin_dir)
@@ -174,14 +142,10 @@ pub struct NpmUsable {
     pub version: String,
 }
 
-/// 解析并**真实执行** npm（--version）—— 「文件存在」不等于「可用」。
-///
-/// 不变量 T-1b：npmOk 只有在本函数返回 Ok 时才可为 true。旧实现只 is_file()，
-///   一个 0 字节 / 损坏 / 被安全软件拦截的 npm 会让 npmOk 恒 true，随后内核 npm install 必失败，
-///   而用户看到的是「环境已就绪」。
-///
-/// 失败必须**带出原因**（Err 文案）：面板只显示「npm 缺失」时，用户与排障者都无法区分
-///   「归档解残缺」「垫片拉不起来」「npm 执行报错」三类问题，而这三类的处置完全不同。
+/// 解析并真实执行 npm（--version）- 「文件存在」不等于「可用」。
+/// 不变量 T-1b：npmOk 只有在本函数返回 Ok 时才可为 true；否则 0 字节/损坏/被拦截的 npm
+///   会让「环境已就绪」成为假象，随后 npm install 必失败。
+/// 失败必须带出原因（Err 文案）：归档解残缺、垫片拉不起来、npm 执行报错三类处置完全不同，不得合成一句「npm 缺失」。
 pub fn probe_npm_usable(node: &Path, bin_dir: &Path) -> Result<NpmUsable, String> {
     let (path, args) = match probe_npm(node, bin_dir) {
         Some(x) => x,
@@ -195,19 +159,10 @@ pub fn probe_npm_usable(node: &Path, bin_dir: &Path) -> Result<NpmUsable, String
 /// npm 探针的时间上限（首启冷启动也够用）；超时即判不可用，绝不无限等。
 const NPM_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 
-/// 执行 `<prog> <args…> <tail…>` 并取首个非空行；失败原因如实返回（供面板与安装文案）。
-///
-/// 关键不变量（Windows 实测根因，2026-09-21）：**探针与消费者必须是同一条 spawn 路径**（T-10）。
-///   旧实现在平台层把 `.cmd` 经 `cmd /C` 包装后执行，于是探针报「npm 可用」，
-///   而真正的消费者（core.rs 的 `npm install -g`、`npm prefix -g`）用 `Command::new(prog)`
-///   直接拉起同一个 `.cmd` —— CreateProcessW 认不了它，安装内核那一步必失败。
-///   包装本身是胶水：它把一个「本平台不可直接执行」的事实藏成了探针成功。
-///   现由 `Platform::is_directly_spawnable` 在**选择程序**时就排除这类垫片，
-///   探针因此不再需要任何平台分支（G1：平台知识只在 platform/）。
-///
-/// 为什么是公共口：`--version`（可用性探针）与 `prefix -g`（前缀探针，见 domain::probes）
-///   各写一遍 `Command::new` 时，就会出现「只在其中一个调用点上复现」的缺陷 —— 上面那次即是。
-/// 输出侧一律取首个非空行：npm 在 Windows 上可能先吐空行，有效输出总在第一条非空行。
+/// 执行 `<prog> <args…> <tail…>` 并取首个非空行（npm 在 Windows 可能先吐空行）；失败原因如实返回。
+/// 关键不变量（T-10）：探针与消费者必须是同一条 spawn 路径。若探针经 `cmd /C` 包装、消费者
+///   直接拉起同一个 .cmd，就形成「探针能跑、真装必挂」的不对称；平台知识已由
+///   Platform::is_directly_spawnable 在选择程序时收口（G1），本函数因此不需要平台分支。
 pub fn run_npm_line(prog: &Path, args: &[String], tail: &[&str]) -> Result<String, String> {
     let mut cmd = std::process::Command::new(prog);
     cmd.args(args).args(tail);
@@ -225,11 +180,8 @@ pub fn run_npm_line(prog: &Path, args: &[String], tail: &[&str]) -> Result<Strin
         .ok_or_else(|| format!("npm {} 执行成功但没有任何输出", tail.join(" ")))
 }
 
-/// 由**本轮真实探测结论**组装运行期契约（`NodeRuntime` 的唯一组装点）。
-///
-/// 为什么单独成函数：`node_status` 每 400ms 落一次契约，原先它调 `derive_usable`，
-///   而 `derive_usable` 内部还要再执行一次 npm —— 同一次轮询里 npm 被跑了两遍
-///   （一遍给面板判 npmOk，一遍给契约）。探针结论现在只有一份，契约从它直接组装。
+/// 由本轮真实探测结论组装运行期契约（NodeRuntime 的唯一组装点）。
+/// node_status 每 400ms 落一次契约：探针结论只有一份，契约直接从它组装，不得再执行一遍 npm。
 pub fn usable_runtime(node: &Path, version: &str, npm: &NpmUsable) -> Option<NodeRuntime> {
     Some(NodeRuntime {
         node: node.to_path_buf(),
@@ -248,8 +200,8 @@ pub fn derive_usable(node: &Path, version: &str) -> Option<NodeRuntime> {
     usable_runtime(node, version, &u)
 }
 
-/// 契约的 JSON 形态。**写与读共用这一处键映射**：两处各列一遍键名，历史上就出现过
-///   「写了 npmArgs、读回只看 npm」那类不对称，加字段时必然漏一侧。
+/// 契约的 JSON 形态。写与读共用这一处键映射：两处各列一遍键名，加字段时必然漏一侧，
+/// 就会出现「写了 npmArgs、读回只看 npm」那类不对称。
 fn meta(rt: &NodeRuntime) -> serde_json::Value {
     let node_s = rt.node.display().to_string();
     let bin_s = rt.node_bin_dir.display().to_string();
@@ -257,7 +209,7 @@ fn meta(rt: &NodeRuntime) -> serde_json::Value {
     serde_json::json!({
         "schema": SCHEMA,
         "writtenBy": format!("dsh-supervisor-gui@{}", env!("CARGO_PKG_VERSION")),
-        // ── 新键（本契约消费面）──
+        // 新键（本契约消费面）
         "nodeBinDir": bin_s,
         "npmPath": npm_s,
         // 当 npm 只有包内 JS 时，npmPath=node、npmArgs=[npm-cli.js]（消费者必须带上 args）。
@@ -265,7 +217,7 @@ fn meta(rt: &NodeRuntime) -> serde_json::Value {
         "node": { "path": node_s, "binDir": bin_s, "version": rt.version },
         // npm 版本只有在真实执行过 npm 时才有；未执行为 null（与空串严格区分）。
         "npm": { "path": npm_s, "args": rt.npm_prefix, "version": rt.npm_version },
-        // ── 旧键（内核 env-catalog 已在读；不得删除）──
+        // 旧键（内核 env-catalog 已在读；不得删除）
         "nodePath": node_s,
         "nodeVersion": rt.version,
         "minNode": crate::node::MIN_NODE,
@@ -275,7 +227,7 @@ fn meta(rt: &NodeRuntime) -> serde_json::Value {
     })
 }
 
-/// 契约 JSON → `NodeRuntime`（`meta` 的读回侧）。必需项缺失 → None，绝不猜路径。
+/// 契约 JSON 读回为 `NodeRuntime`（`meta` 的读回侧）。必需项缺失返回 None，绝不猜路径。
 fn from_meta(v: &serde_json::Value) -> Option<NodeRuntime> {
     let node = v.get("nodePath").and_then(|x| x.as_str()).map(PathBuf::from)?;
     let node_bin_dir = v
@@ -338,7 +290,7 @@ pub fn read_node() -> Option<NodeRuntime> {
 /// 返回 `None` = 本机 Node 未就绪 —— 调用方如实报错，绝不猜路径（契约的意义就在于此）。
 pub fn ensure() -> Option<NodeRuntime> {
     if let Some(rt) = read_node() {
-        // 工具链契约：node **与** npm 都必须真实存在（旧实现只查 node → 「就绪」可指向不存在的 npm）。
+        // 工具链契约：node 与 npm 都必须真实存在（只查 node 会让「就绪」指向不存在的 npm）。
         if rt.node.is_file() && rt.npm.is_file() {
             return Some(rt);
         }
@@ -375,8 +327,8 @@ pub fn env_path(node_bin_dir: &Path) -> String {
 
 #[cfg(test)]
 mod toolchain_tests {
-    //! 工具链契约行为门禁（2026-09-16）：环境就绪 = node **且** npm 真实存在；
-    //!   缺失必须如实为 None，绝不伪造路径（旧实现恒拼 `bin_dir/npm[.cmd]`）。
+    //! Toolchain contract behavior gate: environment ready means both node AND npm truly exist;
+    //!   when missing must honestly return None, never fabricate a path.
     use super::*;
 
     fn tmp(tag: &str) -> PathBuf {
@@ -405,7 +357,7 @@ mod toolchain_tests {
         let node = d.join("node");
         std::fs::write(&node, b"").unwrap();
         assert!(probe_npm(&node, &d).is_none(), "npm 缺失时必须返回 None，绝不伪造路径");
-        // 只加包内 npm-cli.js → 用同一 node 承载。
+        // 只加包内 npm-cli.js 时，用同一 node 承载。
         let cli = npm_cli_js(&d);
         std::fs::create_dir_all(cli.parent().unwrap()).unwrap();
         std::fs::write(&cli, b"").unwrap();

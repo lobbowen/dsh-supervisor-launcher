@@ -1,4 +1,4 @@
-// 30-mirror —— 5 个函数（拆分自 bootstrap.html，2026-09-11）。
+// 30-mirror：镜像候选测速与选中项呈现。
 // 共享状态与跨模块调用经 NS（window.__BOOT_NS）。
 (function (NS) {
   function startMirrorWarmup() {
@@ -69,7 +69,7 @@
     });
   }
 
-  // ── 导出到 NS（跨模块可调用）──
+  // -- 导出到 NS（跨模块可调用）--
   NS.startMirrorWarmup = startMirrorWarmup;
   NS.mirrorText = mirrorText;
   NS.probeMirrorThen = probeMirrorThen;

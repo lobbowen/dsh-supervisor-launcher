@@ -1,20 +1,7 @@
-//! 内核**位置**契约（core.json）—— 壳写、双方读（schema 1）。
-//!
-//! ## 为什么存在（根因，2026-09-15 跨平台审计）
-//!
-//! 壳用 npm 把内核装到「npm 全局 prefix」，但 `locate_core` 只按
-//! **PATH + 两个硬编码目录（~/.npm-global/bin、~/.local/bin）+ 平台额外项** 猜位置。
-//! 在 nvm/volta/fnm 或自定义 npm prefix 下，内核落在别处（如 <nodeDir>/bin），
-//! 既不在那两个目录、也不在 GUI 壳的 PATH —— 于是「装上了却永远拉不起来」。
-//!
-//! 本契约把**位置**也变成单一事实源（与 runtime.json 对 Node/npm 同构）：
-//!   壳在**安装/升级成功后**写入确切 bin/prefix/version/source；
-//!   `locate_core` **先读契约**，读不到才退回启发式（前向自愈）。
-//!
-//! ## 不变量
-//!   · 只有壳写（与 runtime.json 同：内核只读）。
-//!   · 原子写（tmp + rename）。
-//!   · 版本必须与写入时的线上最新一致（对齐前置，见 docs/KERNEL-LAUNCH-STANDARD.md）。
+//! 内核位置契约（core.json）- 壳写、双方读（schema 1），已装内核位置的单一事实源。
+//! 壳用 npm 把内核装进「npm 全局 prefix」，而 locate_core 只能按 PATH + 少数固定目录猜；
+//! nvm/volta/fnm 或自定义 prefix 下内核落在别处，「装上了却永远拉不起来」。壳在安装/升级成功后写确切 bin/prefix/version/source，
+//! locate_core 先读契约、读不到才退回启发式（前向自愈）。不变量：只有壳写（内核只读）；原子写（tmp + rename）；版本须与写入时线上最新一致。
 
 use std::path::PathBuf;
 
@@ -62,7 +49,7 @@ pub fn write(c: &InstalledCore) {
     }
 }
 
-/// 读回契约；缺失/损坏/schema 不符 → None（调用方退回启发式，绝不猜）。
+/// 读回契约；缺失/损坏/schema 不符返回 None（调用方退回启发式，绝不猜）。
 pub fn read() -> Option<InstalledCore> {
     let s = std::fs::read_to_string(path()).ok()?;
     let v: serde_json::Value = serde_json::from_str(&s).ok()?;
