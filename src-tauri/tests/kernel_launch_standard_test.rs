@@ -1,4 +1,4 @@
-//! 内核启动规范门禁（K-1..K-13；docs/KERNEL-LAUNCH-STANDARD.md §6）—— 2026-09-15 起累积。
+//! 内核启动规范门禁（K-1..K-16；docs/KERNEL-LAUNCH-STANDARD.md §6）—— 2026-09-15 起累积。
 //!
 //! 锁定 P0–P6 的**规范骨架**，防止回退成「按 PATH 猜位置 / 不对齐就启动 / 平台各自为政」：
 //!   K-1  core.json 位置契约存在、schema=1、原子写、字段齐全
@@ -16,6 +16,10 @@
 //!   K-12 守卫子进程的输出**永不丢弃**（统一落 guard.log）
 //!   K-13 看护（watchdog）的存活判据与拉起序列**各只有一处实现**：判据 = `guardctl::ready`、
 //!        动作 = `guardctl::ensure_started`；看护脚本不以内嵌 PowerShell 存在（2026-09-21 B3b）
+//!   K-14 就绪四态**真的分得开**（行为判据，用例在 `guardctl.rs` 自己的 `tests`，不在本文件）
+//!   K-15 Windows 定义链的权限边界（不请求 HIGHEST、只有权限类失败才换通道）+ 通道可观测
+//!   K-16 「端口通」不等于「在服役」：早退、导航、面板 URL 三处必须问同一个事实
+//!        （三态语义由 `guardctl.rs` 的行为用例钉住，本文件钉接线形态）
 //!
 //! 注意命名：`kernel_install_evidence_test.rs` 另有一套**同号不同义**的 K-1..K-8
 //!   （安装证据侧）；跨文件引用本套判据时必须带文件名。
@@ -506,5 +510,91 @@ fn k15_windows_definition_permission_boundary() {
             && old.matches("\"/Create\", \"/TN\", GUARD_TASK").count() == 0
             && code_only(old).contains("降级重试"),
         "K-15 反向失败：判据空转（旧形态未被识别）"
+    );
+}
+
+// ── K-16：「端口通」不等于「在服役」——早退、导航、面板 URL 三处都必须问同一个事实 ──
+//
+// 真机（2026-09-22 桌面）：刚报完「启动完成」，进面板就是 127.0.0.1 拒绝连接。根因是三处
+//   各自用「端口上有没有人」代替「守卫还在为本产品干活吗」：走完 `/session/stop` 的守卫
+//   还占着端口（`/healthz` 照回 200），服务链却已拆光，于是早退合法、导航照发、URL 照报。
+//   语义侧的三态判定由 `guardctl.rs` 的行为用例钉住（K-14 同一手法，回环真 socket）；
+//   本门禁钉**接线**：早退必须经过服役判定，且停链分支不许早退。
+#[test]
+fn k16_serving_gate_gates_early_return_and_navigation() {
+    let g = code_only(&read("src/domain/guardctl.rs"));
+    let body = fn_slice(&g, "pub(crate) fn ensure_guard", "pub(crate) fn ensure_started");
+    // 顺序链：裸 TCP 门 -> 服役判定 -> 「在服役/病了」才放行提前返回 -> 停链分支只能往下走
+    //   （停干净后接正常启动序列）。链断在任何一环 = 有人把「端口通」又当成了「在服役」。
+    let chain = [
+        "if port_open(port)",
+        "let verdict = serving_state(port)",
+        "matches!(verdict, Serving::Alive | Serving::Sick)",
+        "return Ok(())",
+        "stop_and_await_release(port)",
+        "ensure_started(&spec, &step)",
+    ];
+    let mut at = 0usize;
+    for needle in chain {
+        let i = body[at..]
+            .find(needle)
+            .unwrap_or_else(|| panic!("K-16 失败：ensure_guard 缺「{}」（或顺序不在此处）", needle));
+        at += i + needle.len();
+    }
+    // 停链分支只许有一条出口：等不到端口释放就如实失败，不得假装重启过。
+    assert_eq!(
+        body.matches("return Ok(())").count(),
+        1,
+        "K-16 失败：ensure_guard 有第二条提前返回（停链守卫可能被当成已启动）"
+    );
+    // 反向：旧形态（端口一开就早退，且没有停链出口）必须被上面的链抓到。
+    let old = "if port_open(port) {\n  step(\"守卫端口已开\");\n  return Ok(());\n}";
+    assert!(
+        !old.contains("serving_state(port)") && !old.contains("stop_and_await_release(port)"),
+        "K-16 反向失败：判据空转（旧「端口通即服役」形态未被识别）"
+    );
+
+    // 导航侧：每一拍先复核服役，最后一拍不就绪就回引导页（那里重跑 guard_start = 自愈入口）。
+    let w = code_only(&read("src/domain/windowing.rs"));
+    let nav = fn_slice(&w, "pub(crate) fn go_panel", "pub(crate) fn show_main");
+    let mut at = 0usize;
+    for needle in ["serving_state(", "shell:goto-panel", "shell:goto-bootstrap"] {
+        let i = nav[at..]
+            .find(needle)
+            .unwrap_or_else(|| panic!("K-16 失败：go_panel 缺「{}」（导航未先复核）", needle));
+        at += i + needle.len();
+    }
+    assert!(
+        nav.contains("Serving::Alive"),
+        "K-16 失败：go_panel 未把「在服役」作为放行条件"
+    );
+    // 自愈出口两侧都要在：壳收不到事件就等于只修了一半。
+    assert!(
+        read("bootstrap/shell.html").contains("evt.listen('shell:goto-bootstrap'"),
+        "K-16 失败：shell.html 未处理 shell:goto-bootstrap（回引导页无人接手）"
+    );
+    let old_nav = "let _ = h.emit(\"shell:goto-panel\", serde_json::json!({ \"url\": u }));";
+    assert!(
+        !old_nav.contains("serving_state(") && !old_nav.contains("goto-bootstrap"),
+        "K-16 反向失败：旧「无条件导航」形态未被识别"
+    );
+
+    // URL 侧：面板地址与就绪判据同一个端口源（只认 config.json 会导航到没人监听的端口）。
+    let env = code_only(&read("src/env.rs"));
+    let url = fn_slice(&env, "pub fn api_base_url", "pub fn config_flag");
+    assert!(
+        url.contains("discovered_api_port()"),
+        "K-16 失败：api_base_url 未优先取 ports.json 的实际端口（与就绪判据两套答案）"
+    );
+    // `api_port` 是从本函数反解出来的，本函数再调它就是无限递归 —— 先摘掉合法的那个同名前缀
+    //   （`discovered_api_port` 内含 `api_port`），剩下的 `api_port` 出现一次即判违规。
+    assert!(
+        !url.replace("discovered_api_port", "ports_json_port").contains("api_port"),
+        "K-16 失败：api_base_url 绕道 api_port（自递归）"
+    );
+    let old_url = "let port = config_json().and_then(|v| v.get(\"apiPort\")...).unwrap_or(default_port);";
+    assert!(
+        !old_url.contains("discovered_api_port()"),
+        "K-16 反向失败：旧「只认 config.json」形态未被识别"
     );
 }

@@ -4,16 +4,26 @@
 use tauri::{Emitter, Manager};
 
 pub(crate) fn go_panel(app: &tauri::AppHandle, force: bool) {
-  let url = crate::env::api_base_url(); // http://127.0.0.1:<config.apiPort 或高位段 fallback>/
   // 壳框架(shell.html)的 evt listener 在首帧注册；setup 线程的 emit 可能早于注册被丢弃，
   // 故延时重发数次覆盖竞态（listener 就绪后任一次生效即切面板）。
-  // force=true（如用户重新显示窗口）-> 即使 URL 相同也强制重载，保证拿到最新 UI。
+  // force=true（用户重新显示窗口）-> 即使 URL 相同也强制重载，保证拿最新 UI。
     for (i, delay_ms) in [400u64, 1200, 2500].iter().enumerate() {
         let h = app.clone();
-        let u = url.clone();
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(*delay_ms));
-            let _ = h.emit("shell:goto-panel", serde_json::json!({ "url": u, "seq": i, "force": force }));
+            // 每一拍都是一次复核，而不只是重发同一个 URL：端口上可能是「服务链已拆完的守卫」，
+            //   也可能刚被所有者停掉 —— 直接丢 iframe 只会得到引擎自己的错误页（WebKit 对被拒的
+            //   iframe 导航不触发 error 事件，shell.html 的重试兜底形同不存在）。最后一拍仍不在
+            //   服役就回引导页，那里重跑 guard_start 与就绪轮询；URL 现取（守卫可能已顺延端口）。
+            let serving = matches!(
+                crate::domain::guardctl::serving_state(crate::env::current_api_port()),
+                crate::domain::guardctl::Serving::Alive
+            );
+            if serving {
+                let _ = h.emit("shell:goto-panel", serde_json::json!({ "url": crate::env::api_base_url(), "seq": i, "force": force }));
+            } else if i + 1 == 3 {
+                let _ = h.emit("shell:goto-bootstrap", serde_json::json!({}));
+            }
         });
     }
 }
