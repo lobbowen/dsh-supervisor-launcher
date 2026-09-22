@@ -3,11 +3,11 @@
 > **本文档不含私钥内容**（私钥绝不入库）。
 > 现用密钥生成于 2026-09-21（自 1.2.0 起生效）；2026-09-11 那把自 1.2.0 起不再使用，见 §〇 与 §六。
 
-## 〇、当前状态（换钥取证 2026-09-21；清单现值行每次发布重核，最近 2026-09-22，先读这段）
+## 〇、当前状态（换钥取证 2026-09-21；清单现值行每次发布重核，最近一次随 1.2.5 / 2026-09-22，先读这段）
 
 | 事实 | 证据 |
 |---|---|
-| **签名产物在线上、且是在用的更新通道**：清单 `@dsh-sup/shell-release@latest` 现指 `1.2.4`（2026-09-22 实测，`pub_date` 2026-09-22T13:17Z；换钥后首版是 `1.2.0`），四平台各带一份 minisign 签名，**key id 逐条实测均为新钥 `54A15461E39C8AEF`**。现值随每次发布变化，重核：`npm view @dsh-sup/shell-release version` | `GET https://unpkg.com/@dsh-sup/shell-release@latest/shell-manifest.json`（`@latest` 会 302 到具体版本，须跟随），按 `docs/RELEASE-STANDARD.md` §5 的解法逐条取 key id；本轮同查 `releases/tags/v1.2.4` = 10 项资产（4 平台安装包 + 4 份 `.sig` + 两份 mac app 归档），清单四条 payload URL 逐个 HEAD 均 200 |
+| **签名产物在线上、且是在用的更新通道**：清单 `@dsh-sup/shell-release@latest` 现指 `1.2.5`（2026-09-22 实测，`pub_date` 2026-09-22T15:41:56Z；换钥后首版是 `1.2.0`），四平台各带一份 minisign 签名，**key id 逐条实测均为新钥 `54A15461E39C8AEF`**。现值随每次发布变化，重核：`npm view @dsh-sup/shell-release version` | `GET https://unpkg.com/@dsh-sup/shell-release@latest/shell-manifest.json`（`@latest` 会 302 到具体版本，须跟随；本轮落地 URL 即为 `@1.2.5/shell-manifest.json`），按 `docs/RELEASE-STANDARD.md` §5 的解法逐条取 key id；同期 registry `dist-tags.latest` 亦为 `1.2.5`。本轮同查 `releases/tags/v1.2.5` = 10 项资产（4 平台签名链路产物 deb / setup.exe / msi / app.tar.gz 各带 `.sig`，另两份 mac `.dmg` 归档），清单四条 payload URL 逐个 HEAD 均 200。**注意时序**：`publish` 完成后约 1 分钟 `releases/tags/v1.2.5` 仍可能 404（与 1.2.4 那轮 win-x64 首轮 404 同类 = 产物传播延迟），据此断「没建 Release」会是错误结论，要隔一分钟复取 |
 | **1.1.11 及更早版本共用一把钥匙**：抽验 1.0.1 / 1.0.5 / 1.1.0 / 1.1.5 / 1.1.9 / 1.1.10 / 1.1.11，key id 均为 `96DE3EF26F389F70`，与该轮 `tauri.conf.json` 内置公钥逐字一致 → 存量客户端只认这一把。**1.2.0 起换成新钥**，两把不通用 | 同上取各版本 manifest；签名 blob 第 2..10 字节（小端转 hex）即 key id |
 | **通道不是 GitHub Release**：该轮取证时 `/repos/…/releases` 为 0 条，而清单与产物一直托管在 npm（unpkg + jsdelivr 两个端点写在 `tauri.conf.json`）。**本节此前写「壳仓从未产出过签名产物，也从未发布过 GitHub Release」是错误引导** —— 后半句在当时真、前半句假，且它足以诱导「换钥无害」的结论。**现状**：`v1.2.0` 起 Release 有资产，既是手动下载点，**也进来了自动更新的候选源**（清单每平台只写一条 payload URL，拿不到时壳按实测候选换源，其中含 Release 同名资产） | `releases/tags/v1.2.0` 返回 12 项资产；`npm view @dsh-sup/shell-release versions` 含 `1.2.0`；换源口径与逐源实测见 `docs/SHELL-UPDATE-CHANNEL-VERIFICATION.md` §九 |
 | **旧钥判不可得，用户 2026-09-21 裁决：轮换而非继续等待** —— 新钥对已生成、新公钥已内置 `tauri.conf.json`、两枚签名 secret 已配置 | 新 minisign key id `54A15461E39C8AEF`；私钥与口令按 §四 布局落在 `~/.tauri/`；`GET /repos/lobbowen/dsh-supervisor-launcher/actions/secrets` 现列 `NPM_TOKEN` + `TAURI_SIGNING_PRIVATE_KEY` + `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` |
