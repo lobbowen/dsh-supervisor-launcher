@@ -2,6 +2,24 @@
 
 本文件记录桌面壳（`dsh-supervisor-gui`，公开仓 `lobbowen/dsh-supervisor-launcher`）的重要变更。
 
+## [1.2.4]（2026-09-22）
+
+本版只含一处行为修复：守卫自启位的写者唯一化（IL-2 壳仓半边 / D5 扩展）。
+版本三处互锁（`Cargo.toml` = `tauri.conf.json` = `Cargo.lock`）由 `scripts/bump-shell.sh` 同步提升。
+
+### 守卫定义自愈重写不再重放 enable/enable-linger，自启位收归内核面板单写
+
+现场：`ensure_defined` 在「内容过时 → 重写」分支上照跑 `systemctl --user enable` 与
+`loginctl enable-linger`。于是 D5 表第二行的写者不唯一 —— 用户在面板关闭守卫自启之后，
+任何一次模板演进（例如再给 `ExecStart` 改一次引号）都会把自启位悄悄重新打开。
+
+- 自愈分支写完 unit、`daemon-reload` 之后立即返回；`enable` + `enable-linger` 只在定义**首次建立**时执行。
+- 能力零损伤：内容一致的机器本就走 `!needs_write` 早返回，本次收窄没有拿走任何原有的重试机会。
+- 判据 `d5_definition_self_heal_does_not_rewrite_autostart`：剥注释后只读 `ensure_defined` 函数体，
+  含三种回归形态的反向合成样本与一条合法形态正向样本；契约同步写进 `docs/DESIGN-BOUNDARY.md` 的 D5。
+- macOS 不在此列：内核 `darwin.js` 的开关位落在 `launchctl override` 库，壳的 `bootstrap` 不覆盖它。
+  同一方向的三平台判据在内核侧（`KERNEL-DAEMON-CONTRACT` D-10 / P7，随内核 0.1.6-BETA.4 发布）。
+
 ## [1.2.3]（2026-09-22）
 
 ### 内核下载第一次有了真分母：壳按 dist 元数据先取包，再装本地 tarball（T-7 反转）
