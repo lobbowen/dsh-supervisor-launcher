@@ -796,7 +796,7 @@ mod launch_spec_tests {
         let body = &body[..body.find("\n}\n").expect("guard_stdio_streams 边界") + 3];
         assert!(
             body.contains("None => (Stdio::null(), Stdio::null())"),
-            "无日志时两条流必须退回 null（原断言用 `{:?}` 含 \"Null\" 判，std 不渲染该字，恒假）"
+            "无日志时两条流必须退回 null（原断言用 Stdio 的 Debug 渲染判 Null，std 不渲染该字段，恒假）"
         );
         assert!(!body.contains("Stdio::inherit()"), "不得把守卫输出接到宿主进程");
         let _ = std::fs::remove_dir_all(&dir);
