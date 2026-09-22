@@ -20,6 +20,8 @@
 //! 带 busy 的唯一 emit 是 \`commands/mod.rs\` 的 \`crate::log(&s)\`，
 //! 而它在**前一行刚把 busy 置回 false**；安装过程的进度事件来自 \`main.rs::push_status\`，
 //! 其 payload **根本不含 busy**。
+//! （上述两处**都已不存在**：\`push_status\` 于 2026-09-21（B4）随安装语义整体迁入
+//!   \`domain/install.rs\`，本文件因此只看 payload 形态，不看 main.rs。）
 //! 后果：装 Node（30~90MB、慢网数分钟）期间引导页停在静态文案，
 //! Rust 侧 0.1/0.2/0.3/0.8 进度与状态**全被丢弃**。
 //!
@@ -29,7 +31,8 @@
 //!   M-c  node.rs 不再把 Node 侧延迟传给 npm 语义的 selected 导出
 //!   E-a  install_progress 监听器不再以 busy 为闸，且经统一入口展示**文字**（SSOT §2.4/§3.3）
 //!   E-b  不再使用进度条（SSOT §3.2：只留文字，删除 showProgress/progBar）
-//!   E-c  push_status 发统一 install_progress {kind,status,progress}（不再带 busy 补丁）
+//!   E-c  安装语义的唯一所有者 \`domain/install.rs\` 发统一 install_progress {kind,status,progress}
+//!        （不再带 busy 补丁；发射点不在 main.rs，见 B4）
 //!   E-d  反向：判据能识别「以 busy 为闸」的旧形态（门禁非空转）
 
 use std::fs;
@@ -146,13 +149,15 @@ fn e_a_install_listener_reports_status_text() {
 
 #[test]
 fn e_c_push_status_emits_unified_install_progress() {
-    // 2026-09-16（SSOT §2.4）：push_status 发统一 install_progress {kind,status,progress}；
+    // 2026-09-16（SSOT §2.4）：统一 install_progress {kind,status,progress}；
     //   旧 payload 里的 busy 补丁随契约冻结一并移除（前端已不依赖它）。
-    let code = strip_comments(&read("src/main.rs"));
+    // 2026-09-21（B4）：发射点从 main.rs 迁入 domain/install.rs —— 现在它是**全仓唯一**的
+    //   install_* 发射点（单点性由 G-12 钉死），本判据只管 payload 形态仍带 kind/status。
+    let code = strip_comments(&read("src/domain/install.rs"));
     let i = code.find("install_progress").expect("E-c FAIL 未找到 install_progress 发射点");
     let block = &code[i..(i + 400).min(code.len())];
     assert!(
-        block.contains("\"kind\"") && block.contains("\"status\""),
+        block.contains("kind") && block.contains("status"),
         "E-c FAIL install_progress 未带 kind/status（前端无法区分 node 与 npm 步骤）"
     );
 }

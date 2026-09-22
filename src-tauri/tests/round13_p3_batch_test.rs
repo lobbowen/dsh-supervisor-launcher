@@ -3,7 +3,7 @@
 //! ## 缺陷
 //!
 //! ① P3 \`--service-plan\` 在 Windows 恒报「现存 = 否」
-//!    main.rs 原用 \`platform::service().definition_path().is_file()\`，而
+//!    该自检原用 \`platform::service().definition_path().is_file()\`，而
 //!    windows.rs 的 definition_path 是**标识串** \`schtasks://DSH-Supervisor\`（没有文件）
 //!    → \`is_file()\` 恒 false → 自检无论计划任务是否存在/刚建立都报「否」，
 //!    把排障者方向带偏（本自检正是「服务定义」能力的官方验证入口）。
@@ -62,7 +62,9 @@ fn strip_comments(src: &str) -> String {
 
 #[test]
 fn p_a_service_plan_uses_fact_based_is_defined() {
-    let main = strip_comments(&read("src/main.rs"));
+    // 2026-09-21（B2）：自检实现随分层纠偏搬到 domain/cli.rs（main.rs 只留派发），
+    //   故本判据读实现所在文件 —— 断言的**语义**不变：现存判定必须是平台事实。
+    let main = strip_comments(&read("src/domain/cli.rs"));
     assert!(
         !main.contains("definition_path().is_file()"),
         "P-a FAIL --service-plan 仍用 definition_path().is_file()（Windows 上恒 false）"
@@ -121,7 +123,10 @@ fn p_c_frontend_consumes_core_plan_error() {
 #[test]
 fn p_d_dead_broadcast_removed_and_env_done_consumed() {
     let main = strip_comments(&read("src/main.rs"));
-    let cmds = strip_comments(&read("src/commands/mod.rs"));
+    // 2026-09-21（B4）：`install_*` 的发射点收口为 `domain/install.rs` 唯一所有者，命令层因此
+    //   **不再**含事件名字面量 —— 原判据读 commands/mod.rs 会把这次修复判为「死广播」。
+    //   断言语义不变：终态事件必须有发射点，且必须有接收方。
+    let inst = strip_comments(&read("src/domain/install.rs"));
     let init = strip_comments(&read("bootstrap/js/80-init.js"));
     assert!(
         !main.contains("env_status"),
@@ -130,7 +135,7 @@ fn p_d_dead_broadcast_removed_and_env_done_consumed() {
     // 2026-09-16（SSOT §2.4）：完成事件由 env_done 更名为 install_done，且**必须有接收方**
     //   （本断言的原始意图就是「不许出现死广播」）—— 更名为统一事件后该意图不变。
     assert!(
-        cmds.contains("install_done") || cmds.contains("install_error"),
+        inst.contains("\"install_done\"") && inst.contains("\"install_error\""),
         "P-d FAIL 统一安装完成/失败事件无发射点（前端将永远等不到终态）"
     );
     assert!(

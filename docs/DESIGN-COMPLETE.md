@@ -202,10 +202,15 @@ ManagedRegistry.heartbeat(5000)                objects.js:289-324
 | `shell_update_check` / `shell_update_apply` / `shell_restart` | 壳自更新（minisign 强制验签）|
 | `win_ctl` / `finish_boot` | 窗口动作、引导完成 |
 
-**无头入口（`main.rs` 在 Tauri 初始化之前分派，共 8 个自检/计划入口 + 1 个守卫入口，任何平台可跑）**：
+**无头入口（`main.rs` 在 Tauri 初始化之前分派，共 7 个自检/计划入口 + 2 个非自检运行入口，任何平台可跑）**：
 `--env-plan` / `--mirror-plan` / `--node-plan` / `--core-plan` / `--service-plan`（可加 `--service-apply` 才写盘）/
-`--platform-matrix` / `--shell-update-plan`；以及**非自检**的 `--run-guard`（服务定义唯一指向的稳定入口，每次启动重新检测后 exec）。
-CI 目前只冒烟 `--node-plan`（且 `|| true` 不影响结论）—— 其余入口有产出、无 CI 断言。
+`--platform-matrix` / `--shell-update-plan`；以及**非自检**的 `--run-guard`（服务定义唯一指向的稳定入口，每次启动重新检测后 exec）
+与 `--watchdog`（看护任务入口，判据与拉起序列与 GUI 启动同源）。
+CI 断言（2026-09-22 B6）：`--node-plan` 必判退出码且必看到结论行；`--watchdog` 在 Linux 上跑**端到端**
+（伪内核 → 拉起 → `/healthz` 判就绪）；`--service-plan --service-apply` 在 Windows 上跑真 `schtasks`
+建立 + 回读。其余入口（`--env-plan` / `--mirror-plan` / `--core-plan` / `--platform-matrix` /
+`--shell-update-plan`）仍是「有产出、无 CI 断言」—— 判据见 `KERNEL-LAUNCH-STANDARD.md` §6 的
+「CI 真机冒烟」行（同处登记着 Windows P5/P6 这一格为何仍未闭环）。
 
 ## 8. 工程现状：脆弱性量化
 

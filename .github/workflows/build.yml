@@ -170,7 +170,135 @@ jobs:
           # 不要截断到 tail -2：曾因此在 CI 只看到「gtk 425 errors」的汇总行、看不到任何真实错误，
           # 排障必须反复烧 CI。保留足够上下文但仍然有界。
           cargo build 2>&1 | tail -60
-          ./target/debug/dsh-supervisor-gui --node-plan || true
+          BIN=./target/debug/dsh-supervisor-gui
+          [[ "$RUNNER_OS" == "Windows" ]] && BIN="$BIN.exe"
+          # 2026-09-22（B6）：原写法带 `|| true` —— 自检失败也绿，这一步从未真正把关过。
+          # 判据是「产出了结论」而不是「进程没崩」，所以缺行同样算失败。
+          if ! OUT=$("$BIN" --node-plan 2>&1); then
+            printf '%s\n' "$OUT"; echo "--node-plan 退出非零：环境探针或 LTS 解析失败"; exit 1
+          fi
+          printf '%s\n' "$OUT"
+          for key in node= node_probe_candidates= latest_lts= mirror_selected=; do
+            grep -q "^${key}" <<<"$OUT" || { echo "--node-plan 输出缺 $key（结论未产出）"; exit 1; }
+          done
+        working-directory: src-tauri
+
+      # ── Linux 启动链真机冒烟（伪内核 → --watchdog → /healthz 就绪）──
+      # 覆盖的是**用户报障的那一段**：定位守卫 → 组装启动规格 → 拉起 → 按 /healthz 判就绪。
+      #   静态门禁只能证明「代码形状对」，证明不了这条链在真机上闭合过。
+      # 为什么用伪内核而不是真内核：真内核要装（npm 拉包、跑 node 全量启动），把一次冒烟
+      #   变成几分钟的下载依赖，且它的就绪与否本身不是本步要验的东西；本步要验的是**壳的判据链**，
+      #   所以只要一个「按实际端口绑定 + 持久化 ports.json + 回 /healthz 200」的最小 node 进程。
+      # 为什么状态根必须隔离到 RUNNER_TEMP：--watchdog 与它拉起的守卫共用
+      #   DSH_SUPERVISOR_HOME（exec_guard/spawn_daemon 显式注入），整条链在同一次进程继承里，
+      #   不需要往机器环境里塞变量 —— 这也是 Windows 那一腿做不到同样闭环的原因（见下一步注释）。
+      - name: Linux 启动链真机冒烟（--watchdog 端到端判就绪）
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -u
+          BIN=./target/debug/dsh-supervisor-gui
+          STATE="$RUNNER_TEMP/shell-chain-state"
+          PKG="$RUNNER_TEMP/shell-chain-fake-core"
+          rm -rf "$STATE" "$PKG"
+          mkdir -p "$STATE/supervisor" "$PKG/bin"
+          # 高位端口：不与 runner 上任何服务抢；被占用时伪内核会顺延并如实持久化（与真实内核同语义）。
+          printf '{"apiPort":39111}\n' > "$STATE/supervisor/config.json"
+          printf '{"name":"dsh-supervisor-fake","version":"9.9.9"}\n' > "$PKG/package.json"
+          cat > "$PKG/bin/dsh-supervisor" <<'JS'
+          #!/usr/bin/env node
+          const http = require('http'), fs = require('fs'), path = require('path');
+          const dir = path.join(process.env.DSH_SUPERVISOR_HOME, 'supervisor');
+          let port = JSON.parse(fs.readFileSync(path.join(dir, 'config.json'), 'utf8')).apiPort;
+          const srv = http.createServer((req, res) => {
+            if (req.url.startsWith('/healthz')) { res.writeHead(200, { 'content-type': 'text/plain' }); res.end('ok'); return; }
+            res.writeHead(404).end();
+          });
+          // 端口被占则顺延，并把**实际**端口写进 ports.json —— 壳的 await_ready 每 tick 重读它。
+          srv.on('error', (e) => { if (e.code !== 'EADDRINUSE') { console.error(e); process.exit(1); } srv.close(); port += 1; listen(); });
+          function listen() {
+            srv.listen(port, '127.0.0.1', () => {
+              fs.writeFileSync(path.join(dir, 'ports.json'), JSON.stringify({ records: [{ role: 'supervisor-api', port }] }));
+              console.log('[fake-core] healthz on ' + port);
+            });
+          }
+          listen();
+          JS
+          chmod +x "$PKG/bin/dsh-supervisor"
+          # 位置契约（core.json）= 壳安装成功后写入的事实源；这里直接伪造它，避免真装内核。
+          printf '{"schema":1,"bin":"%s","version":"9.9.9","source":"ci-fake"}\n' "$PKG/bin/dsh-supervisor" \
+            > "$STATE/supervisor/core.json"
+          export DSH_SUPERVISOR_HOME="$STATE"
+          # 兜底 spawn 出来的守卫是脱离本进程的 node，不能靠回合结束收口；
+          # unit 带 Restart=always，故连服务管理器一侧一起停并删定义（runner 是临时的，
+          # 但残留进程会在这一步之后继续被拉起，干扰后面的计数断言）。
+          trap 'pkill -f "$PKG/bin/dsh-supervisor" 2>/dev/null || true;
+                systemctl --user disable --now dsh-supervisor.service 2>/dev/null || true;
+                rm -f "$HOME/.config/systemd/user/dsh-supervisor.service"' EXIT
+          if ! "$BIN" --watchdog; then
+            echo "第一步：拉起后未在预算内判为就绪（详见上方 shell.log 与 $STATE/shell/guard.log）"
+            cat "$STATE/shell/shell.log" 2>/dev/null || true
+            cat "$STATE/shell/guard.log" 2>/dev/null || true
+            exit 1
+          fi
+          # ports.json 由伪守卫写入 = 「进程真的起来并绑定了端口」的独立证据（不是判据自己说自己好）。
+          grep -q '"supervisor-api"' "$STATE/supervisor/ports.json" || { echo "ports.json 缺 supervisor-api 记录"; exit 1; }
+          # 第二次调用必须走「已就绪 → 直接返回 0」，且不得再拉起新守卫（判据与 GUI 启动同源）。
+          "$BIN" --watchdog
+          grep -c '\[fake-core\] healthz' "$STATE/shell/guard.log" | grep -q '^1$' \
+            || { echo "第二次 --watchdog 重复拉起了守卫（就绪判据未短路）"; exit 1; }
+          echo "Linux 启动链冒烟通过：解析守卫 → 组装规格 → 拉起 → /healthz 判就绪 → 复用"
+        working-directory: src-tauri
+
+      # ── Windows 服务定义真机冒烟（--service-plan → /Create → /Query 回读）──
+      # 为什么必须有：Windows 的「服务定义」是计划任务，定义内容（引号、verbatim 前缀、
+      #   /RL HIGHEST 是否被拒）在单元测试里**无法**验证 —— 真机的 schtasks 才是判据。
+      #   用户报障「全就绪却进不去内核」的第一环就是这里。
+      # 为什么只到「建立 + 回读现存」而不继续 /Run → /healthz：稳定入口只写
+      #   `<壳> --run-guard`，**定义里不携带状态根**（架构决定，见 LaunchSpec::service_command）。
+      #   计划任务进程用的是**任务计划程序里的用户环境**，拿不到本步在作业里设的
+      #   DSH_SUPERVISOR_HOME → 被拉起的一侧会在默认状态根里找不到伪内核，
+      #   于是这一腿只能证明 P4（定义），P5/P6 由上面 Linux 那一腿闭环。
+      - name: Windows 服务定义真机冒烟（--service-plan --service-apply）
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          set -u
+          BIN=./target/debug/dsh-supervisor-gui.exe
+          STATE="$RUNNER_TEMP/windows-service-state"
+          rm -rf "$STATE"; mkdir -p "$STATE"
+          export DSH_SUPERVISOR_HOME="$STATE"
+          # --service-plan 认这个覆盖（诊断入口的本意）；服务定义本身不引用它，
+          # 故给一个存在的占位文件即可 —— 真正上屏的判据是「会写进定义的那一行」。
+          GUARD="$STATE/fake-guard.js"; : > "$GUARD"; export DSH_GUARD_BIN="$GUARD"
+          if ! OUT=$("$BIN" --service-plan --service-apply 2>&1); then
+            printf '%s\n' "$OUT"; echo "建立服务定义失败（退出码非零）"; exit 1
+          fi
+          printf '%s\n' "$OUT"
+          grep -q '^建立后现存    = 是' <<<"$OUT" || { echo "schtasks /Create 后 /Query 回读为「否」"; exit 1; }
+          # 定义行必须带引号（路径含空格不被截断）、以稳定入口结尾、且不含 verbatim 前缀。
+          grep -E '^建立结果.*-> "[^"]*dsh-supervisor-gui\.exe" --run-guard' <<<"$OUT" >/dev/null \
+            || { echo "建立结果里没有可核对的服务定义行"; exit 1; }
+          # verbatim 前缀只可能出现在「写进定义的那一行」上（current_exe() 的返回值形态），
+          # 故只扫这一行 —— 其余行（守卫占位文件路径）本来就带单反斜杠，扫全文必假阳。
+          if grep -E '^建立结果' <<<"$OUT" | grep -q '\\\\?'; then
+            echo "服务定义含 verbatim 前缀（schtasks 不接受）"; exit 1
+          fi
+          # 只读复跑：证明 is_defined() 走平台事实（计划任务不是文件，is_file() 恒 false 曾致误报），
+          # 且自检未写盘（只读契约）。
+          if ! OUT2=$("$BIN" --service-plan 2>&1); then
+            printf '%s\n' "$OUT2"; echo "只读自检失败"; exit 1
+          fi
+          printf '%s\n' "$OUT2"
+          grep -q '^现存          = 是' <<<"$OUT2" || { echo "只读自检仍报「现存 = 否」"; exit 1; }
+          grep -q '^将写入的定义  = "' <<<"$OUT2" || { echo "只读自检未产出定义行"; exit 1; }
+          grep -q '未写盘' <<<"$OUT2" || { echo "只读自检走了写盘分支"; exit 1; }
+          # 计划任务是**机器级**状态，隔离不到 RUNNER_TEMP，故显式清理（失败不翻判定：判定已在上）。
+          export MSYS2_ARG_CONV_EXCL='*'
+          for t in DSH-Supervisor DSH-Supervisor-Watchdog; do
+            schtasks /Delete /TN "$t" /F 2>&1 | tail -2 || echo "警告：清理 $t 失败（不影响本步判定）"
+          done
+          echo "Windows 服务定义冒烟通过：装配定义行 → schtasks /Create → /Query 回读现存"
         working-directory: src-tauri
 
       - name: Build + bundle (Tauri)

@@ -10,6 +10,13 @@
 //!   难查的原因：core_apply 的失败分支丢了 prefix。
 //!   纪律：失败路径的信息量必须 >= 成功路径。
 //!
+//! ## 规则住在哪儿（2026-09-21 B2）
+//!   剥 verbatim 前缀的实现全仓只有一份：\`src-tauri/src/platform/mod.rs\` 的
+//!   \`external_path\` —— 路径形态属平台事实而非业务选择，且**不带 cfg**，
+//!   所以三条 CI 腿都跑到同一份规则与同一组回归测试。
+//!   本文件只判**安装侧后果**（ npm 拿到的路径必须已归一）；
+//!   「不许再长出第二份」由 kernel_launch_standard_test.rs 的 K-11 守住。
+//!
 //! ## 不变量 K-1..K-8
 
 use std::fs;
@@ -92,24 +99,46 @@ fn k6_reverse_judgement_detects_old_deficient_form() {
 
 #[test]
 fn k7_verbatim_prefix_stripped_before_npm() {
+    // 2026-09-21（B2）：剥前缀的**规则**收口到 `platform::external_path`（全仓唯一实现；
+    //   单点性由 kernel_launch_standard_test.rs 的 K-11 钉死，旧的两份实现
+    //   `strip_verbatim` / `simplify` 已连同其测试一并删除）。
+    //   本判据只管安装侧的**后果**：交给 npm 的每个路径都必须先过这道归一。
     let core = read("src-tauri/src/core.rs");
-    assert!(core.contains("pub fn strip_verbatim"), "K-7 FAIL no strip_verbatim");
-    assert!(core.contains("fn simplify("), "K-7 FAIL no simplify");
     let gi = core.find("pub fn global_prefix_for").expect("K-7 FAIL no global_prefix_for");
     let gj = core[gi..].find("fn tail(").map(|x| gi + x).unwrap_or(core.len());
     let body = &core[gi..gj];
-    assert!(body.contains("return Some(simplify(p));"), "K-7 FAIL node_modules branch not simplified");
-    assert!(body.contains("return Some(simplify(dir.to_path_buf()));"), "K-7 FAIL shim branch not simplified");
-    assert!(core.contains("cmd.arg(\"--prefix\").arg(simplify("), "K-7 FAIL npm prefix not simplified");
-    assert!(core.contains("strips_verbatim_drive_prefix") && core.contains("strips_device_prefix") && core.contains("leaves_clean_paths_untouched"), "K-7 FAIL regressions removed");
+    assert!(body.contains("Some(crate::platform::external_path(&p))"), "K-7 FAIL node_modules branch not normalized");
+    assert!(body.contains("Some(crate::platform::external_path(dir))"), "K-7 FAIL shim branch not normalized");
+    assert!(core.contains("cmd.arg(\"--prefix\").arg(crate::platform::external_path(p))"), "K-7 FAIL npm prefix not normalized");
+    // 规则必须**在 CI 上真的被跑到**：实现不带 cfg，故 POSIX/Windows/macOS 三条腿执行同一份
+    //   规则与同一组回归测试 —— 旧实现藏在 Windows 路径里，POSIX CI 既编译不到也测不到，
+    //   那正是两份规则不同的实现能长期存活的原因。
+    let pm = read("src-tauri/src/platform/mod.rs");
+    assert!(pm.contains("pub fn external_path"), "K-7 FAIL external_path 缺失");
+    assert!(
+        pm.contains("fn external_path_strips_verbatim_drive_and_device_prefix")
+            && pm.contains("fn external_path_leaves_clean_and_unix_paths_untouched"),
+        "K-7 FAIL verbatim 归一的回归测试被删"
+    );
     eprintln!("K-7 PASS verbatim stripped before npm");
 }
 
 #[test]
 fn k8_reverse_detects_unstripped_verbatim() {
+    // 反向：判据必须能识别旧形态，否则 K-7 是空转的门禁。
     let bad = "cmd.arg(\"--prefix\").arg(p);";
-    assert!(!bad.contains("simplify"), "K-8 reverse self-check");
+    assert!(!bad.contains("external_path"), "K-8 reverse self-check");
     let core = read("src-tauri/src/core.rs");
     assert!(!core.contains(bad), "K-8 FAIL unstripped prefix injection present");
+    // 旧形态 2：在本文件里再长出一份剥前缀规则（曾真实存在两份、规则还不同）。
+    assert!(
+        !core.contains("fn strip_verbatim") && !core.contains("fn simplify("),
+        "K-8 FAIL core.rs 又出现第二份剥前缀实现"
+    );
+    // 旧形态 3：取不到自身路径时静默用空串 —— 会写坏服务定义且事后无法解释。
+    assert!(
+        !core.contains("current_exe().unwrap_or_default()") && !core.contains("current_exe()"),
+        "K-8 FAIL core.rs 仍自行取壳自身路径"
+    );
     eprintln!("K-8 PASS reverse judgement valid");
 }

@@ -61,6 +61,10 @@ pub(crate) fn post_local_timeout(port: u16, path: &str, timeout: std::time::Dura
 }
 
 /// 本地 HTTP GET（返回 (状态码, 全文)）——守卫就绪探针用。
+///
+/// `None` = **这次问不出状态码**：连不上、写不进去、或对方一个字节都没回。
+/// 不得把「没有状态行」糊成 `(0, "")` —— 那会让「端口通了但服务没起来」与
+/// 「服务回了 5xx」在报错里变成同一句话，而前者该再等、后者该去看日志。
 pub(crate) fn http_get_local(port: u16, path: &str, timeout: std::time::Duration) -> Option<(u16, String)> {
     let mut stream = connect_local(port, LOCAL_CONNECT_TIMEOUT)?;
     let _ = stream.set_read_timeout(Some(timeout));
@@ -70,7 +74,8 @@ pub(crate) fn http_get_local(port: u16, path: &str, timeout: std::time::Duration
     let mut buf = Vec::new();
     let _ = std::io::Read::read_to_end(&mut stream, &mut buf);
     let s = String::from_utf8_lossy(&buf).into_owned();
-    let code = s.split_whitespace().nth(1).and_then(|c| c.parse::<u16>().ok()).unwrap_or(0);
+    // 状态行固定是 `HTTP/1.1 <code> <reason>`：状态码是**第二个**空白段（第一段是版本）。
+    let code = s.split_whitespace().nth(1)?.parse::<u16>().ok()?;
     Some((code, s))
 }
 

@@ -38,6 +38,33 @@ fn test_state_dir_override() -> Option<PathBuf> {
 
 fn identity_path() -> PathBuf { state_dir().join("identity.json") }
 fn log_path() -> PathBuf { state_dir().join("shell.log") }
+/// 守卫子进程的输出落点：`<状态根>/shell/guard.log`。
+///
+/// 为什么单独一条日志：`shell.log` 是**壳**自己的里程碑流水，而守卫（node）的输出
+/// 是另一个进程的原文，混在一起会让「谁说的话」失去归属。
+/// 公开是为了让**报错能指名证据在哪**（`READY_TIMEOUT` 的正文里带这个路径）。
+pub fn guard_log_path() -> PathBuf { state_dir().join("guard.log") }
+
+/// 打开守卫输出日志（追加 + 建目录）。**打不开时返回 None**，由调用方退回 null。
+///
+/// 这条通道只做「有则记」：它绝不能成为拉起失败的原因。
+pub fn guard_log_file() -> Option<std::fs::File> {
+    let dir = state_dir();
+    let _ = fs::create_dir_all(&dir);
+    let p = guard_log_path();
+    // 有界（不变量 B1 的同一类）：写这个文件的是**子进程**，它不会自己滚动；
+    // 守卫若陷入崩溃循环，一晚上就能把磁盘写满。超限时先截断保留后半部分。
+    if let Ok(md) = fs::metadata(&p) {
+        if md.len() > 512 * 1024 {
+            if let Ok(s) = fs::read_to_string(&p) {
+                let n = s.chars().count();
+                let keep: String = s.chars().skip(n.saturating_sub(256 * 1024)).collect();
+                let _ = fs::write(&p, keep);
+            }
+        }
+    }
+    fs::OpenOptions::new().create(true).append(true).open(&p).ok()
+}
 
 /// 落盘日志（滚动：超过 1MB 时保留后半部分）。绝不 panic、绝不阻塞启动。
 pub fn log(line: &str) {
@@ -149,7 +176,7 @@ pub fn init_identity(version: &str) -> serde_json::Value {
         "pid": std::process::id(),
         "startedAt": now,
         "lastSeenAt": now,
-        "exe": std::env::current_exe().ok().map(|p| p.display().to_string()),
+        "exe": crate::platform::self_exe().ok().map(|p| p.display().to_string()),
     });
     let id = write_identity_for(&runtime);
     log(&format!(

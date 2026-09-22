@@ -57,19 +57,21 @@ pub trait ServiceControl: Send + Sync {
     /// 且 spawn 后仍以「端口就绪」为唯一成功判据（而非进程是否存活）。
     ///
     /// **统一实现（三平台一致）**：不再各自拼 node/guard —— 由 `--run-guard` 运行时检测。
+    ///
+    /// 2026-09-21（B2）：标准流改走 [`crate::platform::guard_stdio`]，不再三条 `null()`。
+    /// 兜底路径恰恰是**最需要正文**的路径 —— 服务管理器已经不可用了，若再把子进程的
+    /// stderr 丢掉，这次失败就只剩「超时」两个字。
     fn spawn_daemon(&self, spec: &crate::platform::LaunchSpec) -> Result<u32, String> {
         let mut cmd = std::process::Command::new(&spec.shell);
         cmd.arg("--run-guard")
-            .env("DSH_SUPERVISOR_HOME", &spec.state_root)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-        }
-        let child = cmd.spawn().map_err(|e| format!("直接拉起守卫失败: {}", e))?;
+            .env("DSH_SUPERVISOR_HOME", &spec.state_root);
+        crate::platform::guard_stdio(&mut cmd);
+        // CREATE_NO_WINDOW 的唯一封装点在 infra（GUI 进程拉子进程不闪控制台），
+        // 本文件因此不再需要 `#[cfg(windows)]` 块。
+        crate::bounded::prepare(&mut cmd);
+        let child = cmd.spawn().map_err(|e| {
+            format!("直接拉起守卫失败: {}（{} --run-guard）", e, spec.shell.display())
+        })?;
         Ok(child.id())
     }
 }

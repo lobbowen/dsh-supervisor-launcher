@@ -118,6 +118,75 @@ pub(crate) fn shutdown_all(port: u16) {
     }
 }
 
+/// 服务管理器路径（P4 建立定义 → P5 请求启动）的**阶段产物**。
+///
+/// ## 为什么必须有这个类型（2026-09-21 架构修复，Windows 真机事故的直接后果）
+///
+/// 旧实现把 `ensure_defined` 的错误**写进日志就丢掉**，然后**无条件** `start()`。
+/// 于是最终报错只剩一句「schtasks /Run 失败（退出码 1）」，而真实的失败点**可能**在更早的
+/// P4（服务定义未建成）—— 阶段没有产物 = 证据链断裂，排障者只能看到最后一环的下游症状，
+/// 连「P4 到底有没有成」都无法从报错里判断。
+///
+/// ## 不变量（结构上强制，而不是靠注释）
+///
+/// `started` 只可能在 `defined` 为 `Ok` 时才是 `Some` —— 定义失败时那条出边是**关闭**的。
+/// 对不存在的任务发起 `/Run` 不产生命中信息，只产出一条误导性的退出码 1。
+pub(crate) struct ServiceAttempt {
+    /// P4：服务定义的结果（成功时带平台给出的状态描述）。
+    defined: Result<String, String>,
+    /// P5：仅在 P4 成功时才有值；`None` = **未向服务管理器发起请求**（出边已关）。
+    started: Option<Result<(), String>>,
+}
+
+impl ServiceAttempt {
+    /// 跑 P4 → P5（不跑 P6：等待由调用方决定预算，见 `await_ready`）。
+    ///
+    /// `report` 用于把阶段名上报给引导页（静默等待与卡死必须可区分）。
+    fn define_and_start(spec: &crate::platform::LaunchSpec, report: &dyn Fn(&str)) -> Self {
+        let defined = match crate::platform::service().ensure_defined(spec) {
+            Ok(desc) => {
+                crate::update::log(&format!("守卫服务定义: {}", desc));
+                Ok(desc)
+            }
+            // 关键的一步：**记下原因并关掉出边**，让调用方走 spawn 兜底。
+            Err(e) => {
+                crate::update::log(&format!("守卫服务定义失败（跳过启动请求，改走直接拉起）: {}", e));
+                Err(e)
+            }
+        };
+        let started = match &defined {
+            Ok(_) => {
+                report("正在请求服务管理器启动守卫…");
+                let r = crate::platform::service().start();
+                if let Err(e) = &r {
+                    crate::update::log(&format!("服务管理器启动失败: {}", e));
+                }
+                Some(r)
+            }
+            Err(_) => None,
+        };
+        ServiceAttempt { defined, started }
+    }
+
+    /// 是否真的向服务管理器发过请求 —— 没发过就不该为它等 30 秒。
+    fn start_requested(&self) -> bool {
+        self.started.is_some()
+    }
+
+    /// 面向人的**一句话阶段证据**：说清走到了哪一步、为什么停在那一步。
+    ///
+    /// 进 `READY_TIMEOUT` / `SERVICE_START_FAILED` 的正文（规范 H8：报错必须可定位到阶段）。
+    fn evidence(&self) -> String {
+        match (&self.defined, &self.started) {
+            (Err(d), None) => format!("服务定义未建立（因此未请求服务管理器启动）：{}", d),
+            (Err(d), Some(_)) => format!("服务定义未建立：{}", d),
+            (Ok(_), Some(Err(e))) => format!("服务管理器错误：{}", e),
+            (Ok(_), Some(Ok(()))) => "服务管理器已接受启动请求，但守卫未在其间就绪".to_string(),
+            (Ok(d), None) => format!("服务定义已建立（{}），未发起启动请求", d),
+        }
+    }
+}
+
 /// 拉起守卫（P0 契约 → P1 对齐 → P3 定位 → P4 定义 → P5 启动 → P6 就绪）。
 /// 端口从用户 config.apiPort 解析（非硬编码 3100）。
 pub(crate) fn ensure_guard(app: &tauri::AppHandle) -> Result<(), LaunchError> {
@@ -127,8 +196,8 @@ pub(crate) fn ensure_guard(app: &tauri::AppHandle) -> Result<(), LaunchError> {
         let _ = app.emit("guard_progress", serde_json::json!({ "status": s }));
         crate::update::log(s);
     };
-    if is_alive(port) {
-        step("守卫已在运行");
+    if port_open(port) {
+        step("守卫端口已开 · 跳过启动");
         // 2026-09-18 修（「退出管家后自动重启」的收尾）：退出时 Windows stop() 会
         //   /Delete 看护任务；而登录任务可能已先拉起守卫，使本函数在此提前返回 ——
         //   那样看护任务永不重建，GUI 崩溃自愈在整个会话内失效。故「守卫已活」也确保
@@ -138,9 +207,13 @@ pub(crate) fn ensure_guard(app: &tauri::AppHandle) -> Result<(), LaunchError> {
         //   顺序判据锚定到本提前返回分支上；且**不得**在此引入平台条件编译
         //   （bootstrap_flow.rs G1/B59：platform/ 之外禁止平台分支）。
         if let Some((rt_wd, guard_wd)) = resolve_local(None) {
-            let spec_wd = crate::platform::LaunchSpec::from_runtime(&rt_wd, guard_wd);
-            if let Err(e) = crate::platform::service().ensure_defined(&spec_wd) {
-                crate::update::log(&format!("守卫已在运行，但服务定义确保失败: {}", e));
+            match crate::platform::LaunchSpec::from_runtime(&rt_wd, guard_wd) {
+                Ok(spec_wd) => {
+                    if let Err(e) = crate::platform::service().ensure_defined(&spec_wd) {
+                        crate::update::log(&format!("守卫已在运行，但服务定义确保失败: {}", e));
+                    }
+                }
+                Err(e) => crate::update::log(&format!("守卫已在运行，但启动规格组装失败: {}", e)),
             }
         }
         return Ok(());
@@ -171,63 +244,94 @@ pub(crate) fn ensure_guard(app: &tauri::AppHandle) -> Result<(), LaunchError> {
         }
     };
     step(&format!("内核已对齐 v{}", version));
-    let spec = crate::platform::LaunchSpec::from_runtime(&rt, guard);
+    let spec = crate::platform::LaunchSpec::from_runtime(&rt, guard)
+        .map_err(|e| LaunchError::new("LAUNCH_SPEC_FAILED", e))?;
+    ensure_started(&spec, &step)
+}
 
-    // P4 建立服务定义（幂等；否则首启 start 必失败）。
+/// 启动序列本体（P4 定义 → P5 服务管理器 → P6 就绪 → P5 兜底 spawn）。
+///
+/// 从 `ensure_guard` 拆出的**唯一原因**：无头的 `--watchdog`（计划任务按分钟调用）没有
+///   `AppHandle`、也不做版本对齐（对齐是 GUI 引导页的职责，看护无权改变安装态），
+///   但它必须走与 GUI 启动**逐字相同**的拉起序列 —— 否则「怎么把守卫拉起来」又要写第二遍。
+pub(crate) fn ensure_started(
+    spec: &crate::platform::LaunchSpec,
+    step: &dyn Fn(&str),
+) -> Result<(), LaunchError> {
+    // P4 建立服务定义 + P5 请求服务管理器启动（**定义失败则不出边**，见 ServiceAttempt）。
     step("正在建立守卫服务定义…");
-    match crate::platform::service().ensure_defined(&spec) {
-        Ok(desc) => crate::update::log(&format!("守卫服务定义: {}", desc)),
-        Err(e) => crate::update::log(&format!("守卫服务定义失败（稍后走 spawn 兜底）: {}", e)),
-    }
+    let attempt = ServiceAttempt::define_and_start(spec, step);
 
-    // P5 请求服务管理器启动（正常路径：由 systemd/launchd/schtasks 托管，具备开机自启与崩溃自拉）
-    step("正在请求服务管理器启动守卫…");
-    let started = crate::platform::service().start();
-    if let Err(e) = &started {
-        crate::update::log(&format!("服务管理器启动失败: {}", e));
-    }
-    step("等待守卫就绪（服务管理器路径）…");
-    if wait_alive(60) { return Ok(()); }
-
-    // P5 兜底：直接拉起守护进程（容器/无 user session/策略拦截等场景）。
-    step("服务管理器未能在 30s 内拉起守卫 · 改用直接启动兜底…");
-    match crate::platform::service().spawn_daemon(&spec) {
-        Ok(pid) => crate::update::log(&format!("兜底 spawn 守卫 pid={}", pid)),
-        Err(e) => {
-            return Err(LaunchError::new(
-                "SERVICE_START_FAILED",
-                format!(
-                    "守卫启动失败：服务管理器错误({}) 且直接拉起也失败({})",
-                    started.err().unwrap_or_else(|| "无".into()),
-                    e
-                ),
-            ));
+    // P6 就绪（只在真的向服务管理器发过请求时等；否则这 30s 是纯粹地卡住用户）。
+    if attempt.start_requested() {
+        step("等待守卫就绪（服务管理器路径）…");
+        if await_ready(SERVICE_READY_BUDGET) == Readiness::Ready {
+            return Ok(());
         }
     }
-    if wait_alive(120) { return Ok(()); }
 
-    Err(LaunchError::new(
-        "READY_TIMEOUT",
-        format!(
-            "守卫启动超时（服务管理器与直接拉起均未就绪）。服务管理器错误：{}",
-            started.err().unwrap_or_else(|| "无".into())
-        ),
-    ))
-}
-
-/// 轮询等待端口存活（每 tick 500ms）。
-///
-/// **每 tick 重读实际端口**：内核可能在启动时因端口占用而顺延并持久化（见
-///   env::current_api_port）；只盯固定端口会永远等不到已健康的守卫。
-pub(crate) fn wait_alive(ticks: u32) -> bool {
-    for _ in 0..ticks {
-        if is_alive(crate::env::current_api_port()) { return true; }
-        std::thread::sleep(std::time::Duration::from_millis(500));
+    // P5 兜底：直接拉起守护进程（容器/无 user session/策略拦截等场景）。
+    step("服务管理器未能拉起守卫 · 改用直接启动兜底…");
+    // 服务管理器那一段的**阶段证据**必须在最终报错里出现（规范 H8）：真机上它才是根因所在。
+    let evidence = attempt.evidence();
+    match crate::platform::service().spawn_daemon(spec) {
+        Ok(pid) => {
+            crate::update::log(&format!("兜底 spawn 守卫 pid={}", pid));
+            let verdict = await_ready(DAEMON_READY_BUDGET);
+            if verdict == Readiness::Ready { return Ok(()); }
+            Err(LaunchError::new(
+                "READY_TIMEOUT",
+                format!(
+                    "守卫启动超时（{}）。{}；直接拉起进程 pid={}，其输出见 {}",
+                    verdict.describe(),
+                    evidence,
+                    pid,
+                    crate::update::guard_log_path().display()
+                ),
+            ))
+        }
+        Err(e) => Err(LaunchError::new(
+            "SERVICE_START_FAILED",
+            format!("守卫启动失败：{}；直接拉起也失败：{}", evidence, e),
+        )),
     }
-    false
 }
 
-pub(crate) fn is_alive(port: u16) -> bool {
+/// 服务管理器路径的就绪等待预算（原「60 tick × 500ms」；含每 tick 的探针成本）。
+const SERVICE_READY_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
+/// 兜底直接拉起后的就绪等待预算（守卫是刚 fork 的 node，冷启动比服务管理器路径慢）。
+const DAEMON_READY_BUDGET: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// 守卫就绪判据（规范 §0 H6 的**唯一**实现产物）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Readiness {
+    /// `GET /healthz` 返回 2xx —— 唯一算「就绪」的形态。
+    Ready,
+    /// 端口 TCP 都连不上：守卫进程多半还没起来（或在顺延后的另一个端口）。
+    PortClosed,
+    /// 端口通了，但 `/healthz` 回了非 2xx —— 进程在、服务没好（或病了）。
+    Http(u16),
+    /// 端口通了，但 HTTP 请求没走完（超时 / 连接被 reset / 响应无法解析）。
+    NoHttpResponse,
+}
+
+impl Readiness {
+    /// 面向人的判定说明（进报错正文与就绪探针的 `reason`）。
+    pub(crate) fn describe(self) -> String {
+        match self {
+            Readiness::Ready => "就绪".to_string(),
+            Readiness::PortClosed => "端口不可达".to_string(),
+            Readiness::Http(code) => format!("/healthz 返回 {}", code),
+            Readiness::NoHttpResponse => "/healthz 无响应".to_string(),
+        }
+    }
+}
+
+/// 裸 TCP 可达判定 —— **只**用于「不再可达 = 进程已停」这类否定问题（重启前的等待）。
+///
+/// 就绪与否**不得**用它回答（那是 [`ready`] 的活）：端口能连只说明有人在听，
+/// 守卫在绑定端口与真正可服务之间还有一大段启动过程。
+pub(crate) fn port_open(port: u16) -> bool {
     let addr = format!("127.0.0.1:{}", port);
     if let Ok(mut it) = addr.to_socket_addrs() {
         if let Some(sa) = it.next() {
@@ -236,3 +340,123 @@ pub(crate) fn is_alive(port: u16) -> bool {
     }
     false
 }
+
+/// 契约判据：TCP 可达 **且** `GET /healthz` 2xx。
+pub(crate) fn ready(port: u16, http_timeout: std::time::Duration) -> Readiness {
+    if !port_open(port) {
+        return Readiness::PortClosed;
+    }
+    match crate::domain::localhttp::http_get_local(port, "/healthz", http_timeout) {
+        Some((code, _)) if (200..300).contains(&code) => Readiness::Ready,
+        Some((code, _)) => Readiness::Http(code),
+        None => Readiness::NoHttpResponse,
+    }
+}
+
+/// 等待预算内轮询就绪（每 tick 500ms），返回**最后一次**判定。
+///
+/// **每 tick 重读实际端口**：内核可能在启动时因端口占用而顺延并持久化（见
+///   env::current_api_port）；只盯固定端口会永远等不到已健康的守卫。
+///
+/// 用预算（时长）而不是 tick 数：每 tick 的成本不再是常数（多了 `/healthz` 一次往返），
+///   按 tick 计数会让总等待上界随网络状态漂移，而 `guard_start` 的外层预算是固定的。
+pub(crate) fn await_ready(budget: std::time::Duration) -> Readiness {
+    let started = std::time::Instant::now();
+    let mut last = Readiness::PortClosed;
+    loop {
+        last = ready(crate::env::current_api_port(), READINESS_HTTP_TIMEOUT);
+        if last == Readiness::Ready || started.elapsed() >= budget {
+            return last;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::time::Duration;
+
+    /// 起一个假守卫：**持续接管连接**，每条连接按 `reply` 应答（`None` = 连上但不回一个字节）。
+    ///
+    /// 为什么必须持续 accept（而不是一次一答）：[`ready`] 先做裸 TCP 探测再看 `/healthz`，
+    /// 同一次判定会打开**两个**连接。只 accept 一次的夹具会把真正的 HTTP 连接留在
+    /// accept 队列里无人接管，于是「200 = 就绪」那条用例必然以「无响应」收场（假阴性）。
+    fn fake_guard(reply: Option<&'static [u8]>) -> u16 {
+        let l = TcpListener::bind("127.0.0.1:0").expect("假守卫应能绑定回环端口");
+        let port = l.local_addr().expect("回环监听必有地址").port();
+        let bytes = reply.map(|b| b.to_vec());
+        std::thread::spawn(move || {
+            for stream in l.incoming().flatten() {
+                let bytes = bytes.clone();
+                std::thread::spawn(move || {
+                    let mut stream = stream;
+                    let mut buf = [0u8; 256];
+                    let _ = stream.read(&mut buf);
+                    match bytes {
+                        Some(b) => {
+                            let _ = stream.write_all(&b);
+                            let _ = stream.flush();
+                        }
+                        // 端口通着、进程却不回话：占住连接不放，让探针自己撞到读超时。
+                        None => std::thread::sleep(std::time::Duration::from_secs(3)),
+                    }
+                });
+            }
+        });
+        port
+    }
+
+    /// 一个**无人监听**的端口（绑定后立即释放）。
+    fn closed_port() -> u16 {
+        let l = TcpListener::bind("127.0.0.1:0").expect("应能绑定回环端口");
+        l.local_addr().expect("回环监听必有地址").port()
+    }
+
+    /// 就绪判据必须**分辨得出**四种现场 —— 它们的可操作结论完全不同：
+    /// 没起来（继续等）/ 起了但病了（看日志）/ 应答 5xx（真失败）/ 健康（放行）。
+    /// 旧实现只回 `bool`，于是「healthz 回 500」与「端口都没开」在报错里是同一句话。
+    #[test]
+    fn readiness_distinguishes_closed_healthz_and_sick() {
+        // 2xx = 唯一算就绪的形态
+        assert_eq!(
+            ready(fake_guard(Some(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")), Duration::from_millis(600)),
+            Readiness::Ready
+        );
+        // 非 2xx = 进程在、服务没好，必须带上状态码（报错正文要能指到它）
+        assert_eq!(
+            ready(
+                fake_guard(Some(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n")),
+                Duration::from_millis(600)
+            ),
+            Readiness::Http(503)
+        );
+        // 连得上但不吐字节 = 无响应，**不得**混成 Http(0)（那等于把「没回话」说成「回了 0」）
+        assert_eq!(
+            ready(fake_guard(None), Duration::from_millis(300)),
+            Readiness::NoHttpResponse
+        );
+        // 没人监听 = 端口不可达（回环上立刻 ECONNREFUSED，不会等满预算）
+        assert_eq!(ready(closed_port(), Duration::from_millis(300)), Readiness::PortClosed);
+    }
+
+    /// 四种判定各自给出**不同**的人话：报错正文靠它区分「再等等」与「去看日志」。
+    #[test]
+    fn readiness_describe_is_not_a_single_string() {
+        let all = [
+            Readiness::Ready.describe(),
+            Readiness::PortClosed.describe(),
+            Readiness::Http(500).describe(),
+            Readiness::NoHttpResponse.describe(),
+        ];
+        assert!(all[2].contains("500"), "HTTP 判定必须带状态码: {}", all[2]);
+        let uniq: std::collections::HashSet<_> = all.iter().collect();
+        assert_eq!(uniq.len(), 4, "四种判定文案不得撞车: {:?}", all);
+    }
+}
+
+
+/// 等待期间单次 `/healthz` 的超时：必须**远小于** tick，否则预算会被探针自己吃满。
+const READINESS_HTTP_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(800);

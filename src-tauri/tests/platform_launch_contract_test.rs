@@ -121,7 +121,7 @@ fn l3_port_discovery_from_ports_json_and_reread_in_wait() {
     assert!(missing.is_empty(), "L-3 失败：env.rs 未从 ports.json 发现实际端口，缺 {:?}", missing);
     let gc = read("src/domain/guardctl.rs");
     assert!(
-        gc.contains("current_api_port") && gc.contains("fn wait_alive(ticks"),
+        gc.contains("current_api_port") && gc.contains("fn await_ready(budget"),
         "L-3 失败：guardctl 未在等待循环每 tick 重读实际端口"
     );
 }

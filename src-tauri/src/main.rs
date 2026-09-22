@@ -43,9 +43,10 @@ mod update_plan;
 //   独立后 §3 的每个分支都能被纯函数单元测试直接覆盖（契约 §6 门禁 RC-G1/RC-G2）。
 mod release_channel;
 
-use std::path::PathBuf;
 use std::sync::Mutex;
-use tauri::{Emitter, Manager};
+// `Manager`：main.rs 里只用于 `state::<Mutex<RunState>>()`（快照读取与托盘回调）。
+//   `Emitter` 不再需要：安装事件的发射已整体迁入 `domain::install`（B4）。
+use tauri::Manager;
 // app.updater()：Tauri 官方更新器入口（强制 minisign 验签）。
 use tauri_plugin_updater::UpdaterExt;
 
@@ -53,7 +54,12 @@ pub(crate) struct RunState {
     busy: bool,
     installed: Option<String>, // 系统当前 node 版本
     latest: Option<String>,    // 官方最新 LTS
-    progress: f32,
+    /// 可测分母的进度比值（0.0~1.0）；`None` = 本步骤**没有**可测分母。
+    ///
+    /// 为什么不是 `f32`：原实现用 0.0 兼作「没开始」「没有分母」「刚起步」三种含义，
+    ///   而阶段分数（0.1 / 0.3 / 0.85）是按代码顺序编出来的假数 —— 前端因此删掉了进度条。
+    ///   只有真实可测的量（下载字节比）才允许写 `Some`。
+    progress: Option<f32>,
     status: String,
     logs: Vec<String>,
     error: Option<String>,
@@ -61,7 +67,7 @@ pub(crate) struct RunState {
 
 impl Default for RunState {
     fn default() -> Self {
-        RunState { busy: false, installed: None, latest: None, progress: 0.0, status: "探测中…".into(), logs: vec![], error: None }
+        RunState { busy: false, installed: None, latest: None, progress: None, status: "探测中…".into(), logs: vec![], error: None }
     }
 }
 
@@ -77,115 +83,9 @@ pub(crate) fn log(state: &RunState) -> serde_json::Value {
     })
 }
 
-
-
-
-
-
-
-
-/// 工具链安装步骤 —— 统一事件 `kind` 的取值来源（SSOT §2.4 枚举的子集）。
-///
-/// 为什么用枚举而不是裸字符串：`start_node_install` 必须把失败**如实归给**出问题的步骤
-///   （node 装不上 / npm 补不上），否则前端会拿错文案前缀，把「缺 npm」显示成
-///   「装 Node 失败」—— 那正是本次要修的根因（node 与 npm 同权，不得混为一谈）。
-#[derive(Clone, Copy)]
-pub(crate) enum InstallKind {
-    Node,
-    Npm,
-}
-
-impl InstallKind {
-    /// 事件 payload 里的 kind 字面量（SSOT §2.4 冻结：node / npm / kernel / shell）。
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            InstallKind::Node => "node",
-            InstallKind::Npm => "npm",
-        }
-    }
-}
-
-/// 安装失败：携带**归属步骤**，供 IPC 边界发 `install_error { kind, error }`（SSOT §2.4 / T-4）。
-/// 只用裸 String 会让调用方丢失「失败在 node 还是 npm」这一事实。
-pub(crate) struct InstallFailure {
-    pub(crate) kind: InstallKind,
-    pub(crate) message: String,
-}
-
-impl InstallFailure {
-    fn node(message: impl Into<String>) -> Self {
-        InstallFailure { kind: InstallKind::Node, message: message.into() }
-    }
-
-    fn npm(message: impl Into<String>) -> Self {
-        InstallFailure { kind: InstallKind::Npm, message: message.into() }
-    }
-}
-
-/// 安装进度事件（SSOT §2.4 统一形态）：`install_progress { kind, status, progress }`。
-///
-/// 为什么 kind 由调用方显式传入：node 与 npm 是同一条工具链管线里的两个必需步骤，
-///   前端据 kind 决定文案前缀；只发一句 status 会让「正在补 npm」与「正在装 node」不可区分。
-///
-/// 2026-09-16：旧 `env_*` 系列事件按 SSOT §2.4 删除（无兼容层）。旧的进度 payload 曾补
-///   `busy:true` 以绕开「前端以 if (p.busy) 为闸 → 进度恒被丢弃」（2026-09-13）——
-///   那是给消费方打的补丁；现契约冻结了事件形态，且前端只依赖 status 文字，故不再携带 busy。
-pub(crate) fn push_status(app: &tauri::AppHandle, kind: InstallKind, status: String, progress: f32) {
-    {
-        let state = app.state::<Mutex<RunState>>();
-        let mut s = state.lock().unwrap_or_else(|e| e.into_inner());
-        s.status = status.clone();
-        s.progress = progress;
-        s.logs.push(status.clone());
-    }
-    let _ = app.emit(
-        "install_progress",
-        serde_json::json!({ "kind": kind.as_str(), "status": status, "progress": progress }),
-    );
-}
-
-// npm 复探与「补齐 npm」的机制在 node.rs（reinstall_for_npm）与 runtime_contract::probe_npm_usable ——
-//   main.rs 只保留编排（门禁 G3 要求它「只做组装」；且那两件事与 node 安装同属一条工具链）。
-
-/// 完整工具链安装管线（SSOT §2.2）：**node 与 npm 顺序执行，缺一不可**。
-///
-/// 返回**运行期契约本身**（node 路径/版本 + npm 路径/参数/版本）：外层每一条播报都从它取，
-///   于是「某个 kind 的版本」在管线里只存在一份事实。
-/// 语义收紧：npm 补不上时**必须** Err —— 原实现只校验 node 版本，于是「node 在、npm 缺」也被判
-///   成功（SSOT §1 根因①），前端随后用不存在的 npm 去装内核，必然失败。
-/// 失败经 `InstallFailure` 带上归属步骤（node/npm），供 IPC 边界发 `install_error { kind, error }`。
-fn run_install(app: &tauri::AppHandle) -> Result<runtime_contract::NodeRuntime, InstallFailure> {
-    push_status(app, InstallKind::Node, "获取官方最新 LTS 版本…".into(), 0.1);
-    // ① 解析并安装/修复 node（现有 latest_lts → download_verified → install 链路不变）。
-    let choice = node::latest_lts().map_err(InstallFailure::node)?;
-    let version = choice.version.clone();
-    let file = choice.file.clone();
-    // 记录镜像选择（含延迟诊断），便于用户与排障
-    mirror::save(&mirror::Mirrors {
-        selected_node: Some(choice.source.clone()),
-        checked_at: Some(mirror::now_secs()),
-        ..mirror::load()
-    })
-    .ok();
-    push_status(app, InstallKind::Node, format!("选用镜像 {}（{}ms）", choice.source, choice.latency_ms), 0.15);
-    push_status(app, InstallKind::Node, format!("官方最新 LTS: {}", version), 0.2);
-    let dl_dir = env::supervisor_dir().join("dl");
-    push_status(app, InstallKind::Node, format!("下载 {}（约 30~50MB）…", file), 0.3);
-    let local = node::download_verified(&version, &file, &dl_dir, Some(choice.source.as_str()))
-        .map_err(InstallFailure::node)?;
-    push_status(app, InstallKind::Node, "SHA256 校验通过，准备安装…".into(), 0.8);
-    let node_bin = node::install(&local).map_err(InstallFailure::node)?;
-    // 安装后作废探测缓存：否则可能仍返回安装前记录的旧 Node（版本不一致，永不收敛）；
-    //   校验/补 npm 的完整收尾在 node.rs（G3：main.rs 只做组装）。
-    crate::nodeprobe::invalidate();
-    push_status(app, InstallKind::Npm, "正在校验 npm…".into(), 0.85);
-    // 收尾返回**运行期契约**（node 与 npm 的路径/版本都出自一次真实探测）。
-    //   这里不再自行拼「npm 已就绪（…）」：完成播报的唯一出口是 install_done（SSOT §2.4），
-    //   而该处曾把 Node 版本号当 npm 版本号念出去 —— 同一句话有两个作者时就没人能对账。
-    let rt = node::finalize_install(&node_bin, &version, &local)
-        .map_err(|(is_npm, e)| if is_npm { InstallFailure::npm(e) } else { InstallFailure::node(e) })?;
-    Ok(rt)
-}
+// 安装/下载进度的语义（InstallKind / InstallFailure / 事件发射 / 工具链管线）
+//   已于 2026-09-21（B4）整体迁入 `domain::install` —— 那里是全仓**唯一**的发射点。
+//   main.rs 只做组装（门禁 G3），不留第二处能形装事件形态的地方。
 
 // 此处原有孤立文档注释「内核可执行名候选（跨平台）…」+ 6 行空行（2026-09-12 清理）：
 //   它描述的函数在更早的重构中已删除（候选名现由 platform trait 的 core_exe_names 提供），
@@ -251,86 +151,6 @@ fn shell_updater(
         .map_err(|e| format!("更新器不可用: {}", e))
 }
 
-// ═══════════════════════════════════════════════════════════════════
-// 镜像源适配命令（引导页在**网络失败时**提供手动入口）
-//
-// 设计意图（2026-09-11）：壳装机时没有内核，面板（RegistryCard）此时不可用，
-// 用户若遇到镜像不可达将没有任何出口。故引导页必须在失败时给出可操作的输入框。
-// 平时不显示（避免干扰普通用户），仅失败态出现。
-// ═══════════════════════════════════════════════════════════════════
-
-
-
-
-
-
-/// 无头自检：**守卫服务定义**（P0 关键修复的功能验证入口）。
-///
-/// 为什么需要它：服务定义由壳在首启时建立，若失败，用户会卡在「守卫就绪」而**无法自查**
-/// （GUI 进不去、日志分散）。本入口让你在任何平台无 GUI 地确认：
-///   · 服务定义将写到哪个路径；
-///   · 当前是否存在；
-///   · 守卫可执行文件是否已定位；
-///   · `--service-apply` 时**实际建立**并报告结果。
-///
-/// 用法：
-///   dsh-supervisor-gui --service-plan              # 只报告，不写盘
-///   dsh-supervisor-gui --service-plan --service-apply   # 实际建立服务定义
-fn cli_service_plan() -> i32 {
-        println!("== 守卫服务定义自检 ==");
-    println!("平台          = {}", std::env::consts::OS);
-    println!("服务定义路径  = {}", platform::service().definition_path().display());
-    // 2026-09-13（P3 修复）：经 ServiceControl::is_defined()（平台**事实**判定）——
-    //   原先用 definition_path().is_file()，而 Windows 的路径是标识串
-    //   schtasks://DSH-Supervisor，is_file() **恒 false** → 自检无论计划任务是否
-    //   存在/刚建立都报「否」，把排障方向带偏（本自检正是「服务定义」能力的官方入口）。
-    println!("现存          = {}", if platform::service().is_defined() { "是" } else { "否" });
-    println!("HOME          = {}", std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_else(|_| "(未设置)".into()));
-
-    // 守卫可执行文件定位（与实际 ensure_guard 同一路径推导，避免「自检通过但运行时找不到」）。
-    // DSH_GUARD_BIN 可显式覆盖：用于①自动定位失败的机器做诊断 ②测试隔离 HOME。
-    let guard: Option<PathBuf> = std::env::var("DSH_GUARD_BIN")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from)
-        .or_else(core::locate_core_for_cli);
-    match &guard {
-        Some(p) => {
-            println!("守卫可执行    = {}", p.display());
-            println!("守卫存在      = {}", if p.is_file() { "是" } else { "否" });
-        }
-        None => println!("守卫可执行    = （未定位到，请先安装内核）"),
-    }
-
-    let apply = std::env::args().any(|a| a == "--service-apply");
-    if !apply {
-        println!();
-        println!("（未写盘。加 --service-apply 实际建立服务定义）");
-        return 0;
-    }
-    let Some(g) = guard else {
-        eprintln!("无法建立：未定位到守卫可执行文件（先安装内核）");
-        return 2;
-    };
-    // 运行期契约：服务定义需要的 node/npm 单一事实源（缺失则解析并落盘）。
-    let Some(rt) = runtime_contract::ensure() else {
-        eprintln!("无法建立：Node 运行环境未就绪（无法解析 node/npm）");
-        return 2;
-    };
-    let spec = platform::LaunchSpec::from_runtime(&rt, g);
-    match platform::service().ensure_defined(&spec) {
-        Ok(desc) => {
-            println!();
-            println!("建立结果      = {}", desc);
-            println!("建立后现存    = {}", if platform::service().is_defined() { "是" } else { "否" });
-            0
-        }
-        Err(e) => {
-            eprintln!("建立失败      = {}", e);
-            1
-        }
-    }
-}
 fn main() {
     // 启动里程碑日志（常开，落盘 <状态根>/shell/shell.log）：打开日志即可判定卡在
     // 「Rust setup 未执行」还是「前端 JS 未执行」。shell.log 超 1MB 自动滚动。
@@ -350,7 +170,7 @@ fn main() {
     }
     // 无头自检：守卫服务定义（P0 修复的功能验证入口，任何平台可用）。
     if std::env::args().any(|a| a == "--service-plan") {
-        std::process::exit(cli_service_plan());
+        std::process::exit(domain::cli::cli_service_plan());
     }
     // 无头冒烟入口：--node-plan 仅打印环境探针 + 官方最新 LTS，不启动窗口。
     if std::env::args().any(|a| a == "--node-plan") {
@@ -381,6 +201,11 @@ fn main() {
     //   必须在 Tauri 初始化**之前**返回 —— 每次启动重新检测 node/guard 后 exec。
     if std::env::args().any(|a| a == "--run-guard") {
         std::process::exit(domain::cli::cli_run_guard());
+    }
+    // 无头看护入口：Windows 计划任务（DSH-Supervisor-Watchdog）每 5 分钟调用。
+    //   判据与启动/面板同一实现（`guardctl::ready`），故必须在 Tauri 初始化之前返回。
+    if std::env::args().any(|a| a == "--watchdog") {
+        std::process::exit(domain::cli::cli_watchdog());
     }
     bt!("building app");
     tauri::Builder::default()

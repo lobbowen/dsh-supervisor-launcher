@@ -539,8 +539,18 @@ fn b22_mirror_presets_are_verified() {
     for bad in ["mirrors.ustc.edu.cn/node\"", "mirrors.aliyun.com/npm\"", "mirrors.tuna.tsinghua.edu.cn/npm\""] {
         assert!(!m.contains(bad), "B22 FAIL 收录了实测不可用的镜像: {}", bad);
     }
-    // 必须记录验证方法与排除原因（防止后人盲目加源）
-    assert!(m.contains("SHA256 校验"), "B22 FAIL 未记录 Node 镜像的验证方法");
+    // 「验证方法」不能只是注释里的一句话：注释在，判据就绿，而把校验代码删掉也不会红。
+    //   现锚到取包路径里真实发生的 SHA256 比对（镜像回退逐个源都做这件事）。
+    let n = fs::read_to_string(manifest_dir().join("src").join("node.rs")).expect("node.rs");
+    assert!(
+        n.contains("hex::encode(Sha256::digest(&data))"),
+        "B22 FAIL 下载的归档未做 SHA256 比对（预设无从验证 = 收录未验证的源）"
+    );
+    assert!(
+        n.contains("/SHASUMS256.txt\"") && n.contains("中未找到条目"),
+        "B22 FAIL 期望值未取自该源自己的 SHASUMS256.txt（换源即失去校验依据）"
+    );
+    // 排除原因必须有记录（防止后人盲目加源）
     assert!(m.contains("已排除"), "B22 FAIL 未记录被排除的镜像");
     eprintln!("B22 PASS mirror presets are verified");
 }
@@ -571,14 +581,21 @@ fn b23_shell_preset_sets_are_consistent() {
 
 /// B24：服务定义自检入口必须存在（P0 修复的可诊断性）。
 /// 若服务定义建立失败，用户会卡在「守卫就绪」却无从自查；本入口提供无 GUI 的自检与建立。
+///
+/// 2026-09-21（B2）：实现整体移到 `domain/cli.rs`（与其余 plan 入口同处，main.rs 只留
+///   派发 —— G3「main.rs 只做组装」正是这条分层的判据）。故判据也拆两侧：派发看 main.rs，
+///   能力（实际建立开关 / 守卫路径覆盖 / 定义路径报告）看实现所在文件。
 #[test]
 fn b24_service_plan_cli_exists() {
     let m = main_rs();
     assert!(m.contains("--service-plan"), "B24 FAIL 缺 --service-plan 自检入口");
-    assert!(m.contains("--service-apply"), "B24 FAIL 缺 --service-apply 实际建立开关");
-    assert!(m.contains("cli_service_plan"), "B24 FAIL 缺 cli_service_plan 实现");
-    assert!(m.contains("DSH_GUARD_BIN"), "B24 FAIL 缺守卫路径覆盖（诊断/测试隔离用）");
-    assert!(m.contains("definition_path"), "B24 FAIL 未报告服务定义路径");
+    assert!(m.contains("domain::cli::cli_service_plan"), "B24 FAIL main.rs 未派发到 cli_service_plan");
+    let cli = fs::read_to_string(manifest_dir().join("src").join("domain").join("cli.rs"))
+        .expect("read src/domain/cli.rs");
+    assert!(cli.contains("fn cli_service_plan"), "B24 FAIL 缺 cli_service_plan 实现");
+    assert!(cli.contains("--service-apply"), "B24 FAIL 缺 --service-apply 实际建立开关");
+    assert!(cli.contains("DSH_GUARD_BIN"), "B24 FAIL 缺守卫路径覆盖（诊断/测试隔离用）");
+    assert!(cli.contains("definition_path"), "B24 FAIL 未报告服务定义路径");
     eprintln!("B24 PASS service-plan CLI present");
 }
 
@@ -615,7 +632,10 @@ fn b26_bounded_probe_runtime_exists() {
     assert!(p.contains("pub fn status"), "B26 FAIL 缺有界查询入口");
     assert!(p.contains("pub fn invalidate"), "B26 FAIL 缺缓存失效（装完 Node 后必须能重新发现）");
     assert!(p.contains("pub fn current_stuck"), "B26 FAIL 缺「卡在谁」诊断");
-    assert!(p.contains("trace"), "B26 FAIL 缺逐候选追踪");
+    // B5（2026-09-22）：逐候选结论不再是本文件私有类型，而是登记进探针所有者。
+    //   判据落在「用了统一记录形态」上，而不是「文件里出现 trace 这个词」上。
+    assert!(p.contains("Probe::Node"), "B26 FAIL 逐候选结论未登记为 node 维度记录");
+    assert!(p.contains("Record::pending"), "B26 FAIL 在飞步骤未入记录表（卡住时又会只剩空串）");
     eprintln!("B26 PASS bounded probe runtime present");
 }
 
@@ -626,7 +646,7 @@ fn b27_node_status_is_pollable_not_blocking() {
     // 必须暴露轮询所需字段
     assert!(m.contains("\"probing\""), "B27 FAIL node_status 未回传 probing（前端无法轮询）");
     assert!(m.contains("\"stuck\""), "B27 FAIL node_status 未回传 stuck（无法显示卡在哪）");
-    assert!(m.contains("\"trace\""), "B27 FAIL node_status 未回传 trace");
+    assert!(m.contains("\"probes\""), "B27 FAIL node_status 未回传探测记录表");
     // 探测预算必须很短（命令本身不得长时间占用）
     assert!(
         m.contains("from_millis(900)"),
@@ -638,12 +658,25 @@ fn b27_node_status_is_pollable_not_blocking() {
 }
 
 /// B28：PATH 扫描必须有界，且过滤可能阻塞的非固定盘/UNC。
+///
+/// 2026-09-22 改锚：原断言查 `env.rs` 里的 `GetDriveTypeW` —— 那段平台知识早已按 G1 移进
+///   `platform/`，注释里还留着这个词，于是「注释在 ⇒ 判据绿」，而把盘符判定删掉也不会红。
+///   现同时锚住**调用点**（env 侧真的过滤）与**实现**（Windows 侧真的问盘符类型）。
 #[test]
 fn b28_path_scan_bounded_and_local_only() {
     let e = fs::read_to_string(manifest_dir().join("src").join("env.rs")).expect("env.rs");
+    let w = fs::read_to_string(manifest_dir().join("src").join("platform").join("windows.rs")).expect("windows.rs");
+    let w_code: String = w
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(e.contains("PATH_SCAN_BUDGET"), "B28 FAIL PATH 扫描无预算");
     assert!(e.contains("pub fn path_dirs_local_only"), "B28 FAIL 缺本地盘过滤");
-    assert!(e.contains("GetDriveTypeW"), "B28 FAIL 未做磁盘类型判定（网络盘会阻塞）");
+    assert!(
+        e.contains("if !is_local_fixed_dir(&dir)") && w_code.contains("GetDriveTypeW(root.as_ptr())"),
+        "B28 FAIL 非固定盘未被真实过滤（env 侧调用点与 Windows 侧盘符判定必须同时在场）"
+    );
     assert!(e.contains("pub fn recorded_node_path"), "B28 FAIL 未回读 runtime.json（最廉价的探测来源）");
     eprintln!("B28 PASS path scan bounded and local-only");
 }
@@ -677,12 +710,15 @@ fn b30_setup_must_not_block_on_probe() {
     eprintln!("B30 PASS setup does not block on probe");
 }
 
-/// B31：诊断串必须携带环境探测追踪与镜像选择结果。
+/// B31：诊断串必须携带环境探测记录表与镜像选择结果。
+///
+/// B5（2026-09-22）：逐候选追踪与「卡在哪一步」合并进同一份记录表（`env_probes`）——
+///   在飞的步骤本来就是表里一条 ok=? 的记录，两处各写一遍必然分叉。
 #[test]
 fn b31_diagnostics_include_probe_trace_and_mirror() {
     let h = bootstrap_html();
-    assert!(h.contains("env_trace="), "B31 FAIL 诊断缺 env_trace");
-    assert!(h.contains("env_stuck="), "B31 FAIL 诊断缺 env_stuck");
+    assert!(h.contains("env_probes="), "B31 FAIL 诊断缺 env_probes（全维度记录表）");
+    assert!(h.contains("probeSummary"), "B31 FAIL 缺逐维度渲染（状态行看不见 npm 那一格）");
     assert!(h.contains("env_candidates="), "B31 FAIL 诊断缺 env_candidates");
     assert!(h.contains("mirror_probes="), "B31 FAIL 诊断缺镜像逐源延迟");
     // 环境超时不得被误判为网络问题（曾据此展开镜像设置，误导用户）
@@ -930,14 +966,14 @@ fn b40_command_path_must_not_enumerate() {
 
 /// B47：**任何可能阻塞的调用之前都必须先 stage** —— 「规则一」的机械化检查。
 ///
-/// 为什么需要：线上故障正是「枚举阶段落在进度上报之外」导致 summary/stuck/trace 三项全空，
+/// 为什么需要：线上故障正是「枚举阶段落在进度上报之外」导致候选摘要 / 卡住阶段 / 探测记录全空，
 /// 用户看到「卡住且不报错、也没有任何线索」。
 /// 把 I/O 搬进线程只解决「命令不阻塞」，**不解决「卡住时看不见线索」** —— 故需机械化断言。
 #[test]
 fn b47_every_blocking_phase_is_staged() {
     let p = fs::read_to_string(manifest_dir().join("src").join("nodeprobe.rs")).expect("nodeprobe.rs");
     let d_start = p.find("fn detect()").expect("B47 FAIL 缺 detect");
-    let d_end = p.find("/// 探测单个候选").expect("B47 FAIL 缺 try_probe");
+    let d_end = p.find("fn try_probe(").expect("B47 FAIL 缺 try_probe");
     let body = &p[d_start..d_end];
 
     // 三处可能阻塞的调用，各自之前必须有 stage()
@@ -963,7 +999,7 @@ fn b47_every_blocking_phase_is_staged() {
 fn b48_path_scan_comes_last() {
     let p = fs::read_to_string(manifest_dir().join("src").join("nodeprobe.rs")).expect("nodeprobe.rs");
     let d_start = p.find("fn detect()").expect("B48 FAIL 缺 detect");
-    let d_end = p.find("/// 探测单个候选").expect("B48 FAIL 缺 try_probe");
+    let d_end = p.find("fn try_probe(").expect("B48 FAIL 缺 try_probe");
     let body = &p[d_start..d_end];
     let i_recorded = body.find("recorded_node_path").expect("B48 FAIL 缺记录路径阶段");
     let i_known = body.find("known_locations()").expect("B48 FAIL 缺已知落点阶段");
@@ -1482,16 +1518,17 @@ fn b55_missing_ipc_must_fail_loudly() {
 // == 白名单政策 ==
 //
 // 例外必须**在下方显式登记并给出理由**，不允许悄悄加 `#[allow]` 绕过。
-// 目前唯一例外是 `bounded.rs`（infra 层）：它的 `CREATE_NO_WINDOW` 是
-// 「进程创建」这一**原语**的平台差异，属于 infra 而非业务平台知识 ——
-// 且平台层自身依赖它，若下沉会形成循环依赖。
+// 目前唯一例外是 `bounded.rs`（infra 层）：它承载两个「**进程**」原语的平台差异 ——
+//   `CREATE_NO_WINDOW`（怎么创建）与控制台码页解码（怎么读它的输出）。
+//   两者都属于 infra 而非业务平台知识，且平台层自身依赖 `bounded`，下沉会形成反向依赖。
 // ═══════════════════════════════════════════════════════════════════════════
 #[test]
 fn g1_platform_branches_only_in_platform_layer() {
     // 例外：文件相对路径 → 理由
     let allowed: &[(&str, &str)] = &[(
         "bounded.rs",
-        "infra 原语：CREATE_NO_WINDOW 是进程创建的平台差异；平台层依赖它，下沉会循环",
+        "infra 原语：CREATE_NO_WINDOW（进程创建）与控制台码页（进程输出）是同一类平台差异；\
+         平台层依赖 bounded，下沉会形成反向依赖（见 bounded.rs::decode_console 的分层说明）",
     )];
 
     let mut offenders: Vec<String> = Vec::new();
@@ -1974,56 +2011,116 @@ fn b60_service_definition_self_heals_on_content_drift() {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// B62：子进程诊断必须**容忍非 UTF-8**，临时文件名不得撞名（P2 回归，2026-09-12）。
+// B62：子进程输出必须**按码页解码**，且解码点全仓唯一（2026-09-21 重做）。
 //
-// ## 缺陷一：GBK 输出被静默丢弃
+// ## 这一条门禁自己曾经钉住一个补丁
 //
-// `bounded.rs::read_log` 用 `read_to_string(...).unwrap_or_default()`，
-// `core.rs::read_log` 用 `f.read_to_string(...)` —— 两者在**非 UTF-8** 时都返回空串。
-// 而中文版 Windows 上 `schtasks`/`systemctl`/`npm` 的 stderr 是 **GBK** ——
-// 于是「失败（退出码 N）：<详情>」里的详情**全丢**，与「如实报错」的设计目标相反。
+// 旧版 B62 断言 `read_log` 里必须出现 `from_utf8_lossy`。那条"修复"解决的问题是
+//   「非 UTF-8 时详情**全丢**」（更早的实现是 `read_to_string().unwrap_or_default()`），
+//   但它把 GBK 字节按 UTF-8 做 lossy，换来的是「详情不可读」：
+//   中文 Windows 的 `schtasks` 写出的中文消息（如「系统找不到指定的文件。」）变成一串 U+FFFD。
+//   而那句话恰恰是整条启动链**唯一**能指向根因的证据 —— 缺陷没有解决，只是换了形态，
+//   并且旧 B62 会把正确的修复判为违规（因为它把**手段**当成了**不变量**）。
 //
-// ## 缺陷二：临时文件名用毫秒时间戳会撞名
+// ## 现在的不变量（只锁形态里的"负向"部分，正向实现交给行为测试）
 //
-// `core.rs` 用毫秒时间戳：同进程同毫秒内的并发调用（core_status 与 core_plan）
-// 会生成同名临时文件 → 互相截断/删除 → 可能读到错内容。`bounded.rs` 一直用纳秒。
+// · 采集阶段（`read_log`）不得直接 lossy —— 必须交给 `decode_console`；
+// · `decode_console` 在 Windows 上必须问操作系统要码页（`MultiByteToWideChar`），
+//   不得把"中文=GBK"写死（繁体 950 / 俄语 1251 同样要成立）；
+// · 临时文件名必须用纳秒（同进程并发调用会撞名，读到错内容）；
+// · `core.rs` 不得再有第二份读取实现（历史上复制体的字段与行为分叉过）。
+//
+// 真正的解码正确性由 `src/bounded.rs` 的单元测试负责（含 `#[cfg(windows)]` 的
+//   GBK 字节回归用例，在 Windows CI leg 上执行）。
 #[test]
-fn b62_subprocess_diagnostics_survive_non_utf8() {
+fn b62_console_output_decoding_is_confirmed_by_codepage_at_one_point() {
     let b = fs::read_to_string(manifest_dir().join("src").join("bounded.rs")).expect("bounded.rs");
     let c = fs::read_to_string(manifest_dir().join("src").join("core.rs")).expect("core.rs");
 
-    // 2026-09-12 更新（B63 去重后）：`core.rs` 的执行器已统一到 `bounded.rs`，
-    //   其自带的 `read_log` 随之删除 —— 故这里只断言**唯一那份**（bounded.rs），
-    //   并反向断言 core.rs **不再**有第二份读取实现（否则又是两处实现）。
+    // ① read_log 必须把解码交给 decode_console，自己不做 lossy
     let i = match b.find("fn read_log") {
         Some(v) => v,
         None => panic!("B62 FAIL bounded.rs 未找到 read_log"),
     };
-    let body = &b[i..(i + 420).min(b.len())];
+    let body = &b[i..(i + 300).min(b.len())];
     assert!(
-        body.contains("from_utf8_lossy"),
-        "B62 FAIL bounded.rs 的 read_log 未用 lossy —— GBK 输出会被静默丢弃"
+        body.contains("decode_console("),
+        "B62 FAIL read_log 未走唯一解码点 decode_console"
     );
     assert!(
-        !body.contains("read_to_string"),
-        "B62 FAIL bounded.rs 的 read_log 仍用 read_to_string（非 UTF-8 时返回空）"
+        !body.contains("from_utf8_lossy"),
+        "B62 FAIL read_log 在采集阶段做 lossy —— 真话会被毁容（乱码回归）"
     );
     assert!(
         body.contains("Err(_) => String::new()"),
         "B62 FAIL 读取失败时应返回空串（不是 panic）"
     );
 
-    // 反向：core.rs 不得再有第二份读取实现（统一到 bounded 后应为零）
+    // ② Windows 解码必须由码页驱动，且不得硬编码单一语言
+    let w = b
+        .find("#[cfg(windows)]\nfn decode_console")
+        .expect("B62 FAIL 缺少 Windows 解码实现");
+    let wbody = &b[w..(w + 2600).min(b.len())];
+    assert!(
+        wbody.contains("MultiByteToWideChar"),
+        "B62 FAIL 未让操作系统做 MBCS→UTF-16（硬编码码页会漏掉繁体/俄语）"
+    );
+    assert!(
+        wbody.contains("GetConsoleOutputCP") && wbody.contains("GetOEMCP"),
+        "B62 FAIL 未查询控制台输出码页（GUI 子系统无控制台时必须回退 OEM 码页）"
+    );
+    assert!(
+        wbody.contains("std::str::from_utf8"),
+        "B62 FAIL 缺少 UTF-8 直通分支（node/npm 的 UTF-8 输出不得被二次转换）"
+    );
+
+    // ③ 反向：core.rs 不得再有第二份读取实现（统一到 bounded 后应为零）
     assert!(
         !c.contains("fn read_log"),
         "B62 FAIL core.rs 仍有自己的 read_log（应统一到 bounded.rs）"
     );
-    // 时间戳的唯一性由 bounded.rs 的 as_nanos 保证（core 已委托）
+    // ④ 时间戳的唯一性由 bounded.rs 的 as_nanos 保证（core 已委托）
     assert!(
         b.contains("as_nanos()"),
         "B62 FAIL bounded.rs 临时文件名未用纳秒（并发会撞名）"
     );
-    eprintln!("B62 PASS subprocess diagnostics survive non-UTF-8; temp names unique");
+    eprintln!("B62 PASS console decoding is codepage-driven at one point; temp names unique");
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// B65：子进程失败的文案只有**一处**渲染（2026-09-21，与 ExecRecord 同批）。
+//
+// 缺陷：`退出码 {}` 这类文案曾在 4 个文件各写一遍（bounded / core / runtime_contract /
+//   platform-windows），措辞互不一致（"killed" / "超时被终止" / 裸数字），
+//   而且**一律不带命令原文** —— 于是「schtasks 失败（退出码 1）」就是用户能拿到的全部信息，
+//   分不清是任务不存在、动作路径无效，还是被策略拦截。
+//   收口到 `ExecRecord::failure` 后，命令与参数在 `run()` 内部捕获，调用方无从漏记。
+//
+// 这是负向形态门禁（正向行为在 bounded.rs 的单测里）。
+#[test]
+fn b65_no_ad_hoc_exit_code_rendering_outside_exec_record() {
+    // 允许出现「退出码」字样的文件：bounded.rs（唯一渲染点）与测试自身。
+    let suspects = ["core.rs", "runtime_contract.rs", "platform/windows.rs", "platform/linux.rs",
+                    "platform/macos.rs", "domain/guardctl.rs", "commands/mod.rs"];
+    for rel in suspects {
+        let src = fs::read_to_string(manifest_dir().join("src").join(rel))
+            .unwrap_or_else(|e| panic!("B65 FAIL 读不到 {}: {}", rel, e));
+        // 注释行剔除后再判：文档里**提到**旧文案是允许的（B63 已踩过这个假阳性）。
+        let code_only: String = src
+            .lines()
+            .filter(|l| {
+                let t = l.trim();
+                !(t.starts_with("//") || t.starts_with("///") || t.starts_with("//!"))
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !code_only.contains("退出码"),
+            "B65 FAIL {} 仍在自己拼退出码文案，应改为 ExecRecord::failure / code_label",
+            rel
+        );
+    }
+    eprintln!("B65 PASS exit-code wording confined to ExecRecord");
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -2059,7 +2156,7 @@ fn b63_single_bounded_executor_implementation() {
         "B63 FAIL core::run_command_bounded 未委托给 bounded::run"
     );
 
-    // ③ 不得再定义与 bounded::Output 重复的结构。
+    // ③ 不得再定义与 bounded::ExecRecord 重复的结构。
     //    必须排除注释行：文档里会**提到**该结构名（说明它已删除），
     //      直接 `contains` 会把说明文字当成代码（我第一版就踩了这个假阳性）。
     let code_only: String = c
@@ -2072,7 +2169,7 @@ fn b63_single_bounded_executor_implementation() {
         .join("\n");
     assert!(
         !code_only.contains("struct BoundedOutput"),
-        "B63 FAIL core.rs 仍定义 BoundedOutput（与 bounded::Output 重复）"
+        "B63 FAIL core.rs 仍定义 BoundedOutput（与 bounded::ExecRecord 重复）"
     );
 
     // ④ 反向：bounded.rs 必须仍是那**唯一**一份（含 stdin/null + prepare + nanos）

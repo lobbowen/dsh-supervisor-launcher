@@ -186,54 +186,65 @@ pub fn probe_npm_usable(node: &Path, bin_dir: &Path) -> Result<NpmUsable, String
         Some(x) => x,
         None => return Err(npm_search_summary(bin_dir)),
     };
-    let version = run_version_probe(&path, &args)
-        .map_err(|why| format!("{} 执行 --version 未成功：{}", path.display(), why))?;
+    let version = run_npm_line(&path, &args, &["--version"])
+        .map_err(|why| format!("{}：{}", path.display(), why))?;
     Ok(NpmUsable { path, args, version })
 }
 
 /// npm 探针的时间上限（首启冷启动也够用）；超时即判不可用，绝不无限等。
 const NPM_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
 
-/// 执行 `<prog> [args...] --version` 并取首个非空行；失败原因如实返回（供面板与安装文案）。
+/// 执行 `<prog> <args…> <tail…>` 并取首个非空行；失败原因如实返回（供面板与安装文案）。
 ///
-/// 关键不变量（Windows 实测根因，2026-09-21）：**探针与消费者必须是同一条 spawn 路径**。
+/// 关键不变量（Windows 实测根因，2026-09-21）：**探针与消费者必须是同一条 spawn 路径**（T-10）。
 ///   旧实现在平台层把 `.cmd` 经 `cmd /C` 包装后执行，于是探针报「npm 可用」，
 ///   而真正的消费者（core.rs 的 `npm install -g`、`npm prefix -g`）用 `Command::new(prog)`
 ///   直接拉起同一个 `.cmd` —— CreateProcessW 认不了它，安装内核那一步必失败。
 ///   包装本身是胶水：它把一个「本平台不可直接执行」的事实藏成了探针成功。
 ///   现由 `Platform::is_directly_spawnable` 在**选择程序**时就排除这类垫片，
 ///   探针因此不再需要任何平台分支（G1：平台知识只在 platform/）。
-fn run_version_probe(prog: &Path, args: &[String]) -> Result<String, String> {
+///
+/// 为什么是公共口：`--version`（可用性探针）与 `prefix -g`（前缀探针，见 domain::probes）
+///   各写一遍 `Command::new` 时，就会出现「只在其中一个调用点上复现」的缺陷 —— 上面那次即是。
+/// 输出侧一律取首个非空行：npm 在 Windows 上可能先吐空行，有效输出总在第一条非空行。
+pub fn run_npm_line(prog: &Path, args: &[String], tail: &[&str]) -> Result<String, String> {
     let mut cmd = std::process::Command::new(prog);
-    cmd.args(args).arg("--version");
-    let out = crate::bounded::run(&mut cmd, NPM_PROBE_TIMEOUT).map_err(|e| format!("启动失败 {}", e))?;
+    cmd.args(args).args(tail);
+    // 失败文案一律由 `ExecRecord` 渲染（命令原文与超时/退出码都在其中），
+    //   本函数不再自己拼「退出码 N」——那正是同一个事实在四处各写一遍的开始。
+    let out = crate::bounded::run(&mut cmd, NPM_PROBE_TIMEOUT)?;
     if !out.success {
-        return Err(format!(
-            "退出码 {}；{}",
-            out.code.unwrap_or_else(|| "超时被终止".into()),
-            if out.stderr.trim().is_empty() { "无 stderr" } else { out.stderr.trim() }
-        ));
+        return Err(out.failure(&format!("npm {} 探针未通过", tail.join(" "))));
     }
     out.stdout
         .lines()
         .map(str::trim)
         .find(|l| !l.is_empty())
         .map(String::from)
-        .ok_or_else(|| "执行成功但没有版本输出".to_string())
+        .ok_or_else(|| format!("npm {} 执行成功但没有任何输出", tail.join(" ")))
+}
+
+/// 由**本轮真实探测结论**组装运行期契约（`NodeRuntime` 的唯一组装点）。
+///
+/// 为什么单独成函数：`node_status` 每 400ms 落一次契约，原先它调 `derive_usable`，
+///   而 `derive_usable` 内部还要再执行一次 npm —— 同一次轮询里 npm 被跑了两遍
+///   （一遍给面板判 npmOk，一遍给契约）。探针结论现在只有一份，契约从它直接组装。
+pub fn usable_runtime(node: &Path, version: &str, npm: &NpmUsable) -> Option<NodeRuntime> {
+    Some(NodeRuntime {
+        node: node.to_path_buf(),
+        node_bin_dir: node.parent()?.to_path_buf(),
+        npm: npm.path.clone(),
+        npm_prefix: npm.args.clone(),
+        version: version.to_string(),
+        npm_version: Some(npm.version.clone()),
+    })
 }
 
 /// 由 Node 路径 + 版本推导**可用**的 NodeRuntime（npm 必须真实可执行，否则 None）。
 pub fn derive_usable(node: &Path, version: &str) -> Option<NodeRuntime> {
-    let bin_dir = node.parent()?.to_path_buf();
-    let u = probe_npm_usable(node, &bin_dir).ok()?;
-    Some(NodeRuntime {
-        node: node.to_path_buf(),
-        node_bin_dir: bin_dir,
-        npm: u.path,
-        npm_prefix: u.args,
-        version: version.to_string(),
-        npm_version: Some(u.version),
-    })
+    let bin_dir = node.parent()?;
+    let u = probe_npm_usable(node, bin_dir).ok()?;
+    usable_runtime(node, version, &u)
 }
 
 /// 契约的 JSON 形态。**写与读共用这一处键映射**：两处各列一遍键名，历史上就出现过

@@ -19,22 +19,17 @@ use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-/// 单个候选的探测记录（诊断用）。
-#[derive(Clone)]
-pub struct TraceEntry {
-    pub source: String,
-    pub path: String,
-    pub ms: u128,
-    pub ok: bool,
-    pub note: String,
-}
+use crate::domain::probes::{Probe, Record};
 
 /// 一次探测的结论。
+///
+/// `records` 只有 `Probe::Node` 一个维度：npm / registry / prefix 是它的**下游**，
+///   由 `domain::probes::dependents` 在同一份命令输出里补齐（那里按 TTL 复用缓存）。
 #[derive(Clone)]
 pub struct Outcome {
     pub path: Option<PathBuf>,
     pub version: Option<String>,
-    pub trace: Vec<TraceEntry>,
+    pub records: Vec<Record>,
     pub elapsed_ms: u128,
     /// true = 本次探测已结束（成功或明确失败）；false = 仍在进行（phase 快照）。
     pub finished: bool,
@@ -44,7 +39,7 @@ pub struct Outcome {
 
 struct Live {
     current: Option<(String, Instant)>,
-    done: Vec<TraceEntry>,
+    done: Vec<Record>,
     summary: String,
 }
 
@@ -67,7 +62,7 @@ fn stage(desc: &str) {
     }
 }
 
-fn finish(entry: TraceEntry) {
+fn finish(entry: Record) {
     if let Ok(mut l) = live().lock() {
         l.current = None;
         l.done.push(entry);
@@ -80,7 +75,7 @@ fn set_summary(s: String) {
     }
 }
 
-fn snapshot() -> Vec<TraceEntry> {
+fn snapshot() -> Vec<Record> {
     match live().lock() {
         Ok(l) => l.done.clone(),
         Err(e) => e.into_inner().done.clone(),
@@ -157,32 +152,34 @@ pub fn invalidate() {
 
 /// 阶段快照（探测未完成，但尚未到硬上限）。
 pub fn partial() -> Outcome {
-    let mut trace = snapshot();
+    let mut records = snapshot();
     if let Some((desc, ms)) = current_stuck() {
-        trace.push(TraceEntry {
-            source: "进行中".to_string(),
-            path: desc,
+        // 在飞的步骤记 `ok = None`（未知），不是失败：把它算进失败候选数会让
+        // 「还有一个候选没试完」看起来像「这个候选坏了」。
+        records.push(Record::pending(
+            Probe::Node,
+            "进行中",
+            desc,
             ms,
-            ok: false,
-            note: "该步骤尚未返回（若为 I/O 步骤，可能被系统调用阻塞）".to_string(),
-        });
+            "该步骤尚未返回（若为 I/O 步骤，可能被系统调用阻塞）",
+        ));
     }
-    Outcome { path: None, version: None, trace, elapsed_ms: 0, finished: false, error: None }
+    Outcome { path: None, version: None, records, elapsed_ms: 0, finished: false, error: None }
 }
 
-/// 明确失败（带原因与已收集的追踪）。
+/// 明确失败（带原因与已收集的记录）。
 fn failed(reason: String, elapsed_ms: u128) -> Outcome {
-    let mut trace = snapshot();
+    let mut records = snapshot();
     if let Some((desc, ms)) = current_stuck() {
-        trace.push(TraceEntry {
-            source: "卡住".to_string(),
-            path: desc.clone(),
+        records.push(Record::pending(
+            Probe::Node,
+            "卡住",
+            desc.clone(),
             ms,
-            ok: false,
-            note: format!("该步骤已 {} ms 无响应", ms),
-        });
+            &format!("该步骤已 {} ms 无响应", ms),
+        ));
     }
-    Outcome { path: None, version: None, trace, elapsed_ms, finished: true, error: Some(reason) }
+    Outcome { path: None, version: None, records, elapsed_ms, finished: true, error: Some(reason) }
 }
 
 /// 取探测结论，**绝不阻塞超过 budget**。
@@ -315,7 +312,7 @@ pub fn resolve(budget: Duration) -> Option<(PathBuf, String)> {
 }
 
 /// 探测**代际**：每次新建 worker 自增。worker 回写诊断前比对代际，
-/// 保证「已作废的旧 worker」不会把 trace 写进新一轮探测（防诊断串被污染）。
+/// 保证「已作废的旧 worker」不会把记录写进新一轮探测（防诊断串被污染）。
 static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// 已被**作废但尚未退出**的 worker 数量（不可回收的线程）。
@@ -324,7 +321,7 @@ static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::
 ///   而 worker 一旦卡在无界阻塞系统调用，**线程本身无法回收**。
 ///   原实现在硬上限时把状态置回 Idle —— 于是用户**每点一次「重试」就多一条永不退出的线程**
 ///   （每条约 2MB 栈），与 `commands/mod.rs` 声称的「不会堆积线程」相反；
-///   且旧 worker 若稍后解除阻塞，还会经全局 live() 把 trace 写进**新一轮**探测（污染诊断串）。
+///   且旧 worker 若稍后解除阻塞，还会经全局 live() 把记录写进**新一轮**探测（污染诊断串）。
 ///   修法：① 代际作废（见上）防污染；② 计数孤儿并**在孤儿未退出前不再新建 worker**
 ///     （重试会得到明确的「上次探测仍未退出」结论，而不是默默再开一条线程）；
 ///     ③ invalidate() 是显式复位口（安装成功后 / 测试复位）。
@@ -351,7 +348,7 @@ fn spawn_worker(tx: Sender<Outcome>) {
             // 否则线程静默死亡 → 命令只能一直报 probing（这正是前几轮的现象之一）。
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(detect));
             // 代际校验：若本轮已被作废（GENERATION 前进），则**不回写诊断**，
-            // 仅统计孤儿退出，避免污染新一轮的 trace/summary。
+            // 仅统计孤儿退出，避免污染新一轮的记录与候选摘要。
             if GENERATION.load(std::sync::atomic::Ordering::SeqCst) != gen {
                 // 饱和减（invalidate() 可能已把计数清零；绝不能下溢成天文数字）
                 let _ = ORPHANS.fetch_update(
@@ -365,7 +362,7 @@ fn spawn_worker(tx: Sender<Outcome>) {
                 Ok((path, version, err)) => Outcome {
                     path,
                     version,
-                    trace: snapshot(),
+                    records: snapshot(),
                     elapsed_ms: started.elapsed().as_millis(),
                     finished: true,
                     error: err,
@@ -373,7 +370,7 @@ fn spawn_worker(tx: Sender<Outcome>) {
                 Err(_) => Outcome {
                     path: None,
                     version: None,
-                    trace: snapshot(),
+                    records: snapshot(),
                     elapsed_ms: started.elapsed().as_millis(),
                     finished: true,
                     error: Some("探测过程内部异常（已捕获，未静默）".to_string()),
@@ -404,7 +401,7 @@ fn detect() -> (Option<PathBuf>, Option<String>, Option<String>) {
     #[cfg(test)]
     if HANG_IN_ENUMERATE.load(std::sync::atomic::Ordering::Relaxed) {
         // 精确复刻线上故障：卡在枚举阶段。
-        // 若此处不 stage，诊断串里 summary/stuck/trace 三项会同时为空 ——
+        // 若此处不 stage，诊断串里候选摘要 / 卡住阶段 / 探测记录会同时为空 ——
         // 即用户看到的「卡住且不报错、也没有任何线索」。
         stage("测试：模拟枚举阶段永久阻塞");
         std::thread::sleep(Duration::from_secs(10));
@@ -463,40 +460,37 @@ fn detect() -> (Option<PathBuf>, Option<String>, Option<String>) {
     (None, None, None)
 }
 
-/// 探测单个候选：stage → 可用性判定 → 执行取版本 → 落追踪。返回版本（成功时）。
+/// 探测单个候选：stage → 可用性判定 → 执行取版本 → 落一条 `Probe::Node` 记录。返回版本（成功时）。
 fn try_probe(source: &str, cand: &Path) -> Option<String> {
     let p = cand.to_string_lossy().to_string();
     stage(&format!("探测候选 {}（{}）", source, p));
     let t0 = Instant::now();
+    let ms = || t0.elapsed().as_millis();
     if !crate::env::is_usable_candidate(cand) {
-        finish(TraceEntry {
-            source: source.to_string(),
-            path: p,
-            ms: t0.elapsed().as_millis(),
-            ok: false,
-            note: "不可用（不存在 / 应用别名存根 / 空文件）".to_string(),
-        });
+        finish(Record::new(
+            Probe::Node,
+            source,
+            p,
+            ms(),
+            Some(false),
+            "不可用（不存在 / 应用别名存根 / 空文件）",
+        ));
         return None;
     }
     match crate::env::node_version(cand) {
         Some(v) => {
-            finish(TraceEntry {
-                source: source.to_string(),
-                path: p,
-                ms: t0.elapsed().as_millis(),
-                ok: true,
-                note: v.clone(),
-            });
+            finish(Record::new(Probe::Node, source, p, ms(), Some(true), v.clone()));
             Some(v)
         }
         None => {
-            finish(TraceEntry {
-                source: source.to_string(),
-                path: p,
-                ms: t0.elapsed().as_millis(),
-                ok: false,
-                note: "无响应或不是有效 Node（已按上限终止）".to_string(),
-            });
+            finish(Record::new(
+                Probe::Node,
+                source,
+                p,
+                ms(),
+                Some(false),
+                "无响应或不是有效 Node（已按上限终止）",
+            ));
             None
         }
     }
@@ -552,7 +546,7 @@ mod tests {
     /// 核心性质：**枚举阶段永久阻塞时，必须给出带阶段信息的明确结论**。
     ///
     /// 这直接对应线上故障：卡在枚举（GetDriveTypeW / read_dir），
-    /// 而 summary / stuck / trace 三项全空 —— 用户只看到「卡住且不报错」。
+    /// 而候选摘要 / 卡住阶段 / 探测记录全空 —— 用户只看到「卡住且不报错」。
     #[test]
     fn hard_deadline_yields_actionable_failure_when_enumeration_hangs() {
         let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
@@ -582,7 +576,11 @@ mod tests {
         let err = last.error.clone().expect("明确失败必须带原因");
         assert!(err.contains("未完成"), "原因应说明超限: {}", err);
         assert!(err.contains("模拟枚举"), "原因必须包含卡住的阶段: {}", err);
-        assert!(!last.trace.is_empty(), "追踪不应为空（诊断串要用）");
+        assert!(!last.records.is_empty(), "记录不应为空（诊断串要用）");
+        assert!(
+            last.records.iter().any(|r| r.ok.is_none()),
+            "卡住的那一步必须以「未知」形态留在记录里（否则无从排障）"
+        );
 
         set_hang_in_enumerate(false);
         set_hard_deadline_ms(25_000);
@@ -650,13 +648,4 @@ mod tests {
         assert!(out.error.is_none(), "正常探测不应报错: {:?}", out.error);
         invalidate();
     }
-}
-
-/// 把追踪渲染为多行文本（诊断 / CLI 自检用）。
-pub fn render_trace(trace: &[TraceEntry]) -> String {
-    let mut s = String::new();
-    for e in trace {
-        s.push_str(&format!("  [{}] {} {} ms ok={} {}\n", e.source, e.path, e.ms, e.ok, e.note));
-    }
-    s
 }

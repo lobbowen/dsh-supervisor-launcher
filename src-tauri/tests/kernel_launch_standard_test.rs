@@ -1,12 +1,24 @@
-//! 内核启动规范门禁（K-1..K-6；docs/KERNEL-LAUNCH-STANDARD.md）—— 2026-09-15。
+//! 内核启动规范门禁（K-1..K-13；docs/KERNEL-LAUNCH-STANDARD.md §6）—— 2026-09-15 起累积。
 //!
 //! 锁定 P0–P6 的**规范骨架**，防止回退成「按 PATH 猜位置 / 不对齐就启动 / 平台各自为政」：
 //!   K-1  core.json 位置契约存在、schema=1、原子写、字段齐全
 //!   K-2  locate 先读 core.json，再由 runtime.json 派生 nodeBinDir（反向判据非空转）
-//!   K-3  guardctl 有对齐解析；ensure_guard **先对齐后启动**（顺序断言）
+//!   K-3  ensure_guard **先对齐后启动**；且「服务定义未建立 ⇒ 不请求服务管理器启动」
+//!        在结构上成立（出边只在建定义成功的分支里）
 //!   K-4  四平台服务实现同构（node+PATH+daemon）；trait 有 prefix 候选且 Windows 覆写
 //!   K-5  就绪只认契约端口（current_api_port = ports.json 实际值优先）
 //!   K-6  平台分支只在 platform/（core.json 读取不得引入平台分支）
+//!   K-7  Windows 看护任务的所有者 = 壳（只锁任务，形态判据在 K-13）
+//!   K-8  产品状态根独立于 DSH（XDG），且与内核 state-root.js 握手
+//!   K-9  状态根随启动注入（LaunchSpec 单一事实源，防壳/内核各自推导分叉）
+//!   K-10 Windows 稳定入口 + 按命令行精确杀守卫
+//!   K-11 交给外部工具的路径**只有一处**规范化实现、壳自身路径**只有一处**入口（2026-09-21 B2）
+//!   K-12 守卫子进程的输出**永不丢弃**（统一落 guard.log）
+//!   K-13 看护（watchdog）的存活判据与拉起序列**各只有一处实现**：判据 = `guardctl::ready`、
+//!        动作 = `guardctl::ensure_started`；看护脚本不以内嵌 PowerShell 存在（2026-09-21 B3b）
+//!
+//! 注意命名：`kernel_install_evidence_test.rs` 另有一套**同号不同义**的 K-1..K-8
+//!   （安装证据侧）；跨文件引用本套判据时必须带文件名。
 //!
 //! 静态源码断言（与 platform_launch_contract / bootstrap_flow 同一惯例）。
 
@@ -63,21 +75,83 @@ fn covers_contract(src: &str) -> bool {
     has_all(src, &["crate::core_contract::read()", "crate::runtime_contract::read_node()", "node_bin_dir.join(name)"]).is_empty()
 }
 
-// ── K-3：先对齐后启动 ──
+// ── K-3：先对齐后启动 + **定义失败关闭 P5 出边**（阶段产物化）──
+//
+// 2026-09-21 改：顺序断言从「全文件字符串位置」改为**函数体切片**，因为
+//   `ensure_defined` 与 `start` 现已收进 `ServiceAttempt::define_and_start`（同一职责
+//   只有一个所有者），文件级位置比较会因函数摆放顺序而误判。更关键的是新增断言：
+//   **start 只能出现在定义成功的分支里** —— 旧实现无论定义成败都照样 `/Run`，于是真机
+//   报错只剩「退出码 1」，而「定义环节到底有没有成」在报错里完全看不见（H8 的反例）。
 #[test]
-fn k3_align_before_start() {
+fn k3_align_before_start_and_define_failure_closes_start_edge() {
     let src = read("src/domain/guardctl.rs");
     let missing = has_all(&src, &[
         "enum AlignOutcome",
         "fn resolve_aligned",
         "KERNEL_NOT_ALIGNED",
         "ALIGN_RESOLVE_FAILED",
+        // P4/P5 的阶段产物（H8 的载体）
+        "struct ServiceAttempt",
+        "fn define_and_start",
+        "fn evidence",
     ]);
-    assert!(missing.is_empty(), "K-3 失败：对齐解析缺失 {:?}", missing);
-    let align = src.find("resolve_aligned(app)").expect("K-3 未调用 resolve_aligned");
-    let define = src.find("ensure_defined(&spec)").expect("K-3 未建服务定义");
-    let start = src.find("service().start()").expect("K-3 未启动");
-    assert!(align < define && define < start, "K-3 失败：ensure_guard 未按「对齐 → 定义 → 启动」顺序");
+    assert!(missing.is_empty(), "K-3 失败：对齐解析/阶段产物缺失 {:?}", missing);
+
+    // ensure_guard 体内：对齐 → 建规格 → 进启动序列（顺序）。
+    // 主路径的建规格点取**最后一次**出现：「守卫已活」的提前返回分支里也有一次
+    // `LaunchSpec::from_runtime(&rt_wd, ..)`，它按设计排在对齐之前（不参与启动）。
+    let body = fn_slice(&src, "pub(crate) fn ensure_guard", "pub(crate) fn ensure_started");
+    let align = body.find("resolve_aligned(app)").expect("K-3 失败：ensure_guard 未做版本对齐");
+    let spec = body.rfind("LaunchSpec::from_runtime").expect("K-3 失败：ensure_guard 未建启动规格");
+    let started = body.find("ensure_started(&spec").expect("K-3 失败：ensure_guard 未进启动序列");
+    assert!(align < spec && spec < started, "K-3 失败：ensure_guard 未按「对齐 → 建规格 → 启动序列」顺序");
+    // 反空转：切片必须真的停在启动序列 **之前**（越界则顺序判据漂到别的函数里凑符号）。
+    assert!(!body.contains("ServiceAttempt::define_and_start("), "K-3：ensure_guard 切片越界，已进入启动序列本体");
+    // 序列本体（GUI 与无头看护共用这一份）：定义 → 就绪 → 兜底，且证据进 LaunchError。
+    let seq = fn_slice(&src, "pub(crate) fn ensure_started", "const SERVICE_READY_BUDGET");
+    let define = seq
+        .find("ServiceAttempt::define_and_start(spec")
+        .expect("K-3 失败：启动序列未走服务管理器路径");
+    let evidence = seq.find("attempt.evidence()").expect("K-3 失败：阶段证据未进入 LaunchError");
+    assert!(define < evidence, "K-3 失败：证据取自尚未产生它的阶段");
+    assert!(seq.contains("spawn_daemon") && seq.contains("READY_TIMEOUT"),
+        "K-3 失败：启动序列缺兜底或缺兜底后的就绪判定");
+
+    // 阶段产物体内：start **只能**出现在 defined 为 Ok 的分支里。
+    let run = fn_slice(&src, "fn define_and_start", "fn start_requested");
+    let start_at = run.find("service().start()").expect("K-3 失败：阶段产物内未请求启动");
+    let before = &run[..start_at];
+    assert!(
+        before.contains("Ok(_) => {") && run.contains("Err(_) => None"),
+        "K-3 失败：start 未收在「定义成功」分支内（定义失败仍可能请求启动）"
+    );
+    // 反向：切片必须真的落在 define_and_start 内（否则会漂到 evidence() 里去凑符号）。
+    assert!(!before.contains("fn evidence("), "K-3：切片越界，判据恒真");
+}
+
+/// 取 `[head, next)` 这段源码（`next` 是**下一个**函数签名，用于切边）。
+///
+/// 为什么按「下一个函数签名」而不是大括号配对：Rust 源码的字符串与注释里会出现 `}`，
+/// 朴素配对在中文文本上极易失配（本仓踩过一次）。切边由调用方显式给出，
+/// 因此每个调用点都能另外断言「切片不得越界」，避免判据漂到相邻函数里凑符号。
+fn fn_slice(src: &str, head: &str, next: &str) -> &str {
+    let a = src.find(head).unwrap_or_else(|| panic!("未找到 {}", head));
+    let b = src[a + head.len()..]
+        .find(next)
+        .map(|i| a + head.len() + i)
+        .unwrap_or(src.len());
+    &src[a..b]
+}
+
+/// 只留代码（剥掉整行注释）后的文本。
+///
+/// 「旧形态不许回来」这类反向判据必须在剥注释之后跑：解释**为什么**删掉它的注释里
+///   合法地出现旧形态的名字，否则门禁会逼着注释回避历史教训（B63/B65 同一惯例）。
+fn code_only(src: &str) -> String {
+    src.lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 // ── K-4：三平台服务定义同构（统一稳定入口）+ prefix 候选 trait ──
@@ -141,7 +215,6 @@ fn k7_windows_watchdog_owned_by_shell() {
     let missing = has_all(&src, &[
         "fn ensure_watchdog",
         "WATCHDOG_TASK",
-        "fn watchdog_script",
         "\"/TN\", WATCHDOG_TASK",
         "\"MINUTE\"",
     ]);
@@ -205,7 +278,9 @@ fn k8_reverse_not_vacuous() {
 fn k9_state_root_injected_into_launch() {
     let m = read("src/platform/mod.rs");
     assert!(m.contains("pub state_root: std::path::PathBuf"), "K-9 失败：LaunchSpec 缺 state_root");
-    assert!(m.contains("state_root: crate::env::state_root()"), "K-9 失败：未从壳解析状态根");
+    // 构造即规范化（2026-09-21 B2）：状态根也要过外部路径规范化，否则 Windows 上
+    //   注入给内核的 DSH_SUPERVISOR_HOME 可能带 verbatim 前缀，内核读不到契约 → 永远拉不起来。
+    assert!(m.contains("state_root: external_path(&crate::env::state_root())"), "K-9 失败：未从壳解析并规范化状态根");
     // 注入点：exec_guard（--run-guard）与 spawn_daemon（trait 默认）都必须携带 DSH_SUPERVISOR_HOME。
     assert!(m.contains("DSH_SUPERVISOR_HOME"), "K-9 失败：exec_guard 未注入状态根");
     let svc = read("src/platform/service.rs");
@@ -239,4 +314,126 @@ fn k10_windows_stable_entry_and_kill_correct() {
         "K-10 失败：windows.rs 服务定义仍引用 node/guard 绝对路径"
     );
     assert!(!src.contains("\"/IM\", \"dsh-supervisor.exe\""), "K-10 失败：仍按 dsh-supervisor.exe 杀进程（守卫是 node.exe，杀不掉）");
+}
+
+// ── K-11：交给外部工具的路径**只有一处规范化**，壳自身路径**只有一处入口 ──
+//
+// 2026-09-21（B2）。真机链条：`LaunchSpec` 的 shell 字段曾是
+//   `std::env::current_exe().unwrap_or_default()` —— 取不到时得到**空路径**并原样写进
+//   服务定义；而 Windows 取到时又带 `\\?\` verbatim 前缀。同一时期仓里有**两份规则不同**
+//   的剥前缀实现（core.rs 与 coreloc.rs），于是「同一条路径」在两条代码路径上形态不同。
+//   本门禁钉的正是这两件事：**只允许一个实现、只允许一个入口**。
+#[test]
+fn k11_path_normalization_and_self_exe_have_single_home() {
+    let m = read("src/platform/mod.rs");
+    assert!(m.contains("pub fn external_path"), "K-11 失败：缺唯一的路径规范化实现");
+    assert!(m.contains("pub fn self_exe"), "K-11 失败：缺唯一的壳自身路径入口");
+    assert!(m.contains("shell: self_exe()?"), "K-11 失败：LaunchSpec 未走 self_exe（可能退回静默空路径）");
+    // 构造即规范化：四个路径字段全部过 external_path（漏一个 = 该平台上悄悄拉不起来）。
+    let from = fn_slice(&m, "pub fn from_runtime", "fn service_command");
+    for field in ["node: external_path(", "guard: external_path(", "state_root: external_path("] {
+        assert!(from.contains(field), "K-11 失败：from_runtime 未规范化 {}", field);
+    }
+    // 反向（旧形态必须被判违规）：第二份剥前缀实现、以及 `unwrap_or_default()` 取壳路径。
+    let old = "fn simplify(p: PathBuf) -> PathBuf { ... }\nshell: std::env::current_exe().unwrap_or_default(),";
+    assert!(
+        old.contains("unwrap_or_default") && !old.contains("self_exe"),
+        "K-11 反向失败：判据无法识别旧的静默空路径形态"
+    );
+    for f in ["src/core.rs", "src/domain/coreloc.rs", "src/platform/windows.rs", "src/platform/linux.rs", "src/platform/macos.rs"] {
+        let s = read(f);
+        for banned in ["fn strip_verbatim", "fn simplify(", "current_exe("] {
+            assert!(!s.contains(banned), "K-11 失败：{} 仍有第二份实现/绕过入口（{}）", f, banned);
+        }
+    }
+}
+
+// ── K-12：守卫子进程的输出不得丢弃（证据通道单一实现）──
+//
+// 与 B1（`ExecRecord` 收口）同一类缺陷的另一半：B1 管「等得到的输出」，
+//   分离拉起的子进程没有「等待」，它的 stderr 只有落盘才存在。
+//   旧实现在 3 处写 `Stdio::null()`，于是 READY_TIMEOUT 永远只能报「超时」两个字。
+#[test]
+fn k12_guard_child_output_is_never_discarded() {
+    let m = read("src/platform/mod.rs");
+    let svc = read("src/platform/service.rs");
+    assert!(m.contains("pub fn guard_stdio"), "K-12 失败：缺统一的守卫标准流装配点");
+    assert!(m.contains("fn guard_stdio_streams"), "K-12 失败：日志→流的映射未独立成可测函数");
+    assert!(svc.contains("guard_stdio(&mut cmd)"), "K-12 失败：spawn 兜底未走 guard_stdio");
+    // 两条 exec_guard 分支（unix/windows）都要接管输出。
+    let unix_body = fn_slice(&m, "#[cfg(unix)]\npub fn exec_guard", "#[cfg(windows)]");
+    let win_body = fn_slice(&m, "#[cfg(windows)]\npub fn exec_guard", "pub trait Platform");
+    for (name, body) in [("exec_guard(unix)", unix_body), ("exec_guard(windows)", win_body)] {
+        assert!(body.contains("guard_stdio(&mut cmd)"), "K-12 失败：{} 未接管守卫标准流", name);
+        assert!(!body.contains("Stdio::null()"), "K-12 失败：{} 仍直接丢弃守卫输出", name);
+    }
+    // 反向：旧形态（三条 null）必须被判违规。
+    let old = ".stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())";
+    assert!(old.contains("Stdio::null()") && !old.contains("guard_stdio"), "K-12 反向失败：判据空转");
+    // 落点单一：日志文件路径只在 update.rs 定义一次，且报错能指名它。
+    assert!(read("src/update.rs").contains("pub fn guard_log_path"), "K-12 失败：守卫日志落点未单一定义");
+    assert!(
+        read("src/domain/guardctl.rs").contains("guard_log_path()"),
+        "K-12 失败：READY_TIMEOUT 未把证据落点写进报错"
+    );
+}
+
+// ── K-13：看护的存活判据与拉起序列各只有一处实现（2026-09-21 B3b）──
+//
+// 旧形态把检测写成 windows.rs 里内嵌的 PowerShell：`Test-NetConnection` 只看 TCP 端口
+//   （端口被占但服务没起 = 判为活着），再自己 `Start-Process` 补拉 —— 与 GUI 启动路径并列的
+//   第二套判据、第二套动作。现在：判据 = `guardctl::ready()`（H6），动作 = `guardctl::ensure_started()`
+//   （与 GUI 启动逐字同一段 P4→P6）。GUI 自愈不在本仓：所有者是守卫（内核 domains/shell），
+//   壳监督不了自己 —— 它的监督者会随它一起死。
+#[test]
+fn k13_watchdog_shares_readiness_and_launch_sequence() {
+    let win = read("src/platform/windows.rs");
+    // 任务动作指向稳定入口的无头模式，且 /TR 引号仍走单源装配。
+    assert!(
+        win.contains("pub const WATCHDOG_ARGS: &[&str] = &[\"--watchdog\"]"),
+        "K-13 失败：看护任务未指向壳的无头入口"
+    );
+    let wd = fn_slice(&win, "fn ensure_watchdog", "impl ServiceControl for Impl");
+    assert!(wd.contains("service_exec_line(shell, args)"), "K-13 失败：看护任务另写了一份 /TR 引号规则");
+    // 升级后旧脚本必须就地清掉（否则留下无人维护的第二实现残骸）。
+    assert!(wd.contains("remove_file"), "K-13 失败：未清理历史 watchdog.ps1");
+    let wd_code = code_only(&wd);
+    for banned in ["powershell", "Start-Process", "Test-NetConnection"] {
+        assert!(!wd_code.contains(banned), "K-13 失败：看护任务代码里仍有 {}", banned);
+    }
+    // 反向判据在**整个文件**的代码上跑（Get-CimInstance 例外：stop() 按命令行精确杀守卫是 K-10 的合法能力）。
+    let win_code = code_only(&win);
+    assert!(!win_code.contains("fn watchdog_script"), "K-13 失败：内嵌看护脚本未删除");
+    assert!(!win_code.contains("Test-NetConnection"), "K-13 失败：Windows 自带第二套端口判据");
+
+    // 无头入口：判据与序列都取自 guardctl，且不碰版本对齐（对齐属 GUI 引导页）。
+    let cli = read("src/domain/cli.rs");
+    let body = fn_slice(&cli, "pub(crate) fn cli_watchdog", "const WATCHDOG_PROBE_TIMEOUT");
+    assert!(
+        has_all(body, &[
+            "guardctl::ready(",
+            "Readiness::Ready",
+            "guardctl::resolve_local(None)",
+            "LaunchSpec::from_runtime",
+            "guardctl::ensure_started(&spec",
+        ]).is_empty(),
+        "K-13 失败：看护入口未复用单一判据/单一启动序列"
+    );
+    for banned in ["TcpStream", "ensure_guard(", "resolve_aligned", "Stdio::", "Command::new"] {
+        assert!(!body.contains(banned), "K-13 失败：看护入口自己实现了 {}", banned);
+    }
+    let main = read("src/main.rs");
+    assert!(main.contains("a == \"--watchdog\"") && main.contains("domain::cli::cli_watchdog()"),
+        "K-13 失败：--watchdog 未在 Tauri 初始化之前分派");
+    // 启动序列只有一份：ensure_guard 委托，兜底动作不在它体内重复出现。
+    let g = read("src/domain/guardctl.rs");
+    let guard_body = fn_slice(&g, "pub(crate) fn ensure_guard", "pub(crate) fn ensure_started");
+    assert!(guard_body.contains("ensure_started(&spec, &step)"), "K-13 失败：GUI 启动未委托共享序列");
+    assert!(!guard_body.contains("spawn_daemon"), "K-13 失败：拉起动作在 ensure_guard 里重复了一份");
+    assert_eq!(g.matches(".spawn_daemon(").count(), 1, "K-13 失败：兜底 spawn 的调用点不止一处");
+
+    // 反向：旧脚本形态必须判为违规（证明上面的 banned 不是空转）。
+    let old = "fn watchdog_script(spec: &LaunchSpec) -> String {\n  \"$up = Test-NetConnection -Port $port; Start-Process $shell\"\n}";
+    assert!(code_only(old).contains("Test-NetConnection") && !code_only(old).contains("service_exec_line"),
+        "K-13 反向失败：判据空转");
 }

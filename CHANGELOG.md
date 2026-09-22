@@ -2,6 +2,279 @@
 
 本文件记录桌面壳（`dsh-supervisor-gui`，公开仓 `lobbowen/dsh-supervisor-launcher`）的重要变更。
 
+## [未发布]
+
+### 子进程真话恢复可读：码页解码收口为一点，失败文案收口为一条记录（B1）
+
+现场（用户 Windows 真机）：`守卫启动超时…服务管理器错误：schtasks /Run 失败（退出码 1）：<乱码>`。
+乱码形态（`锟斤拷` 连排）说明原文是**GBK 系的中文控制台消息**被按 UTF-8 做 lossy 的产物；
+具体字串已不可恢复，但它是整条启动链上**唯一**能指向根因的一句话——修复后它才会第一次被人读到。
+
+- **根因不是"详情丢了"，是"详情被毁容"**。2026-09-12 那次「GBK 修复」用 `String::from_utf8_lossy`
+  解决了「非 UTF-8 时详情全丢」，但中文 Windows 控制台程序按 **OEM 码页**（zh-CN=936）写 stderr，
+  按 UTF-8 做 lossy 就把每个双字节换成 U+FFFD。丢字节与丢可读性是同一个缺陷的两半，只补一半等于没修。
+  现 `bounded.rs::decode_console` 为**全仓唯一解码点**：先按 UTF-8 直通（node/npm 本就是 UTF-8），
+  非 UTF-8 才交给操作系统按当前控制台码页做 MBCS→UTF-16（`MultiByteToWideChar`）——
+  对 936/950/437/1251 等任意本地码页同时成立，不把「中文=GBK」写死；仍失败才 lossy 保底不丢字节。
+  零新增依赖（沿用 `platform/windows.rs` 既有裸 `extern "system"` 先例）。
+- **失败文案此前在 4 个文件各拼一遍**（`bounded.rs` / `core.rs` / `runtime_contract.rs` /
+  `platform/windows.rs`），措辞互异（`killed` / `超时被终止` / 裸数字）且**一律不带命令原文**，
+  于是「退出码 1」成为用户与开发者能拿到的全部信息。现 `Output` 升级为 `ExecRecord`：
+  `run()` 内部从 `Command` 捕获 `program`+`args`（调用方无从漏记），`code` 改回 `Option<i32>`，
+  「超时」由 `timed_out` 承载，渲染只有 `failure()` 一处。
+- **超时不再降格成 `Err` 字符串**：原先超时路径 `return Err(format!(...))` 把已拿到的输出与退出状态
+  一起丢掉，调用方分不清「命令不存在」与「命令挂了」——这两件事对用户的可操作结论完全不同。
+  现超时返回 `Ok(ExecRecord { timed_out: true, .. })`；`Err` 只代表「没能跑起来」。
+  全部 17 个 `bounded::run` 调用点均已核实是按 `.success` 判定，行为不变。
+- **门禁跟着改动走**：旧 B62 断言「`read_log` 必须含 `from_utf8_lossy`」——它把上一次的**手段**
+  当成了**不变量**，会把正确的修复判为违规。B62 重做为锁住「采集阶段不得 lossy / Windows 必须问码页 /
+  不得硬编码单一语言」，解码正确性交给 `bounded.rs` 的行为单测（含 `#[cfg(windows)]` 的 GBK 字节回归用例，
+  在 Windows CI leg 执行）；新增 B65 负向门禁，禁止 `platform/`·`domain/`·`commands/` 再出现手写「退出码」文案。
+  G1 白名单理由同步为「进程创建 + 进程输出」两个 infra 原语。
+
+### 启动链收口为「一处归一 / 一处自身路径 / 一处阶段产物 / 一处子进程落点」（B2）
+
+接 B1。B1 让 `schtasks` 的真话第一次可读，但那条真话之所以是**最后**一环，根因在结构里：
+阶段没有产物、路径形态没有单一所有者、兜底子进程的输出被丢掉。本版三件事一起做。
+
+- **路径形态归一为唯一实现 `platform::external_path`**。此前仓里有**两份规则不同**的剥
+  verbatim 前缀实现（`core.rs` 的 str 版：大小写不敏感、含 `\\.\`；`domain/coreloc.rs` 的
+  Path 版：`UNC` 段大小写敏感、无 `\\.\`），同一个 `canonicalize()` 结果经两条路径可得两个
+  字符串，而「外部工具能否执行它」恰好取决于这个字符串。现取两者规则的**并集**落在平台层
+  （路径形态属平台事实，不是业务选择），两份旧实现连同其 5 个私有测试**一并删除**。
+  规则刻意**不带 `#[cfg]`**：写成 `#[cfg(windows)]` 的话 POSIX CI 既编译不到也测不到它 ——
+  那正是两份分叉能长期存活的原因；非 Windows 在此恒等，于是三条 CI 腿跑同一份实现与同一组测试。
+- **壳自身路径归一为唯一入口 `platform::self_exe()`**。三个调用点对同一个失败的处理各不相同：
+  `LaunchSpec::from_runtime` 用 `unwrap_or_default()`（取不到 ⇒ **空路径**原样写进服务定义，
+  事后回读不到当时写的值），另两处把失败咽成 `null`。现签名返回 `Result`：取不到必须报错、
+  取到必须规范。`LaunchSpec` 四个路径字段**构造即归一**（唯一装配点），故三平台的服务定义与
+  spawn 拿到的路径形态一致；装配失败新增 code `LAUNCH_SPEC_FAILED`（规范 §4）。
+- **P4/P5 有了阶段产物 `ServiceAttempt`**，「定义失败 ⇒ 不请求服务管理器启动」从此是**结构**
+  而非注释：`started` 只在 `defined` 为 `Ok` 的分支里赋值（出边关闭），也就不再为一条必然
+  失败的请求空等 30 秒。`evidence()` 的五种阶段结论进 `READY_TIMEOUT` / `SERVICE_START_FAILED`
+  正文（H8），报错从此能说明「走到了哪一步、为什么停在那一步」。
+- **守卫子进程的输出永不丢弃**：`platform::guard_stdio` 是唯一挂流点（兜底 spawn 与两条
+  `exec_guard` 分支共用），输出汇入 `<状态根>/shell/guard.log`（>512KB 截尾保后 256KB，
+  写它的是**子进程**、它不会自己滚动）。原先三处 `Stdio::null()` 删掉；`service.rs` 里重复的
+  `CREATE_NO_WINDOW` 块也删掉，窗口标志回归 infra 单点（`bounded::prepare` / `exec_guard`）。
+- **`--service-plan` 从此打印「真正会写进定义的那一行」**，且走运行时同一条装配路径
+  （`LaunchSpec::from_runtime` + `service_command`），只读契约 `read_node()` 故不加
+  `--service-apply` 时无写盘副作用。实现整体从 `main.rs` 移到 `domain/cli.rs`——与另三个
+  plan 入口同处，`main.rs` 只留派发（它当时正好 550 行，顶在 G3 上限）。
+- **门禁与规范跟着走**（不把旧形态留在原地）：K-3 重做为函数切片顺序 + 「`start` 只出现在
+  定义成功分支」的结构判据（附越界反空转）、K-9 字面量对齐、安装证据侧 K-7/K-8 重做为
+  「npm 拿到的路径必须已归一 + 反向识别第二份实现」、新增 **K-11**（归一与 `self_exe` 单点）
+  与 **K-12**（子进程输出永不丢弃）；`P-a`/`B24` 两条读 `main.rs` 的判据随实现换文件。
+  `KERNEL-LAUNCH-STANDARD.md` 补 §0 H9/H10、§1 P4→P5 出边、§2 两行矩阵、§4 补
+  `LAUNCH_SPEC_FAILED` 与 `JOIN_ERROR`（原表自称「全部 code，不多不少」却少一个）、§6 补
+  K-7..K-12；同时删掉「P4 失败只记一条日志后继续 P5」这句已不成立的规范文字，并把三处
+  **把未实测因果当成已确认根因**的措辞改为可核实的说法。
+
+### 就绪只认一条判据、拉起只走一条序列：看护从内嵌脚本变回壳自己的无头模式（B3）
+
+「守卫起来了吗」在仓内原本有**三个**答案，且互相矛盾：`wait_alive` 只看 TCP 能否连上（它却是
+`ensure_guard` 的成功判据）、`guard_ready` 看 TCP + `/healthz`、Windows 看护脚本用
+`Test-NetConnection`（又是 TCP）。端口被占但服务没起 = 前两者判「就绪」、第三者判「活着」，
+这正是「环境全绿却进不去面板」的机制：我们一直在用「端口通」当「服务健康」。
+
+- **B3a 判据合一**：`guardctl::Readiness`（`Ready` / `PortClosed` / `Http(code)` / `NoHttpResponse`）
+  + `ready(port, timeout)` 成为全仓唯一就绪实现，契约即 H6（TCP 可达**且** `GET /healthz` 2xx）。
+  `port_open()` 明确降级为**反向**用途（「它是不是已经不在了」：重启等待、看护短路），不再充当成功判据；
+  面板探针 `guard_ready` 改为委托 `ready()`（此前是同一逻辑的第二份手写体）。
+  等待预算由 tick 数改为**时长**（每 tick 不再是常数成本：多一次 `/healthz` 往返），
+  服务管理器路径 30s、兜底 spawn 后 60s，单次探针 800ms（必须远小于 500ms tick 的邻域约束写进注释）。
+  `READY_TIMEOUT` 的文案现在带**放弃原因**（`verdict.describe()`）与证据落点，不再只报「超时」两个字。
+- **B3b 看护合一**：Windows 看护任务的动作由「内嵌 PowerShell 脚本」改为稳定入口的无头模式
+  `<壳> --watchdog`（`WATCHDOG_ARGS`；`/TR` 仍由 `service_exec_line` 单源装配，升级时就地删除遗留的
+  `watchdog.ps1`）。该入口的存活判据取 `guardctl::ready()`、拉起动作取 `guardctl::ensure_started()` ——
+  后者是从 `ensure_guard` 拆出的 P4→P6 序列本体（定义 → 服务管理器 → 就绪 → 兜底 spawn），
+  GUI 启动与看护共用**同一段**代码；看护不做 P1 线上对齐（那会改变安装态，且需要 `AppHandle` 上报进度）。
+  「守卫进程在但端口不通」会不会被双启动？不由看护嗅进程负责：兜底那次 `spawn_daemon` 与
+  服务管理器请求最终都落到同一份 `guard.lock`（内核侧单实例，D5），看护自己不再判断进程。
+  注：`schtasks /Run` 对已在运行实例的行为按 Task Scheduler 的 `MultipleInstances` 策略，
+  本仓**未**在真机实测该项 —— 因此不把它写成立论依据，真正的单实例保证是 `guard.lock`。
+- **能力搬家而非砍掉**：旧脚本里「无 GUI 进程就 `Start-Process <壳>`」这一半**删除**，因为桌面壳自愈的
+  所有者本就是守卫（内核 `domains/shell/watchdog`，20s tick、三平台一套），而它带着脚本完全没有的
+  四条护栏：连续缺失达宽限才动作、更新相位/账本时效（避免壳自更新几分钟的空窗被当成崩溃）、
+  无图形会话跳过、窗口内拉起上限防风暴。脚本那份既无宽限也无会话判定，会在壳自更新期间把 GUI 拉回来。
+  壳监督不了自己 —— 它的监督者会随它一起死（F3）。
+- **随之暴露的跨仓耦合**（已在内核侧修）：守卫靠 `isShellProcess` 区分「真壳」与「壳的无头进程」，
+  其排除清单**漏了** `--platform-matrix`，而新的 `--watchdog` 与被排除判据同样瞬时（`--run-guard` 此前也未登记）
+  ⇒ 漏项会让看护把一次瞬时进程当成「壳在运行」而永不拉起真壳。现收为 `HEADLESS_FLAGS` 单一清单 + 契约 D-9。
+- **门禁跟着改动走**：K-3 的切片与顺序判据随函数拆分重写（并新增「序列本体只有一份」判据）；
+  K-7 让位为「任务归属」，形态判据新增 **K-13**（看护复用单一判据与单一序列；反向 bans
+  `fn watchdog_script` / `Test-NetConnection` / 看护切片里的 `powershell`、`Start-Process`，
+  且反向判据在**剥注释后**的代码上跑 —— 解释「为什么删掉它」的注释合法地提到旧名字）；
+  K-12 的挂流判据不受影响。`code_only()` 为本文件新增的注释剥离工具。
+
+### 安装/下载进度只有一个所有者，且它只承认可测的量（B4a）
+
+现场（用户报障原话）：「强制更新」看不到下载进度、检测环境过程里「没有看到完整的 NPM 的检测」。
+前三轮（1.2.0 / 1.2.1）修的是**判定链**，这一轮修的是**进度语义本身**——它此前不对应任何被测出来的量。
+
+- **一条事件两个作者**。`install_progress` 同时由 `main.rs::push_status` 与命令层壳更新里内联的
+  `json!` 发射；`kind` 只枚举 node/npm，内核与桌面壳拿裸字符串过线，于是「哪些东西可被安装」在 Rust 与
+  前端（`10-ui.js` 的 `INSTALL_TARGET` 四个键）各有一份账。现新增 `src/domain/install.rs` 作为**唯一**
+  所有者：`emit_json` 是三条 `install_*` 事件的唯一出口，`InstallKind::as_str` 是 `kind` 字面量的唯一来源
+  （node/npm/kernel/shell 四类齐），`download_line` / `npm_heartbeat` 是两类文案的唯一渲染点。
+  `push_status` 与命令层的内联发射**全部删除**（不留兼容层），`Emitter` 依赖随之从 `main.rs` 退场。
+- **进度分数按代码顺序编**。旧的 0.1 / 0.3 / 0.85 与真实进度无关；前端删掉进度条（T-7）正是因为这种数字
+  会骗人，那它们就不该继续出现在线上协议里。`RunState.progress` 改为 `Option<f32>` —— 类型本身就是判据：
+  裸 `f32` 无法表达「这一步没有可测分母」，而那正是编造分数的入口。无分母一律发 `null`。
+- **Node 归档下载从此真按字节报**。`node::download_verified` 收 `on_bytes: &dyn Fn(u64, Option<u64>)`，
+  以 64KB 块读、按 ~1% 或 512KB 节流播报，并在收尾**强制**报一次；桌面壳安装包下载走同一出口
+  （`install::download`）。文案与比值由 `(done, total)` 同处算出，杜绝「文字说 MB、比值另算一套」。
+  `Content-Length` 缺失/为 0/**小于已取回量**（ureq 在 `Transfer-Encoding: chunked` 下忽略它）时退回
+  「已取回 N MB」+ `null`，绝不输出「12.0 / 8.0 MB」。
+- **内核安装 15 分钟的沉默换成如实心跳**。`npm install -g` 不吐百分比，输出又被重定向到临时文件
+  （不经管道），于是能如实说的只有它自己的现场：`bounded::run_watch` 每 2s 回调
+  `Live { elapsed, lines, last_line }`，渲染为「npm 安装中 · 已用 95s · 输出 7 行 · 最后一行「…」」。
+  `core::install_version` 只做透传（`Option<&dyn Fn(&Live)>`），**一个字的用户文案都不拼**。
+  开工行把**预算说清**（单源 15 分钟 · 总上限 17 分钟 · 共 N 个镜像源），换源时发「第 i/N 个源 …」——
+  用户报的「不知道是不是卡住」，缺的从来不是进度条，是说清预算。
+- **完成播报按 kind 各一条，版本各归各的**：`install_done { kind: node, version }` 与
+  `{ kind: npm, version }` 分别取自运行期契约；npm 未回读版本号时发 `null`（旧实现发过一条 `kind=npm`
+  却带 node 版本，引导页念出的「npm 已就绪（v22.x）」从来不是 npm 的版本）。
+- **门禁跟着改动走**：新增 **G-12**（五条子判据：第二处发射 / `kind` 裸串 / 措辞在所有者之外拼装 /
+  `.progress =` 写裸数字 / `RunState.progress` 仍是 `f32`），并带**前置断言**要求所有者真的发射三条事件、
+  真的持有两句措辞 —— 否则「不得有第二处」会退化成「一处都没有」的空转门禁；反向旧形态夹具五条逐条判红。
+  G-2/G-7/E-c 随实现换文件（不再读 `main.rs`）。行为面新增 `install.rs` 五个单测（有/无分母、
+  比值不得越过分母、心跳只说可测量、每个 kind 有自己的标签）、`bounded::run_watch` 的心跳行为测试
+  （≥2 次、elapsed 单调前进、末行真实），以及 `platform/windows.rs` 真实归档测试里的**字节进度**断言
+  （心跳≥2 次、不回退、收尾量 == 落盘大小、服务端 Content-Length == 真实大小）。
+- **B4b 的这一步跨两个仓**：B4a 做出来的真实进度只到引导页；面板那条路径仍是一问一答。
+  收口见下一节（同批完成）。
+
+### 面板的内核更新不再是黑箱：进度经桥中继、等待上界由壳下发（B4b，跨仓）
+
+现场延续 B4a：用户从面板点「更新」后，界面在十几分钟里**一个字都不变**。B4a 已经让壳侧知道
+「现在在试第几个源、npm 已经跑了多久」，但这些真话止步于 `shell.html`——面板拿到的第一帧之后就是沉默。
+
+- **根因是桥只做了一半**。`shell.html` 收到请求后回的唯一一条 progress 是硬编码的 `stage:'start'`，
+  它与 Rust 的 `install_progress` 事件族**从来没有接起来**；面板侧 `kernelUpdateBridge.ts` 又把 progress
+  帧整个丢弃（`if (d.type === PROGRESS) return;`）。现补的是这条中继线，不是新协议：
+  壳主帧 `listen('install_progress')`，**只中继 `kind == kernelKind` 的帧**（否则 Node/npm/壳自身的
+  进度会串台到这条请求上），并只在有在途请求时中继（`kernelPending`）。
+- **等待上界不再是面板的秘密**。面板原先写死 `timeoutMs = 6 * 60 * 1000`，而 Rust 侧总预算是 17 分钟
+  ——超时先到时面板给出的是**自己编的结论**（「桌面壳无响应」），用户重试就等于两个进程并发写同一个
+  npm 全局前缀，正是单写入者契约要消灭的事故形状。现预算只有一个事实源 `bridge::KERNEL_UPDATE_BUDGET_MS`
+  （+ `KERNEL_UPDATE_GRACE_MS` = 面板可见的 `maxWaitMs`），经 `shell_bridge_contract` 与 `kernelKind`
+  一起下发；面板在首帧按 `maxWaitMs - 已等时长` 重设上界，超时文案带**最后一次进度原文**。
+  面板仍保留一个明显大于预算的兜底值，用于对旧壳（契约里没有 `maxWaitMs`）保持可用。
+- **同一条预算原本有三个数字**：Rust 里手抄的 `from_secs(17 * 60)`、引导页的 `CORE_APPLY_BUDGET_MS = 1020000`、
+  面板桥的默认 `6 * 60 * 1000`（前两个相等纯属巧合）。现 Rust 的 deadline 与 `bridge::KERNEL_UPDATE_BUDGET_MS`
+  共用一个定义，`install.rs` 的开工行数字改成**从常量推导**（单源分钟数 = `core::NPM_INSTALL_TIMEOUT`，
+  总分钟数 = 预算常量），不再手抄「15 分钟 / 17 分钟」；面板经 `maxWaitMs` 取真实值。
+  引导页那份**刻意不动**：它是 UI 侧的等待上界而非后端预算，且 17 分钟 < 1020s 是有意留的余量。
+- **协议版本刻意保持 1**：progress 语义本就是「非终结、可多次」，旧面板对未知帧直接忽略；
+  递增反而会让 K1 在升级期间（新旧面板并存）拒收请求 —— 那是真实的兼容悬崖，不是谨慎。
+- **门禁**：壳侧 `kernel_update_single_writer_test.rs` 扩到 **SW-1..SW-8**：SW-1 钉住预算常量、
+  SW-4 钉住 deadline 只有一个来源（并负向禁止 `from_secs(17 * 60)` 手抄）、SW-7 钉住中继接线
+  （`listen('install_progress'` / `kernelKind` 过滤 / `kernelPending` / `maxWaitMs`）、
+  SW-8 反向夹具证明判据会咬「只回一条 start」的旧桥。面板侧 `plus/test/kernel-update-single-writer-test.js`
+  扩到 **SW-9**（消费进度 + 禁止写死上界，两条判据各配反向例）。
+
+### 环境探测从此是一张记录表：四个维度一个所有者，未知与失败不再同形（B5）
+
+现场（用户报障原话）：「NPM 到现在在检测环境的过程当中，我们没有看到完整的 NPM 的检测」；
+以及内核安装在跑了十几分钟后失败、面板只剩一个退出码。B4a 修的是**安装期**的沉默，这一轮修的是
+**安装前**的沉默 —— 而后者才是那条 17 分钟失败唯一能提前说清的地方。
+
+- **根因是形状，不是漏了一个字段**。同一条探测结论此前拆在三处各写一遍：`nodeprobe` 的逐候选追踪
+  （`TraceEntry`，只有 node 一个维度）、`node_status` 里现拼现用的 npm 探测（结论进了 JSON，却从来不
+  是一条可渲染记录）、前端 `diagText` 手工拼接的 `env_trace=` / `env_stuck=`。后果：加一个维度要改
+  三遍文案，漏改**不报错**，只显示成「检测不完整」；而探测结论只在全部成功后才被读出来，于是
+  「探针在跑」与「用户看得见探针」是两件事。
+- **新增 `src/domain/probes.rs` 为唯一所有者**，冻结三件事：维度表（`enum Probe` → `node/npm/registry/prefix`）、
+  记录形态（`Record { probe, source, target, ms, ok, note }`）、两种渲染（`Record::json` 出面板、
+  `render` 出 CLI 与 `--self-check`，两者同源）。node 侧的逐候选结论从此登记为 `Probe::Node` 记录，
+  `TraceEntry` / `render_trace` / `out.trace` **连同前端拼接片段一并删除**，不留兼容层。
+- **`ok` 是三态**（`true` / `false` / `null`）：旧实现把「某一步还在飞」记成 `ok=false`，于是「还有一个
+  候选没试完」在诊断串里显示成「这个候选坏了」，还会让机器被判成缺 npm 触发无谓重装。面板渲染 `?`、
+  CLI 渲染 `?`，与 T-1b（`npmOk`）、T-13（`progress: null`）是同一条形态纪律。
+- **两个此前根本没被探测过的维度**（这是本轮真正的能力增量，不是改名）：
+  · `registry` —— npm 源可达性**只读镜像预热缓存**（`mirror::cached()`），故 `node_status` 的「纯本地、
+    零网络 I/O」（门禁 B27）不被破坏，且 `source` 明写「预热缓存」，排障时不会把它误当此刻的连通性。
+  · `prefix` —— `npm prefix -g` 落点目录的**可写性**。`EACCES`/只读前缀会让 `npm install -g` 在十几分钟
+    之后才失败，而面板当时只剩一个退出码；环境阶段一条 `prefix` 记录就能把根因说清。写测试用唯一命名
+    探针文件（写完即删），且**先**做本地固定盘判定再碰目录 —— 网络盘上的 `exists()` 本身就是无界阻塞。
+- **npm 从「每 400ms 轮询跑两次」降到「每 10s 窗口跑一次」**：依赖维度按 `DEPENDENT_TTL` 复用缓存，
+  复用判据抽成**纯函数** `probes::reusable(缓存的 node 路径, 本轮 node 路径, 年龄)`（换 node 必须重探、
+  到界必须重探 —— 只能靠真实 spawn 与时钟验证的判据等于没验证，单测因此是确定性的），
+  安装完成处由 `probes::invalidate_all()` 与 node 侧缓存**一起**作废（只失效一半会留下「新 Node +
+  旧 npm 结论」这种自相矛盾快照，而它恰好出现在刚装完 Node 的那一刻）。顺带把 spawn 路径收口：
+  `runtime_contract::run_npm_line` 成为 `--version`（可用性）与
+  `prefix -g`（前缀）的**唯一**执行口（T-10 的同一条路），`usable_runtime` 成为唯一的 `NodeRuntime`
+  装配点、`derive_usable` 只委派；`run_version_probe` 那层只剩转发的包装与 `core::npm_global_prefix`
+  里自建的 `Command` 一并删除。
+- **探测进度从此上屏**（判据 T-17）：`busy` 期间 status 行尾附 `NS.probeSummary(st)`（按维度压缩的一行
+  结论，在飞的那一步以 `?` + 耗时呈现），两条失败路径（`probeError` 与检测超时）都带「已探明：…」。
+  诊断串里的手工 `env_trace=` / `env_stuck=` 换成 `env_probes=`（全部来自壳给的记录表）。
+- **门禁**：G-1 换锚到 `probes::dependents`，并负向禁止命令层自行调 `probe_npm_usable`；新增 **G-13**
+  （六条子判据：第二份维度表 / `TraceEntry` 复活 / 记录形态里的裸 `bool` / 第二处拼字段 / 第二处调
+  npm 探针 / 前端在 `10-ui.js` 之外解析 `.probes` 或再现 `env_trace=`），带**前置断言**要求所有者真的
+  登记四个维度、真的持有两种渲染、真的带 TTL 与本地固定盘门槛，另配**旧形态反向夹具**逐条判红。
+  B26/B27/B31 三条既有门禁同步换锚到记录形态。
+- **废代码清扫**：`commands/mod.rs` 里一段属于四个已删除实现的**堆叠文档注释**（挂在 `shell_panel_url`
+  头上，描述的代码早已不在）删除，其中唯一仍然成立的事实（面板与壳同源）在
+  `DESIGN-SHELL-ARCHITECTURE` §3.3 有出处。
+- **文档**：`ENV-TOOLCHAIN-INSTALL-STANDARD` 新增 §2.5（四维表 + 三个「为什么」）、不变量
+  **T-14/T-15/T-16/T-17**、§5 门禁表 G-13 行；`DESIGN-SHELL-ARCHITECTURE` 的 domain 名录与探测表同步。
+  本轮**不触碰面板契约**（`probes` 只出现在引导页的 `node_status`），故跨仓文档无需跟改。
+- **本机验证边界**：`node --check` 两个 bootstrap 文件、G-13 判据的静态仿真（含反向夹具）在本机完成；
+  Rust 编译与 `cargo test` 按项目纪律由 CI 裁决，本机无 toolchain 也未执行。
+
+### 门禁自己也得被门禁管：判据落到行为与真机，CI 里不再有「绿得什么都没跑」（B6）
+
+B1–B5 把事实收回单点之后，剩下一个更早的问题：**门禁声称的东西，代码里到底还有没有**。
+本轮把 `src-tauri/tests/*.rs` 的每一个正向锚点逐条对着源码验一遍（存在 / 在代码里而非注释里 /
+不是被自己的夹具凑出来的），并把能变成行为判据的地方从「搜符号」改成「做出真的现场看它怎么答」。
+
+- **四处正向锚点其实只有注释满足**（B22 断言文档散文、B28 断言已改写的说明、B47/B48 的函数切片
+  边界停在注释上）：这类门禁在实现被删掉之后仍会长期绿着，比没有门禁更糟 —— 它给出的是「已验证」的
+  假象。全部重锚到代码符号（`hex::encode(Sha256::digest(…))`、`GetDriveTypeW(root.as_ptr())` 等），
+  切片边界改指 `fn try_probe(`。
+- **K-3 是一条必红的门禁**（不是判据太松，是判据写错了）：B2 把调用形态改成
+  `ServiceAttempt::define_and_start(spec`，而门禁仍搜 `define_and_start(&spec`，`expect` 直接炸。
+  正向锚点同步换成新形态，并加一条负向锚点（`ensure_guard` 切片内**不得**出现该调用 = 防越界恒真）。
+- **就绪探针把「问不出状态行」糊成 `(0, "")`** —— 于是 B3 引入的 `Readiness::NoHttpResponse`
+  是一条**不可达**分支：端口通着却不回字节的现场（守卫刚绑定、还没能服务）被报成「/healthz 返回 0」，
+  与真的 5xx 混成同一句话。`localhttp::http_get_local` 改为如实返回 `None`，状态码取状态行的
+  **第二段**（`HTTP/1.1 <code>`；第一段是版本）—— 这里本仓一度改成取第一段，是用真 node 起服务
+  抓响应头实测才纠正回来的，凭印象改解析正是这类缺陷的来源。
+- **H6 的四态从此有行为判据（新增 K-14）**：`guardctl.rs` 的 `tests` 用回环真 socket 逐一看四种现场
+  （200 / 503 / 连上不吐字节 / 无人监听），夹具**持续接管连接**——`ready()` 先看端口再看 HTTP，
+  一次判定开两个连接，只 accept 一次的夹具会把真正的 HTTP 连接留在队列里，把「200 = 就绪」那条
+  用例变成假阴性（这是本轮自己踩到的）；另断言 `describe()` 四条文案互不相同。
+  `probes` 侧补两条确定性判据：无 node 时 node 派生维度必须为「未知且说明原因」（registry 与 node
+  无关，有缓存给结论是正当的 —— 不锁它的取值，否则测试就成了第二个事实源）、`reusable()` 真值表。
+- **CI 三条腿从「空转」变「把关」**：
+  ① `--node-plan` 那一步原本带 `|| true`，自检失败也绿 —— 现在必判退出码，且必须看到
+  `node=` / `node_probe_candidates=` / `latest_lts=` / `mirror_selected=`（判据是「产出了结论」，
+  不是「进程没崩」）；② 新增 **Linux 真机启动链冒烟**：伪造位置契约 `core.json` + 一个按实际端口
+  绑定并持久化 `ports.json` 的最小 node HTTP 服务，跑 `--watchdog` 走完「解析守卫 → 组装规格 →
+  拉起 → `/healthz` 判就绪」，再跑一次必须短路（不重复拉起，按 `guard.log` 里的启动次数判），
+  结束前显式 `pkill` + `systemctl --user disable --now` 收口，不给 runner 留脱离进程；
+  ③ 新增 **Windows 服务定义真机冒烟**：`--service-plan --service-apply` 走真 `schtasks /Create`，
+  断言 `建立结果` 里的定义行（带引号、以 `--run-guard` 结尾、不含 `\\?\` verbatim 前缀）与
+  `建立后现存 = 是`，再用**只读**复跑证明 `is_defined()` 走的是平台事实（计划任务不是文件）。
+- **已知缺口（如实登记，不假装覆盖）**：Windows 的 **P5/P6**（`/Run → /healthz`）没进 CI。
+  根因是架构性的两条，绕开任何一条都会得到一条假绿：稳定入口**只在定义里写 `<壳> --run-guard`**、
+  不携带状态根，而计划任务进程用的是任务计划程序里的用户环境 —— 本步设的隔离 `DSH_SUPERVISOR_HOME`
+  传不到被拉起的一侧；且 `ensure_started` 有 spawn 兜底，`--watchdog` 退出 0 也证明不了 `/Run` 成功。
+  另外 `ServiceControl` 只有 `kind/definition_path/is_defined/ensure_defined/start/stop/spawn_daemon`，
+  **没有「删除定义」**（清理计划任务只能在 yaml 里直接喊 `schtasks /Delete`；生产侧不需要它，
+  因为 `ensure_defined` 是覆盖语义 —— 不为测试新增产品能力）。要闭合这一格需要的是「让计划任务
+  进程也能确定状态根」的受支持口子，登记待议，不在本轮顺手发明。
+- **文档**：`KERNEL-LAUNCH-STANDARD` §0 H6 改写为四态判据（含 `None` 语义与「不得糊成 `Http(0)`」）、
+  §1 的 P6 行随之、§6 新增 **K-14** 与「CI 真机冒烟」行（含上面那个已知缺口的出处指引）。
+- **本机验证边界**：夹具的 HTTP 行为（`/healthz` 状态行、端口顺延与 `ports.json` 持久化）在本机
+  用真 node 起服务实测过；三条 workflow 脚本经 YAML 解析 + `bash -n` 校验。Rust 编译、
+  `cargo test` 与这三条 CI 腿本身仍由 CI 裁决（本机无 toolchain，也未跑任何构建/测试）。
+  **剩余杠杆**：Windows P5/P6 那一格未闭环（见上）；Linux ②在 systemd-user 可用的机器上才会真的
+  走服务管理器路径，runner 上多数走兜底 spawn —— 两条路径都已覆盖，但「服务管理器真的把守卫拉起来」
+  这件事目前只有 Linux 侧的证据。
+
 ## [1.2.1]（2026-09-21）
 
 ### Windows 上「装了 Node 仍没有 npm」的根因修复：可用 = 探针与消费者同一条 spawn 路径，落定 = 整棵工具链校验

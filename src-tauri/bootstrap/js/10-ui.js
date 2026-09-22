@@ -111,6 +111,51 @@
     }
   }
 
+  // ── 环境探测记录的唯一渲染出口（B5，2026-09-21）──
+  //
+  //   为什么需要：同一份探测结论此前在这里被手工拼成一段逐候选追踪（只有 node 维度），
+  //   而 npm 的结论只以「npmOk 字段」的形式存在 —— 于是引导页的检测过程看不见 npm，
+  //   加一个维度（registry 可达、prefix 可写）就要再抄一遍拼接代码。
+  //   现由壳侧 `domain/probes.rs` 给出记录表，前端**只渲染、不登记维度**：
+  //   维度名与顺序都来自数据，前端没有第二份维度表可以漂移。
+  //
+  //   `ok` 三态必须原样显示：true=ok / false=no / 其余=?。把「未知」显示成失败，
+  //   用户会以为机器坏了 —— 而它只是探测还没跑到那一步。
+  function probeVerdict(ok) {
+    if (ok === true) return 'ok';
+    if (ok === false) return 'no';
+    return '?';
+  }
+
+  function probeEntry(p) {
+    var bits = [];
+    if (p.source) bits.push(p.source);
+    if (p.target) bits.push(p.target);
+    bits.push((p.ms || 0) + 'ms');
+    if (p.note) bits.push(p.note);
+    return p.probe + ' ' + probeVerdict(p.ok) + '(' + bits.join(' ') + ')';
+  }
+
+  // 全量记录（诊断串用）：一条不压缩，排障要看的就是「每个候选各多久、为什么不行」。
+  function probeList(st) {
+    var list = (st && st.probes) || [];
+    return list.map(probeEntry).join(' > ');
+  }
+
+  // 逐维度一句话（状态行用）：同一维度的多条记录压缩成「最好的那条结论」。
+  // 压缩而不是罗列：node 维度是逐个候选的，全列出来状态行会长到没法读。
+  function probeSummary(st) {
+    var list = (st && st.probes) || [];
+    var rank = function (ok) { return ok === true ? 2 : (ok === false ? 0 : 1); };
+    var best = {}, order = [];
+    list.forEach(function (p) {
+      var k = String(p.probe || '?');
+      if (!(k in best)) { best[k] = p; order.push(k); return; }
+      if (rank(p.ok) > rank(best[k].ok)) best[k] = p;
+    });
+    return order.map(function (k) { return probeEntry(best[k]); }).join(' · ');
+  }
+
   function diagText() {
     return [
       'node=' + (NS.toolchain && NS.toolchain.node ? versionLabel(NS.toolchain.node) : 'unknown'),
@@ -120,12 +165,12 @@
       'plan=' + (NS.lastPlan ? JSON.stringify(NS.lastPlan) : 'none'),
       'shell=' + (NS.shellId ? (NS.shellId.version + '/' + NS.shellId.installKind + '/capable=' + NS.shellId.selfUpdateCapable) : 'unknown'),
       'shell_update=' + (NS.updPlan ? JSON.stringify({ available: NS.updPlan.available, latest: NS.updPlan.latest, skipped: NS.updPlan.skipped, error: NS.updPlan.error }) : 'none'),
-      // ── 环境探测追踪（架构修复 2026-09-11）：探测根因是**环境特有**的，
-      //    靠读代码无法确定；这份追踪是定位该类问题唯一可靠的手段。 ──
+      // 环境探测（架构修复 2026-09-11，B5 结构化）：探测根因是**环境特有**的，
+      // 靠读代码无法确定；这份记录表是定位该类问题唯一可靠的手段。
+      // 「当前卡在哪一步」也在其中 —— 进行中的步骤以 ok=? 形态带着耗时出现。
+      'env_probes=' + (probeList(NS.lastEnv) || 'none'),
       'env_candidates=' + ((NS.lastEnv && NS.lastEnv.candidates) || 'none'),
       'env_probe_error=' + ((NS.lastEnv && NS.lastEnv.probeError) || 'none'),
-      'env_stuck=' + (NS.envStuck ? (NS.envStuck.on + '/' + NS.envStuck.ms + 'ms') : 'none'),
-      'env_trace=' + ((NS.lastEnv && NS.lastEnv.trace && NS.lastEnv.trace.length) ? NS.lastEnv.trace.map(function (t) { return t.path + '(' + t.ms + 'ms,' + (t.ok ? 'ok' : 'no') + ',' + (t.note || '') + ')'; }).join(' > ') : 'none'),
       // 镜像信息**必须始终有值**（2026-09-11 修复）：此前只在「需要下载 Node」时才有，
       // 于是 Node 达标的用户诊断串永远是 mirror=none —— 让人合理地怀疑镜像能力不存在。
       // 现从预热缓存读（与是否需要下载解耦），并在尚未就绪时明确说明「预热中」。
@@ -159,4 +204,6 @@
   NS.errText = errText;
   NS.fail = fail;
   NS.diagText = diagText;
+  NS.probeList = probeList;
+  NS.probeSummary = probeSummary;
 })(window.__BOOT_NS);

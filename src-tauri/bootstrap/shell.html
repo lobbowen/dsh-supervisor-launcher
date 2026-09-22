@@ -127,6 +127,26 @@
     var replyToPanel = function (src, origin, msg) {
       try { src.postMessage(msg, origin); } catch (e) {}
     };
+    // ── 内核安装进度 → 面板中继（B4b）──
+    // 面板没有 IPC，**本主帧是唯一能听到 install_* 事件的人**。不转发，面板那侧就只能停在
+    //   一句「正在更新内核…」——而壳在 npm install 上最多要花 17 分钟（预算见 src/bridge.rs）。
+    // 一次只有一个在途请求（面板按钮在收到终结消息前是禁用态），故只需记一份 pending；
+    //   换源/重启等阶段各自都会发一帧，收尾时随终结消息一起清空。
+    var kernelPending = null;
+    if (evt) {
+      evt.listen('install_progress', function (e) {
+        if (!kernelPending || !BRIDGE) return;
+        var p = (e && e.payload) || {};
+        // kind 的字面量来自契约下发（唯一来源是 Rust 的 InstallKind::as_str，门禁 G-12B）；
+        //   在这里写死 "kernel" 就是给「哪些东西可被安装」开第二份账。
+        if (p.kind !== BRIDGE.kernelKind) return;
+        replyToPanel(kernelPending.src, kernelPending.origin, {
+          v: BRIDGE.v, type: BRIDGE.types.progress, requestId: kernelPending.id,
+          stage: 'install', status: p.status || null,
+          progress: typeof p.progress === 'number' ? p.progress : null,
+        });
+      });
+    }
     if (core) {
       // 取桥契约（拿到后才加载面板，保证面板首次请求就能被识别，消除竞态）。
       // ⚠ 可用性优先：即使契约拉取失败，也必须照常加载面板（否则白屏），只是更新桥不可用。
@@ -154,10 +174,31 @@
         replyToPanel(src, origin, { v: BRIDGE.v, type: BRIDGE.types.result, requestId: rid, ok: false, error: 'Tauri IPC 不可用' });
         return;
       }
-      replyToPanel(src, origin, { v: BRIDGE.v, type: BRIDGE.types.progress, requestId: rid, stage: 'start' });
+      // 单写入者契约的另一半：同一个 npm 全局前缀不允许被两次安装并发写。
+      //   面板超时（旧版 6 分钟）后按钮会解禁，而壳**仍在**逐源安装 —— 此时重试必须被明确拒绝，
+      //   并把「正在进行中」如实说回去（比悄悄起第二个进程、两边互相覆盖要好）。
+      if (kernelPending) {
+        var mins = typeof BRIDGE.maxWaitMs === 'number' ? '（最长 ' + Math.round(BRIDGE.maxWaitMs / 60000) + ' 分钟）' : '';
+        replyToPanel(src, origin, {
+          v: BRIDGE.v, type: BRIDGE.types.result, requestId: rid, ok: false,
+          error: '内核更新正在进行中（桌面壳正在逐源安装' + mins + '）',
+        });
+        return;
+      }
+      kernelPending = { id: rid, src: src, origin: origin };
+      // 终结消息（成功/失败/异常）都必须先清 pending：否则中继会把后续事件发给已结束的请求。
+      var finish = function (msg) {
+        if (kernelPending && kernelPending.id === rid) kernelPending = null;
+        replyToPanel(src, origin, msg);
+      };
+      // 第一帧带上 maxWaitMs：面板的等待上界由此**取**自后端事实（bridge.rs），不再自己编一个数。
+      replyToPanel(src, origin, {
+        v: BRIDGE.v, type: BRIDGE.types.progress, requestId: rid, stage: 'start',
+        maxWaitMs: typeof BRIDGE.maxWaitMs === 'number' ? BRIDGE.maxWaitMs : null,
+      });
       core.invoke(BRIDGE.cmd).then(function (r) {
         var ok = !!(r && r.ok !== false);
-        replyToPanel(src, origin, {
+        finish({
           v: BRIDGE.v, type: BRIDGE.types.result, requestId: rid, ok: ok,
           stage: (r && r.stage) || null,
           version: (r && r.version) || null,
@@ -172,7 +213,7 @@
           }, 900);
         }
       }).catch(function (e) {
-        replyToPanel(src, origin, { v: BRIDGE.v, type: BRIDGE.types.result, requestId: rid, ok: false, error: String(e) });
+        finish({ v: BRIDGE.v, type: BRIDGE.types.result, requestId: rid, ok: false, error: String(e) });
       });
     });
   })();

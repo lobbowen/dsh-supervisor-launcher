@@ -15,30 +15,15 @@ pub const GUARD_TASK: &str = "DSH-Supervisor";
 /// 2026-09-15：所有者从内核 `autostart.js` 收归壳（KERNEL-DAEMON-CONTRACT D6）。
 pub const WATCHDOG_TASK: &str = "DSH-Supervisor-Watchdog";
 
-/// Windows 看护脚本（PowerShell，纯文本免 cmd 转义）。
-/// 语义：API 不可达且无守卫 node 进程 → 启动稳定入口 `<壳> --run-guard`；
-/// GUI 壳缺失则**独立**拉起（两个判断必须相互独立，否则「壳崩、守卫活」时壳永远不回来）。
+/// 看护任务的调用参数：**只**是稳定入口的一个无头模式。
 ///
-/// 看护脚本本身**不含** node/guard 路径 —— 检测在 `--run-guard` 内完成。
-fn watchdog_script(_spec: &LaunchSpec) -> String {
-    let port = crate::env::api_port();
-    let shell = std::env::current_exe()
-        .map(|p| ps_quote(&p.display().to_string()))
-        .unwrap_or_else(|_| "''".into());
-    [
-        "$ErrorActionPreference = \"SilentlyContinue\"".to_string(),
-        format!("$port = {};", port),
-        format!("$shell = {};", shell),
-        "$up = Test-NetConnection -ComputerName 127.0.0.1 -Port $port -InformationLevel Quiet -WarningAction SilentlyContinue".to_string(),
-        "if (-not $up) {".to_string(),
-        "  $p = @(Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'node.exe' -and $_.CommandLine -like '*dsh-supervisor*' })".to_string(),
-        "  if (-not $p) { Start-Process -FilePath $shell -ArgumentList '--run-guard' -WindowStyle Hidden }".to_string(),
-        "}".to_string(),
-        "$g = @(Get-CimInstance Win32_Process | Where-Object { $_.Name -like 'dsh-supervisor*' -and $_.CommandLine -notlike '*--run-guard*' })".to_string(),
-        "if (-not $g -and (Test-Path $shell)) { Start-Process -FilePath $shell -WindowStyle Hidden }".to_string(),
-        "exit 0".to_string(),
-    ].join("\r\n")
-}
+/// 为什么这里不再有脚本（2026-09-21 B3b）：旧实现把检测逻辑写成内嵌 PowerShell，于是
+///   「守卫活着吗」在本仓出现了第三种答案（`Test-NetConnection` = 只看 TCP 端口），
+///   而壳自更新/自重启期间 GUI 本就要消失几分钟 —— 那份脚本没有宽限、没有会话判定，
+///   会在那个空窗里把 GUI 拉回来（双壳、打断更新）。GUI 自愈的唯一所有者是守卫
+///   （内核 `domains/shell/watchdog`：进程实存 + 宽限 + 更新相位时效 + 风暴上限 + 会话可用），
+///   看护任务因此只剩一件壳该管的事：守卫没就绪时把它拉起来 —— 见 `domain::cli::cli_watchdog`。
+pub const WATCHDOG_ARGS: &[&str] = &["--watchdog"];
 
 /// PowerShell 单引号字符串（内部单引号翻倍；反斜杠为字面量，无需转义）。
 fn ps_quote(s: &str) -> String {
@@ -66,10 +51,9 @@ fn extract_with_tar(archive: &Path, dest: &Path) -> Result<(), String> {
     let out = crate::bounded::run(
         Command::new("tar").args(["-xf", src.as_str(), "-C", dst.as_str()]),
         INSTALL_CMD_TIMEOUT,
-    )
-    .map_err(|e| format!("无法启动 tar.exe: {}", e))?;
+    )?;
     if !out.success {
-        return Err(format!("tar 退出码 {}: {}", out.code.unwrap_or_else(|| "killed".into()), out.stderr.trim()));
+        return Err(out.failure("tar.exe 解包"));
     }
     Ok(())
 }
@@ -88,10 +72,9 @@ fn extract_with_expand_archive(archive: &Path, dest: &Path) -> Result<(), String
     let out = crate::bounded::run(
         Command::new("powershell").args(["-NoProfile", "-NonInteractive", "-Command", ps.as_str()]),
         INSTALL_CMD_TIMEOUT,
-    )
-    .map_err(|e| format!("无法启动 powershell: {}", e))?;
+    )?;
     if !out.success {
-        return Err(format!("Expand-Archive 退出码 {}: {}", out.code.unwrap_or_else(|| "killed".into()), out.stderr.trim()));
+        return Err(out.failure("Expand-Archive 解包"));
     }
     Ok(())
 }
@@ -312,7 +295,7 @@ impl Platform for Impl {
 
     fn is_local_fixed_dir(&self, dir: &Path) -> bool {
         use std::os::windows::ffi::OsStrExt;
-// 先做本地固定盘判定（不触网），再访问文件系统；按盘符缓存，每盘只查一次。
+        // 先做本地固定盘判定（不触网），再访问文件系统；按盘符缓存，每盘只查一次。
         let w: Vec<u16> = dir.as_os_str().encode_wide().collect();
         // UNC（以两个反斜杠开头，ASCII 92）→ 跳过（纯字面判定，不触网）
         if w.len() >= 2 && w[0] == 92 && w[1] == 92 {
@@ -356,9 +339,9 @@ impl Platform for Impl {
 /// Windows 看护任务的固有实现（**不属于** ServiceControl 契约：它是壳的私有辅助，
 /// 由 `ensure_defined` 调用；放进 trait impl 内会触发 E0407）。
 impl Impl {
-    /// 壳拥有的 Windows 看护任务（D6/H5）：写 watchdog.ps1 + schtasks MINUTE。
-    /// 幂等：每次 ensure_defined 都重写脚本并 `/Create /F`（覆盖语义），
-    ///   故不会因守卫任务「已是最新」而被跳过。
+    /// 壳拥有的 Windows 看护任务（D6/H5）：计划任务直接指向稳定入口的无头模式。
+    /// 幂等：每次 ensure_defined 都 `/Create /F`（覆盖语义），
+    ///   故不会因守卫任务「已是最新」而被跳过；升级后旧版本留下的 `watchdog.ps1` 就地删除。
     fn watchdog_status(&self, spec: &LaunchSpec) -> String {
         match self.ensure_watchdog(spec) {
             Ok(s) => format!("；{}", s),
@@ -367,17 +350,14 @@ impl Impl {
     }
 
     fn ensure_watchdog(&self, spec: &LaunchSpec) -> Result<String, String> {
-        let dir = crate::env::supervisor_dir();
-        std::fs::create_dir_all(&dir).map_err(|e| format!("创建状态目录失败: {}", e))?;
-        let ps1 = dir.join("watchdog.ps1");
-        let body = watchdog_script(spec);
-        let tmp = ps1.with_extension("ps1.tmp");
-        std::fs::write(&tmp, body).map_err(|e| format!("写看护脚本失败: {}", e))?;
-        std::fs::rename(&tmp, &ps1).map_err(|e| format!("落盘看护脚本失败: {}", e))?;
-        let tr = format!(
-            "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{}\"",
-            ps1.display()
-        );
+        // 脚本形态已废除（见 WATCHDOG_ARGS 注释）；清掉历史文件，避免留下无人维护的第二实现。
+        let stale = crate::env::supervisor_dir().join("watchdog.ps1");
+        if stale.exists() {
+            let _ = std::fs::remove_file(&stale);
+        }
+        let (shell, args) = (spec.shell.as_path(), WATCHDOG_ARGS);
+        // 与守卫任务同一行装配（`service_exec_line`）：引号规则只有一处。
+        let tr = super::service_exec_line(shell, args);
         let r = crate::bounded::run(
             Command::new("schtasks").args([
                 "/Create", "/TN", WATCHDOG_TASK, "/SC", "MINUTE", "/MO", "5", "/RL", "HIGHEST", "/F", "/TR", &tr,
@@ -387,7 +367,7 @@ impl Impl {
         if r.success {
             Ok(format!("看护任务 {} 已建立", WATCHDOG_TASK))
         } else {
-            Err(format!("schtasks 看护任务创建失败: {}", r.stderr.trim()))
+            Err(r.failure("schtasks 建立看护任务"))
         }
     }
 
@@ -503,9 +483,8 @@ impl ServiceControl for Impl {
         // 全部有界：退出流程也要能在服务管理器无响应时走完，否则用户会觉得「程序关不掉」。
         // ⚠ 2026-09-18 修（严重缺陷：退出管家后自动重启）：
         //   原只用 /End —— 那只结束**本次运行实例**，而 DSH-Supervisor-Watchdog 是
-        //   /SC MINUTE /MO 5 的**计划**（watchdog.ps1 在无 dsh-supervisor* GUI 进程时
-        //   `Start-Process <壳>`，在守卫端口 down 时 `Start-Process <壳> --run-guard`）。
-        //   /End 不禁用计划 ⇒ ≤5 分钟后看护再次触发，把守卫与桌面壳一起拉回来。
+        //   /SC MINUTE /MO 5 的**计划**（触发时跑 `<壳> --watchdog`，守卫端口未就绪就把它拉起）。
+        //   /End 不禁用计划 ⇒ ≤5 分钟后看护再次触发，把守卫拉回来。
         //   故看护任务必须 **/Delete 计划**；下次启动 ensure_defined 会重建（幂等）。
         crate::bounded::run_lossy(
             Command::new("schtasks").args(["/Delete", "/TN", WATCHDOG_TASK, "/F"]),
@@ -668,13 +647,40 @@ mod toolchain_tests {
         std::env::set_var("DSH_SUPERVISOR_HOME", &home);
         let choice = crate::node::latest_lts().expect("镜像发现失败");
         let dl = home.join("dl");
+        // 顺手钉住**字节进度**本身：这是真机才有的量（本地无网络）。
+        // 只报一次、或收尾量与落盘大小不符，都说明进度是假的。
+        let beats: std::sync::Arc<std::sync::Mutex<Vec<(u64, Option<u64>)>>> = Default::default();
+        let sink = {
+            let b = beats.clone();
+            move |done: u64, total: Option<u64>| {
+                b.lock().unwrap_or_else(|e| e.into_inner()).push((done, total));
+            }
+        };
         let archive = crate::node::download_verified(
             &choice.version,
             &choice.file,
             &dl,
             Some(choice.source.as_str()),
+            &sink,
         )
         .expect("官方归档下载失败");
+        let b = beats.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        assert!(b.len() >= 2, "下载全程没有字节心跳（只报一次=没有进度）：{} 次", b.len());
+        let size = std::fs::metadata(&archive).expect("stat 归档失败").len();
+        let (last_done, last_total) = *b.last().expect("至少一次心跳");
+        assert_eq!(last_done, size, "收尾进度 {} ≠ 落盘大小 {}", last_done, size);
+        if let Some(t) = last_total {
+            assert_eq!(t, size, "服务端声称的 Content-Length 与真实大小不符：{}", t);
+        }
+        // 每次心跳都不得超过真实落盘量：超过就说明进度是凭空长出来的。
+        assert!(
+            b.iter().all(|(got, _)| *got <= size),
+            "心跳报出了比归档本身还大的字节量：{:?}",
+            b.iter().map(|x| x.0).collect::<Vec<_>>()
+        );
+        // 刻意**不**断言全局单调：换源重下（`download_verified` 的镜像回退）合法地把已取回量
+        //   退回 0，而那正是该报给用户看的「重新开始」。单次尝试内的单调性由
+        //   `http_get_bytes_progress` 的累加结构保证，把它写成真机断言只会平添网络抖动导致的误红。
         let node = crate::platform::current()
             .install_node(&archive)
             .expect("生产解包路径失败（这一步的报错就是面板会显示给用户的那句）");
