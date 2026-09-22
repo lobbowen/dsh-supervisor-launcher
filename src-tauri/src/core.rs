@@ -412,8 +412,17 @@ pub fn install_version(
     on_live: Option<&dyn Fn(&crate::bounded::Live)>,
 ) -> Result<String, String> {
     if !is_valid_version(version) { return Err(format!("非法目标版本: {}", version)); }
-    let spec = format!("{}@{}", pkg, version);
+    install_spec(&format!("{}@{}", pkg, version), prefix, registry, on_live)
+}
 
+/// 装一个 npm 可接受的 spec（`pkg@version` 或本地 tarball 路径）——两种来源共用同一套
+/// 快失败重试与证据组织；写成两份就会出现「远程装有缓存隔离重试、本地装没有」。
+fn install_spec(
+    spec: &str,
+    prefix: Option<&Path>,
+    registry: Option<&str>,
+    on_live: Option<&dyn Fn(&crate::bounded::Live)>,
+) -> Result<String, String> {
     let t0 = std::time::Instant::now();
     let first = run_npm_install(&spec, prefix, registry, None, on_live);
     match &first {
@@ -457,6 +466,111 @@ pub fn install_version(
     }
     .map_err(|e| format!("{}\n  [{}]", e, ev))
 }
+
+/// 装一个已取到本地的包（tarball 路径）。与远程 spec 走同一条重试/证据路径，唯一区别是
+/// npm 不再自己去 registry 取件 —— 只有这一步才有真字节数可报，故内核下载进度必须走这里。
+pub fn install_local(
+    tgz: &Path,
+    prefix: Option<&Path>,
+    registry: Option<&str>,
+    on_live: Option<&dyn Fn(&crate::bounded::Live)>,
+) -> Result<String, String> {
+    install_spec(&file_spec(tgz), prefix, registry, on_live)
+}
+
+/// 本地包必须写成 `file:` 形态：裸绝对路径在 npm 的 spec 解析里是否算「文件」并无保证
+/// （Windows 的 `C:\...` 会被先当作包名候选），而那会让整次安装静默打到 registry。
+fn file_spec(tgz: &Path) -> String {
+    format!("file:{}", tgz.display())
+}
+
+/// registry 里某个**具体版本**的取件信息（`versions[v].dist`）。
+pub struct DistInfo {
+    /// tarball 的绝对 URL —— 由该源自己给出，不拼路径：镜像的包路径规则不统一。
+    pub tarball: String,
+    /// 声明的字节数：进度分母，也是截断判据。源没给就是 None，进度行退回「已取回 N MB」。
+    pub size: Option<u64>,
+    /// `integrity: "sha512-<base64>"` 解出的原始摘要；缺失即为 None（只按字节数核对）。
+    pub sha512: Option<Vec<u8>>,
+}
+
+/// `dist.integrity` 只认 `sha512-<base64>`；算法不符或长度不对一律当没有，不拿别的摘要凑。
+fn parse_integrity(v: Option<&Value>) -> Option<Vec<u8>> {
+    let (alg, b64) = v?.as_str()?.split_once('-')?;
+    if alg != "sha512" { return None; }
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD
+        .decode(b64)
+        .ok()
+        .filter(|d| d.len() == 64)
+}
+
+/// 从**指定单个源**读 `<pkg>@<version>` 的 dist 信息。
+/// 逐源尝试时元数据必须与包同源：跨源拼接会让 A 源的摘要去核 B 源的字节。
+pub fn dist_from(pkg: &str, version: &str, origin: &str) -> Result<DistInfo, String> {
+    if !is_valid_version(version) { return Err(format!("非法目标版本: {}", version)); }
+    let meta = fetch_pkg_meta(&[origin.to_string()], pkg)?;
+    let dist = meta
+        .get("versions")
+        .and_then(|v| v.get(version))
+        .and_then(|v| v.get("dist"))
+        .ok_or_else(|| format!("{} 上没有 {}@{} 的 dist 元数据", origin, pkg, version))?;
+    let tarball = dist
+        .get("tarball")
+        .and_then(|x| x.as_str())
+        .filter(|s| s.starts_with("http://") || s.starts_with("https://"))
+        .ok_or_else(|| format!("{} 的 dist.tarball 缺失或不是 URL", origin))?;
+    Ok(DistInfo {
+        tarball: tarball.to_string(),
+        size: dist.get("size").and_then(|x| x.as_u64()).filter(|t| *t > 0),
+        sha512: parse_integrity(dist.get("integrity")),
+    })
+}
+
+/// 包内落点名：包名带 scope 与 `/`（`@dsh-sup/dsh-core-linux-x64`），必须先归一才准进路径，
+/// 否则一个来自 registry 的字符串就成了目录穿越的入口。
+fn dist_slug(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') { c } else { '_' })
+        .collect()
+}
+
+/// 内核包 tarball 的本地落点（与 Node 归档同一个 `dl/` 目录，形态一致便于排障）。
+pub fn dist_cache_path(pkg: &str, version: &str) -> PathBuf {
+    crate::env::supervisor_dir()
+        .join("dl")
+        .join(format!("{}-{}.tgz", dist_slug(pkg), dist_slug(version)))
+}
+
+/// 取回 tarball 并按该源自己声明的元数据核对，返回 `(字节数, 是否核过摘要)`。
+/// 摘要与元数据出自同一信任根，所以它挡的是截断与镜像上的损坏文件（与 npm 自身同强度），
+/// 不是「防注册表作恶」——那层只有签名发布链能给，本函数不冒充它。
+pub fn fetch_dist(
+    dist: &DistInfo,
+    dst: &Path,
+    on_bytes: &dyn Fn(u64, Option<u64>),
+) -> Result<(u64, bool), String> {
+    use sha2::{Digest, Sha512};
+    let data = crate::node::http_get_bytes_progress(&dist.tarball, dist.size, Some(on_bytes))?;
+    if let Some(t) = dist.size {
+        if data.len() as u64 != t {
+            return Err(format!("取回不完整：该源声明 {} 字节，实得 {} 字节", t, data.len()));
+        }
+    }
+    if let Some(want) = &dist.sha512 {
+        // 两边都转 hex 再比：`Output<Sha512>` 与 `Vec<u8>` 直接比需要额外的 trait 装配，
+        // 而 `hex::encode` 走 AsRef<[u8]>，与本仓既有的 SHA256 校验点同一种写法。
+        if hex::encode(Sha512::digest(&data)) != hex::encode(want) {
+            return Err("SHA512 校验失败（该源的包内容与其元数据不符，拒绝安装）".to_string());
+        }
+    }
+    if let Some(parent) = dst.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("创建 {} 失败: {}", parent.display(), e))?;
+    }
+    std::fs::write(dst, &data).map_err(|e| format!("写入 {} 失败: {}", dst.display(), e))?;
+    Ok((data.len() as u64, dist.sha512.is_some()))
+}
+
 
 /// prefix 是否为 Node 安装目录（含 node_modules/npm）。
 /// 现场那条栈溢出无法本地复现，故只回传证据、不擅自丢弃 prefix：
@@ -643,6 +757,50 @@ mod tests {
         let after = body.split(&pat).nth(1)?;
         let v = after.trim_start();
         if v.starts_with("true") { Some(true) } else { Some(false) }
+    }
+
+    /// 从一份 registry 包元数据里取出目标版本的 `dist` 段（测试夹具）。
+    fn dist_meta(json: &str) -> Value {
+        let v: Value = serde_json::from_str(json).expect("测试内 JSON 必须合法");
+        v["versions"]["0.1.6-BETA.3"]["dist"].clone()
+    }
+
+    #[test]
+    fn integrity_only_accepts_a_64_byte_sha512() {
+        let b64 = {
+            use base64::Engine;
+            base64::engine::general_purpose::STANDARD.encode([7u8; 64])
+        };
+        let ok = dist_meta(&format!(
+            r#"{{"versions":{{"0.1.6-BETA.3":{{"dist":{{"integrity":"sha512-{b64}"}}}}}}}}"#
+        ));
+        assert_eq!(parse_integrity(ok.get("integrity")).map(|v| v.len()), Some(64));
+        // 算法不对、长度不对、根本不是 base64 —— 一律「没有校验值」，不拿别的摘要凑数。
+        for bad in ["sha1-abc", "!!!", "sha512-YQ=="] {
+            let d = dist_meta(&format!(
+                r#"{{"versions":{{"0.1.6-BETA.3":{{"dist":{{"integrity":"{bad}"}}}}}}}}"#
+            ));
+            assert_eq!(parse_integrity(d.get("integrity")), None, "{bad} 不该被当成校验值");
+        }
+        assert_eq!(parse_integrity(None), None);
+    }
+
+    /// 落点名由 registry 给的字符串参与拼成，所以它必须过不了目录穿越这一关。
+    #[test]
+    fn dist_slug_leaves_no_path_separators_or_dots() {
+        let s = dist_slug("@dsh-sup/dsh-core-win-x64");
+        assert_eq!(s, "_dsh-sup_dsh-core-win-x64", "scope 里的 / 必须被换掉：{s}");
+        for evil in ["../../../etc/passwd", "a\\b", "..", ""] {
+            let out = dist_slug(evil);
+            assert!(!out.contains('/') && !out.contains('\\'), "{evil} 归一后仍带分隔符: {out}");
+            assert!(out.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-')));
+        }
+    }
+
+    #[test]
+    fn local_spec_uses_the_file_protocol() {
+        let p = std::path::Path::new("/tmp/dl/pkg.tgz");
+        assert_eq!(file_spec(p), "file:/tmp/dl/pkg.tgz");
     }
 
     /// 取整数字段。

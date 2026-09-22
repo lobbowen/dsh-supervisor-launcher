@@ -265,6 +265,26 @@ pub async fn core_apply(app: tauri::AppHandle) -> ShellResult<serde_json::Value>
     core_apply_inner(app).await
 }
 
+/// 按**该源自己**的 dist 元数据把内核包取到本地，全程播报带分母的字节进度。
+/// 为什么由壳下包：npm 根本不吐取件进度，用户因此从来看不见内核下载到哪；registry 的 `dist.size`
+/// 才是真分母。任一步失败（源不给 dist / 截断 / 摘要不符）以 `Err(原因)` 交回调用方换直装。
+/// 本函数只发事件、不拼文案（措辞的唯一出口是 `domain::install`）。
+fn fetch_kernel_tgz(
+    app: &tauri::AppHandle,
+    pkg: &str,
+    version: &str,
+    origin: &str,
+) -> Result<std::path::PathBuf, String> {
+    let dist = crate::core::dist_from(pkg, version, origin)?;
+    install::kernel_fetch(app, version, origin, dist.size, dist.sha512.is_some());
+    let dst = crate::core::dist_cache_path(pkg, version);
+    let a = app.clone();
+    let on_bytes = move |done: u64, total: Option<u64>| install::download(&a, InstallKind::Kernel, done, total);
+    let (bytes, verified) = crate::core::fetch_dist(&dist, &dst, &on_bytes)?;
+    install::kernel_fetched(app, bytes, verified);
+    Ok(dst)
+}
+
 /// `core_apply` 的实现体（安装/升级到**选出的目标版本**；见上方缺口说明）。
 /// 抽成独立函数：启动门 2（`core_apply`）与面板请求（`kernel_update_apply`）**共用同一实现** ——
 /// 内核包只能经这一处写入，符合「单写入者」契约（docs/DESIGN-SHELL-ARCHITECTURE.md）。
@@ -321,10 +341,25 @@ async fn core_apply_inner(app: tauri::AppHandle) -> ShellResult<serde_json::Valu
                     None,
                 );
             };
-            match crate::core::install_version(
-                &pkg2, &target2, pref.as_deref(), Some(o.as_str()),
-                Some(&beat as &dyn Fn(&crate::bounded::Live)),
-            ) {
+            let beat_ref = Some(&beat as &dyn Fn(&crate::bounded::Live));
+            // 先按该源的 dist 元数据**自己下包**（这一步有真字节数，才有真进度），装本地 tarball；
+            //   取件失败（源不给 dist / 截断 / 摘要不符）才退回 npm 直装 —— 能力不减，只是少了分母可报。
+            let local = match fetch_kernel_tgz(&app2, &pkg2, &target2, o) {
+                Ok(p) => Some(p),
+                Err(why) => {
+                    install::kernel_direct(&app2, o, &why);
+                    None
+                }
+            };
+            let out = match &local {
+                Some(tgz) => crate::core::install_local(tgz, pref.as_deref(), Some(o.as_str()), beat_ref),
+                None => crate::core::install_version(&pkg2, &target2, pref.as_deref(), Some(o.as_str()), beat_ref),
+            };
+            // 取件文件只服务这一次安装（每次换源都会重新取并覆盖），装完即删：否则状态根里按版本逐份累积。
+            if let Some(tgz) = &local {
+                let _ = std::fs::remove_file(tgz);
+            }
+            match out {
                 Ok(out) => return Ok::<(String, String), String>((o.clone(), out)),
                 Err(e) => last = e,
             }

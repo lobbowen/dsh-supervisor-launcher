@@ -40,6 +40,12 @@
     -webkit-mask: url("/dsh-logo.svg") center / contain no-repeat; }
   .startup-name { font-size: 22px; font-weight: 760; line-height: 1; letter-spacing: .02em; }
   .startup-status { color: var(--status); font-size: 13px; line-height: 1.5; text-align: center; min-height: 20px; }
+  /* 条只由真分母驱动（唯一写入点 10-ui.js::installMeter）：没有分母时它是隐藏的。
+     按代码顺序涨的假条比没有条更糟 —— 那正是当初整体删除进度条的理由。 */
+  .dl-meter { display: none; width: 100%; max-width: 320px; height: 4px; margin: 8px auto 0; appearance: none; -webkit-appearance: none; border: none; background: var(--line); }
+  .dl-meter::-webkit-progress-bar { background: var(--line); border-radius: 0; }
+  .dl-meter::-webkit-progress-value { background: var(--brand); border-radius: 0; }
+  .dl-meter::-moz-progress-bar { background: var(--brand); }
   .steps { display: flex; align-items: center; justify-content: center; gap: 2px; flex-wrap: wrap; }
   .step { display: flex; align-items: center; gap: 6px; color: var(--status); font-size: 12px;
     padding: 5px 9px; border-radius: 999px; transition: all .3s ease; }
@@ -126,6 +132,7 @@
       <div class="startup-logo" id="logo" aria-hidden="true"><span class="startup-logo-image"></span></div>
       <div class="startup-name">DSH-SUP</div>
       <div class="startup-status" id="status">正在检测环境…</div>
+      <progress class="dl-meter" id="dlMeter" max="1" value="0"></progress>
       <!-- 阶段固定五步：检测环境 -> 桌面版本 -> 内核版本 -> 服务就绪 -> 进入面板。 -->
       <div class="steps" id="steps" style="display:none">
         <span class="step active" id="st-env"><span class="dot"></span>检测环境</span>

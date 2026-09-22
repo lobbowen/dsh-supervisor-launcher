@@ -30,7 +30,7 @@
 //!   M-b  export 的延迟来自**随选择落盘**的同源延迟，而非调用方传入的别源延迟
 //!   M-c  node.rs 不再把 Node 侧延迟传给 npm 语义的 selected 导出
 //!   E-a  install_progress 监听器不再以 busy 为闸，且经统一入口展示**文字**（SSOT §2.4/§3.3）
-//!   E-b  不再使用进度条（SSOT §3.2：只留文字，删除 showProgress/progBar）
+//!   E-b  监听器不自行画进度条（SSOT §3.2：条只准由真分母驱动，唯一渲染点在 10-ui.js）
 //!   E-c  安装语义的唯一所有者 \`domain/install.rs\` 发统一 install_progress {kind,status,progress}
 //!        （不再带 busy 补丁；发射点不在 main.rs，见 B4）
 //!   E-d  反向：判据能识别「以 busy 为闸」的旧形态（门禁非空转）
@@ -143,7 +143,7 @@ fn e_a_install_listener_reports_status_text() {
     );
     assert!(
         !code.contains("showProgress") && !code.contains("progBar"),
-        "E-b FAIL 仍在使用进度条（SSOT §3.2 要求删除，只留文字）"
+        "E-b FAIL 监听器自己画假进度条（条只准由真分母驱动，唯一渲染点在 10-ui.js，见 G-3）"
     );
 }
 

@@ -17,10 +17,20 @@
 //!   本文件只判**安装侧后果**（ npm 拿到的路径必须已归一）；
 //!   「不许再长出第二份」由 kernel_launch_standard_test.rs 的 K-11 守住。
 //!
-//! ## 不变量 K-1..K-8
+//! ## 不变量 K-1..K-10
 
 use std::fs;
 use std::path::PathBuf;
+
+/// 取 `start` 与 `end` 两个签名之间的文本（本文件的函数体切法，K-7 同形）。
+fn between(src: &str, start: &str, end: &str) -> String {
+    let i = src.find(start).unwrap_or_else(|| panic!("K FAIL 未找到起点 {}", start));
+    let j = src[i + start.len()..]
+        .find(end)
+        .map(|x| i + start.len() + x)
+        .unwrap_or(src.len());
+    src[i..j].to_string()
+}
 
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf()
@@ -141,4 +151,52 @@ fn k8_reverse_detects_unstripped_verbatim() {
         "K-8 FAIL core.rs 仍自行取壳自身路径"
     );
     eprintln!("K-8 PASS reverse judgement valid");
+}
+
+/// K-9（2026-09-22，T-7 真分母）：内核包必须由壳按该源自己的 dist 元数据**先下载**再装本地包。
+/// 为什么这是安装侧不变量而不是 UI 细节：`npm install -g pkg@ver` 根本不吐取件进度，
+/// 只要写入路径还挂在 npm 身上，「内核下载到哪了」就永远是黑的 —— 用户从 1.2.1 起报的就是这件事。
+#[test]
+fn k9_kernel_package_is_downloaded_with_a_real_denominator() {
+    let core = read("src-tauri/src/core.rs");
+    for needle in ["pub fn dist_from", "pub fn fetch_dist", "pub fn install_local", "fn dist_slug", "fn file_spec"] {
+        assert!(core.contains(needle), "K-9 FAIL core.rs 缺 {}", needle);
+    }
+    // 分母与摘要都必须真的参与判定：只下不核，等于用「装不上」换掉了「可能装错」。
+    let fd = between(&core, "pub fn fetch_dist(", "\n/// ");
+    assert!(fd.contains("http_get_bytes_progress(&dist.tarball, dist.size"),
+        "K-9 FAIL 分母没交给唯一的带进度客户端：\n{}", fd);
+    assert!(fd.contains("Sha512::digest") && fd.contains("拒绝安装"), "K-9 FAIL fetch_dist 未做摘要核对");
+    assert!(fd.contains("取回不完整"), "K-9 FAIL fetch_dist 未核对声明的字节数（截断将无声通过）");
+    // 落点名由 registry 给的字符串拼成，必须过归一才准进路径。
+    assert!(core.contains("dist_slug(pkg), dist_slug(version)"), "K-9 FAIL 落点名未经 dist_slug");
+    // 本地包 spec 必须是 file: 形态（裸绝对路径在 npm 的 spec 解析里不保证算文件）。
+    assert!(core.contains("format!(\"file:{}\", tgz.display())"), "K-9 FAIL 本地包没用 file: 协议");
+
+    let cmd = read("src-tauri/src/commands/mod.rs");
+    let body = between(&cmd, "async fn core_apply_inner", "pub async fn kernel_update_apply");
+    assert!(body.contains("fetch_kernel_tgz(&app2, &pkg2, &target2, o)"), "K-9 FAIL 取件步骤没进安装路径");
+    assert!(body.contains("crate::core::install_local("), "K-9 FAIL 没装已下载的本地包");
+    assert!(body.contains("crate::core::install_version("), "K-9 FAIL 丢了 registry 直装回退（降级不得砍能力）");
+    assert!(body.contains("install::kernel_direct("), "K-9 FAIL 降级没有可见文案（用户会看到进度凭空消失）");
+    // 取件文件没有复用方（每次换源重取并覆盖），装完必须删：留着就是状态根里按版本逐份累积的垃圾。
+    assert!(body.contains("std::fs::remove_file(tgz)"), "K-9 FAIL 取件文件装完不清理");
+
+    let inst = read("src-tauri/src/domain/install.rs");
+    assert!(inst.contains("pub(crate) fn kernel_fetch") && inst.contains("pub(crate) fn kernel_fetched")
+        && inst.contains("pub(crate) fn kernel_direct"), "K-9 FAIL install.rs 缺内核取件三行");
+    assert!(inst.contains("（{}%）"), "K-9 FAIL 下载行没带百分比");
+    eprintln!("K-9 PASS kernel package downloaded with a real denominator");
+}
+
+/// K-10 反向：判据必须认得「无分母直装」的旧形态，也要认得「把 null 当 0」的假条形态。
+#[test]
+fn k10_reverse_detects_denominator_free_kernel_install() {
+    let old = "match crate::core::install_version(&pkg2, &target2, pref.as_deref(), Some(o.as_str()), beat) {";
+    assert!(!old.contains("fetch_kernel_tgz") && !old.contains("install_local"), "K-10 reverse self-check");
+    let cmd = read("src-tauri/src/commands/mod.rs");
+    assert!(cmd.contains("fetch_kernel_tgz"), "K-10 FAIL 命令层回到了无分母直装");
+    let ui = read("src-tauri/bootstrap/js/10-ui.js").replace(' ', "");
+    assert!(!ui.contains("ratio||0") && !ui.contains("ratio??0"), "K-10 FAIL 无分母被当成 0（假条会长回来）");
+    eprintln!("K-10 PASS reverse judgement valid");
 }

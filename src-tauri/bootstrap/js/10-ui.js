@@ -25,7 +25,7 @@
   // -- 安装/下载的统一文字出口（SSOT  节 3.2，唯一实现）--
   // 为什么集中在这里：历史上 node / npm / 内核 / 桌面壳各画各的（进度条与纯文字并存），
   //   同一件事在不同阶段长得不一样；而且进度条常与真实进度脱节，反而让人误判「卡死」。
-  //   现在一律只改 status 单行文字与步骤条高亮，**不触碰任何进度条元素**（门禁 G-3/T-7）。
+  //   现在文字与条都只从这里出：条只在事件带真分母比值时出现（installMeter），其余一律隐藏。
   var INSTALL_TARGET = { node: 'Node.js', npm: 'npm', kernel: '内核', shell: '桌面版本' };
   // kind 是枚举（SSOT  节 2.4）：它只决定文案目标与步骤条落点，**不改变任何样式**。
   var INSTALL_STEP = { node: 0, npm: 0, shell: 1, kernel: 2 };
@@ -36,6 +36,17 @@
 
   function installTarget(kind) { return INSTALL_TARGET[kind] || '组件'; }
 
+  // 进度条的**唯一写入点**：只接受 0..1 的真实比值；null/undefined = 本步骤没有可测分母 -> 隐藏。
+  // 为什么绝不把「无分母」画成 0：0 会被读成「还没开始」，于是没有进度的步骤在界面上伪装成
+  // 卡在原地的进度 —— 比没有条更误导。比值只能来自事件里的 p.progress（后端 download_line 算出）。
+  function installMeter(ratio) {
+    var el = NS.$('dlMeter');
+    if (!el) return;
+    var r = (typeof ratio === 'number' && isFinite(ratio)) ? Math.max(0, Math.min(1, ratio)) : null;
+    el.style.display = r === null ? 'none' : '';
+    if (r !== null) el.value = r;
+  }
+
   // 版本号形态归一（唯一实现）：Node 契约自带 v，npm 与内核/桌面壳的版本号都不带。
   //   形态规则一旦散落到各播报点，同一行里就会出现两种写法，且每处都可能写错。
   //   未探测到版本时返回 ''，由调用方如实说明（绝不拿别的组件的版本顶替）。
@@ -45,22 +56,27 @@
     return /^\d/.test(s) ? 'v' + s : s;
   }
 
-  function installBegin(kind, text) {
+  function installBegin(kind, text, ratio) {
     var at = INSTALL_STEP[kind];
     // 只前进、不回退：守卫对齐等场景会在更靠后的阶段调用，回退步骤条会误导进度。
     if (at != null && at > NS.cur) setStep(at);
+    installMeter(ratio);
     status(text || ('正在下载 ' + installTarget(kind) + ' …'));
   }
 
-  function installText(kind, text) { if (text) status(text); }
+  // ratio 来自事件的 progress 字段：后端发 null 就是「这一步没有分母」，条必须随之消失，
+  // 不能让它停在最后一个百分比上（那会被读成下载卡住）。
+  function installText(kind, text, ratio) { installMeter(ratio); if (text) status(text); }
 
   function installDone(kind, text) {
+    installMeter(null);
     // 完成文案完全同形：<目标> <版本> 已就绪（SSOT  节 3.2）；形态归一只经 versionLabel 这一处。
     var v = versionLabel(text);
     status(installTarget(kind) + (v ? ' ' + v : '') + ' 已就绪');
   }
 
   function installFail(kind, text) {
+    installMeter(null);
     // 失败必须走既有 fail 面板（含镜像自助出口的自动展开），安装层不另开样式、不吞错。
     fail((INSTALL_FAIL_PREFIX[kind] || '安装失败：') + (text || '未知'));
   }
@@ -192,7 +208,7 @@
   NS.versionLabel = versionLabel;
   NS.wait = wait;
   NS.hideFail = hideFail;
-  NS.install = { begin: installBegin, text: installText, done: installDone, fail: installFail };
+  NS.install = { begin: installBegin, text: installText, done: installDone, fail: installFail, meter: installMeter };
   NS.withTimeout = withTimeout;
   NS.phase = phase;
   NS.errText = errText;

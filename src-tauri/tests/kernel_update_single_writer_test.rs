@@ -117,7 +117,11 @@ fn sw4_single_install_and_owner_restart() {
     let body = &src[start..];
     let end = body.find("\n}").map(|i| start + i).unwrap_or(src.len());
     let body = &src[start..end];
-    assert!(!body.contains("install_version(") && !body.contains("run_npm_install"),
+    assert!(
+        !body.contains("install_version(") && !body.contains("run_npm_install")
+            // 下载/本地装同样是「写内核包」，绕开 core_apply_inner 就会出现第二写入者（T-7 之后新增两条口子）
+            && !body.contains("install_local(") && !body.contains("fetch_kernel_tgz(")
+            && !body.contains("fetch_dist("),
         "SW-4 失败：kernel_update_apply 自行安装（应复用 core_apply_inner）");
 }
 
