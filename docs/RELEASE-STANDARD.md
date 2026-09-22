@@ -59,7 +59,7 @@ GitHub **永远不会执行**它；但 `docs/RELEASE-AND-BUILD-DECISION.md` 与 
 | H0 | 版本提升（三处同步）| `bash scripts/bump-shell.sh <ver>` | 本地（只改三个文件，不产产物）| 是 |
 | H1 | 版本一致性 | `node scripts/verify-shell-versions.js` | 本地或 CI（纯静态读文件）| 是（CI 的 `version` job 亦强制）|
 | H2 | 门禁测试 | `cargo test --bins` + **自动枚举** `tests/*.rs`（每个文件一个 `--test`；`updater_artifacts` 除外，见 H7）| **仅 CI**（`build` job）| 是 |
-| H3 | 无头冒烟 | `cargo build` → `./target/debug/dsh-supervisor-gui --node-plan` | **仅 CI**（`build` job）| 是 |
+| H3 | 无头冒烟 | `cargo build` → `--node-plan`（三平台，必判退出码与结论行）；Linux 追加 `--watchdog` 端到端（伪内核 → 拉起 → `/healthz` 判就绪）；Windows 追加 `--service-plan --service-apply`（真 `schtasks /Create` + `/Query` 回读，随后清理计划任务）| **仅 CI**（`build` job）| 是 |
 | H4 | 构建 + 打包 | `npx --yes @tauri-apps/cli@2 build --bundles "<matrix.bundles>"` | **仅 CI**（各 runner 只构建自己平台）| 是 |
 | H5 | glibc 基座门禁（仅 Linux）| `bash ci/check-glibc.sh <bin> 2.35` | **仅 CI**（ubuntu-22.04 runner）| 是 |
 | H6 | 组装 npm 壳包 | `node shell-release/assemble-shell-pkg.js --platform <p> [--require-sig]`（缺 `.sig` 仅在带 `--require-sig` 时判红；CI 只对 tag 构建传该开关）| **仅 CI** | 是 |

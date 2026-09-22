@@ -31,6 +31,20 @@
       ' · npm ' + (NS.versionLabel(t.npm) || '版本未回读');
   }
 
+  // 「已经探到了什么」的一句话进度（全部来自壳回传的探测记录，见 10-ui.js 的 probeSummary）。
+  //
+  //   为什么单独成函数：旧实现这里只念「卡在哪个 node 候选」，npm 的探测过程**从来没上过屏** ——
+  //   用户实测的「检测环境里看不到完整的 NPM 检测」不是错觉，是这里确实没说。
+  //   现在每个探测维度各占一格，名字与顺序都由壳给出（前端没有第二份维度表可以漂移）。
+  function envProgressLine(st) {
+    var parts = [];
+    var line = NS.probeSummary(st);
+    if (line) parts.push(line);
+    var s = st && st.stuck;
+    if (s && s.on) parts.push('正在 ' + s.on + ' · 已 ' + Math.round((s.ms || 0) / 1000) + 's 无响应');
+    return parts.length ? ' ' + parts.join(' · ') : '';
+  }
+
   function stepEnv() {
     NS.setStep(0);
     NS.phase('env');
@@ -61,17 +75,15 @@
           if (st.probeError) {
             settled = true;
             NS.envStuck = st.stuck || null;
-            NS.fail('环境探测失败：' + st.probeError);
+            NS.fail('环境探测失败：' + st.probeError + ' · 已探明：' + (NS.probeSummary(st) || '无任何维度结论'));
             NS.$('btnForceNode').style.display = '';
             resolve(null);
             return;
           }
           if (st.probing) {
             var s = st.stuck;
-            if (s && s.on) {
-              NS.envStuck = s;
-              NS.status('正在检测系统环境…（' + s.on + ' · 已 ' + Math.round((s.ms || 0) / 1000) + 's 无响应）');
-            }
+            if (s && s.on) NS.envStuck = s;
+            NS.status('正在检测系统环境…' + envProgressLine(st));
             if (Date.now() >= deadline) {
               settled = true;
               NS.failEnvTimeout(st);
@@ -97,10 +109,14 @@
 
   function failEnvTimeout(st) {
     NS.envStuck = (st && st.stuck) || null;
-    var extra = (NS.envStuck && NS.envStuck.on)
-      ? ' · 卡在：' + NS.envStuck.on + '（已 ' + Math.round((NS.envStuck.ms || 0) / 1000) + 's 无响应）'
-      : '';
-    NS.fail('环境检测超时（探针无响应，可能有异常的可执行文件占位）' + extra);
+    // 「已探明」= 逐维度结论表（进行中的那一步以 `?` 形态带耗时出现在其中）。
+    //   只剩一句「超时」时，用户与排障者都不知道探测走到了哪一格：node 候选是否跑完、
+    //   npm 判过没有、前缀可写性查没查。没有缓存可念时（每次查询都没回来）退回阶段线索。
+    var known = NS.probeSummary(st)
+      || ((NS.envStuck && NS.envStuck.on)
+        ? '卡在 ' + NS.envStuck.on + '（已 ' + Math.round((NS.envStuck.ms || 0) / 1000) + 's 无响应）'
+        : '无任何维度结论');
+    NS.fail('环境检测超时（探针无响应，可能有异常的可执行文件占位）· 已探明：' + known);
     // 给出「跳过检测直接安装」出口：这是**唯一**能让用户自救的路径
     // （下载 Node 不需要本机已有 Node）。
     NS.$('btnForceNode').style.display = '';

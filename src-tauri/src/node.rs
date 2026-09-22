@@ -9,15 +9,57 @@ use std::path::{Path, PathBuf};
 /// Node 安装包 30-90MB，必须给足；否则慢网下会误报为网络故障。
 const HTTP_TOTAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
+/// 取回整个响应体（不关心进度的小文件：SHASUMS256.txt、index.json）。
 fn http_get_bytes(url: &str) -> Result<Vec<u8>, String> {
+    http_get_bytes_progress(url, None)
+}
+
+/// 取回整个响应体，**边下边报字节进度**。
+///
+/// `on_bytes(已取回, 总量)`：总量取自服务端的 `Content-Length`，**取不到就是 `None`**
+///   —— 没有分母时宁可只报「已取回多少」，也不许把臆造的分数发出去（B4）。
+/// 为什么按块回调而不是整块：Node 官方归档 30~90MB，慢网下整块读取要数分钟，
+///   而这段时间此前对 UI 完全不可见（用户报「强制更新卡住」的正是这类步骤）。
+fn http_get_bytes_progress(
+    url: &str,
+    on_bytes: Option<&dyn Fn(u64, Option<u64>)>,
+) -> Result<Vec<u8>, String> {
     // 与镜像探测共用同一个 agent：代理与超时只有一处定义（见 mirror::agent）。
     let resp = crate::mirror::agent()
         .get(url)
         .timeout(HTTP_TOTAL_TIMEOUT)
         .call()
         .map_err(|e| format!("下载失败 {}: {}", url, e))?;
-    let mut buf = Vec::new();
-    resp.into_reader().read_to_end(&mut buf).map_err(|e| format!("读取响应失败: {}", e))?;
+    let total = resp
+        .header("content-length")
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .filter(|t| *t > 0);
+    // 预分配只是省扩容，因此对声称的大小设上限（Content-Length 由服务端给，不可全信）。
+    let mut buf = Vec::with_capacity(total.unwrap_or(0).min(64 * 1024 * 1024) as usize);
+    let mut reader = resp.into_reader();
+    let mut chunk = [0u8; 64 * 1024];
+    // 每 64KB 一次回调会打出上百条事件；按「总量的 1%」或「512KB（无总量时）」节流。
+    let report_every = total.map(|t| (t / 100).max(1)).unwrap_or(512 * 1024);
+    let mut next_report = 0u64;
+    loop {
+        let n = reader.read(&mut chunk).map_err(|e| format!("读取响应失败: {}", e))?;
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        if let Some(cb) = on_bytes {
+            let got = buf.len() as u64;
+            if got >= next_report {
+                next_report = got + report_every;
+                cb(got, total);
+            }
+        }
+    }
+    // 收尾必报一次真实总量：否则最后一段字节（可能占总量近 1%）永远不在进度里，
+    //   「已取回 45.1 / 45.6 MB」会被读成下载停住。
+    if let Some(cb) = on_bytes {
+        cb(buf.len() as u64, total);
+    }
     Ok(buf)
 }
 
@@ -155,11 +197,15 @@ fn version_gt(a: &str, b: &str) -> bool {
 /// 源顺序（2026-09-11 重写）：**优先使用发现阶段选出的最快源**（`preferred`），
 /// 其余候选作为回退。校验失败（哈希不符）视为该源不可信，**换下一个源重试** ——
 /// 这既保证正确性，也避免被单个镜像的损坏文件卡死。
+///
+/// `on_bytes`：**归档**下载的字节进度（已取回 / 总量，总量可为 None）。
+///   SHASUMS256.txt 是几十 KB 的附属文件，不占进度语义，因此**不**回调它。
 pub fn download_verified(
     version: &str,
     file: &str,
     dl_dir: &Path,
     preferred: Option<&str>,
+    on_bytes: &dyn Fn(u64, Option<u64>),
 ) -> Result<PathBuf, String> {
     std::fs::create_dir_all(dl_dir).map_err(|e| e.to_string())?;
     let mirrors = crate::mirror::load();
@@ -178,7 +224,7 @@ pub fn download_verified(
     for base in &order {
         let base: &str = base.as_str();
         let file_url = format!("{}/{}/{}", base, version, file);
-        let data = match http_get_bytes(&file_url) {
+        let data = match http_get_bytes_progress(&file_url, Some(on_bytes)) {
             Ok(d) => d,
             Err(e) => { last_err = Some(e); continue; }
         };

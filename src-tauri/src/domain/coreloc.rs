@@ -18,35 +18,22 @@ pub(crate) fn core_exe_names() -> &'static [&'static str] {
     crate::platform::current().core_exe_names()
 }
 
-/// 去掉 Windows `\\?\` / `\\?\UNC\` verbatim 前缀。
-///
-/// 为什么必须：`std::fs::canonicalize` 在 Windows 上返回 `\\?\C:\...`，而
-///   node / PowerShell / 多数子进程工具**不接受**该前缀（真机实测 node 报
-///   `EISDIR: lstat 'C:'`）。定位得到真实路径后必须归一化。
-pub fn strip_verbatim(p: &std::path::Path) -> PathBuf {
-    let s = p.to_string_lossy();
-    if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
-        return PathBuf::from(format!(r"\\{}", rest));
-    }
-    if let Some(rest) = s.strip_prefix(r"\\?\") {
-        return PathBuf::from(rest);
-    }
-    p.to_path_buf()
-}
-
 /// 把 npm 垫片规范化为**可被 node 执行的 JS 入口**。
 ///
 /// Windows 的 npm 全局 bin 是 `<prefix>\<name>.cmd` 批处理垫片；`node <垫片>` 会把它
 ///   当 JS 解析 → 必然失败。真实入口在 `<prefix>\node_modules\<pkg>\bin\<name>`。
 /// 找不到包内入口时原样返回（Windows 平台层会退回 `cmd /C` 执行垫片）。
+///
+/// 返回值总是**外部工具可用**的规范路径（入参不必已归一 —— 归一在 `platform::external_path`
+///   这一处完成，本函数顺带做完，调用方不得再各自剥一遍前缀）。
 pub fn normalize_guard(bin: PathBuf, pkg: Option<&str>) -> PathBuf {
-    let bare = strip_verbatim(&bin);
+    let bare = crate::platform::external_path(&bin);
     let ext = bare.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase());
     if matches!(ext.as_deref(), Some("cmd") | Some("bat") | Some("ps1")) {
         if let (Some(dir), Some(pkg), Some(stem)) = (bare.parent(), pkg, bare.file_stem()) {
             let internal = dir.join("node_modules").join(pkg).join("bin").join(stem);
             if internal.is_file() {
-                return strip_verbatim(&internal);
+                return crate::platform::external_path(&internal);
             }
         }
     }
@@ -87,10 +74,10 @@ pub(crate) fn locate_core_candidates(resource_dir: Option<PathBuf>) -> Vec<PathB
         }
         if !p.is_file() { return; }
         // ① 解析 ~/.local/bin 软链到包内真实路径；
-        // ② 去掉 Windows \\?\ verbatim 前缀（node 不接受）；
-        // ③ .cmd 垫片 → 包内真实 JS 入口（node 不能执行 .cmd）。
+        // ②③ 都由 normalize_guard 完成：剥掉 Windows verbatim/device 前缀（外部工具不接受，
+        //      规则只在 platform::external_path 一处），并把 .cmd 垫片换成包内 JS 入口。
         let real = normalize_guard(
-            strip_verbatim(&std::fs::canonicalize(&p).unwrap_or(p)),
+            std::fs::canonicalize(&p).unwrap_or(p),
             pkg_for_add.as_deref(),
         );
         if !out.contains(&real) { out.push(real); }
@@ -194,13 +181,6 @@ mod tests {
         std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
         std::fs::write(&bin, b"// fake guard\n").unwrap();
         std::fs::write(dir.join("package.json"), format!("{{\"version\":\"{}\"}}", version)).unwrap();
-    }
-
-    #[test]
-    fn strip_verbatim_removes_windows_prefix() {
-        assert_eq!(strip_verbatim(Path::new(r"\\?\C:\x\y")), PathBuf::from(r"C:\x\y"));
-        assert_eq!(strip_verbatim(Path::new(r"\\?\UNC\srv\share\x")), PathBuf::from(r"\\srv\share\x"));
-        assert_eq!(strip_verbatim(Path::new("/home/u/bin/dsh-supervisor")), PathBuf::from("/home/u/bin/dsh-supervisor"));
     }
 
     #[test]

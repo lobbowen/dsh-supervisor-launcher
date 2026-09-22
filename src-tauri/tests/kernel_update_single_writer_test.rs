@@ -9,12 +9,15 @@
 //! 现契约：**内核包安装/升级只有壳一个写入者**；守卫只提供只读状态，从不安装/重启自己。
 //! 面板由内核托管、运行在壳的内容 iframe 内、**没有 Tauri IPC**，故经 postMessage 请求壳主帧
 //! 代执行。本门禁把该契约钉死：
-//!   SW-1  桥契约常量：协议版本 = 1、三类消息、代执行命令名
+//!   SW-1  桥契约常量：协议版本 = 1、三类消息、代执行命令名、**等待预算的唯一定义处**
 //!   SW-2  shell.html 经 shell_bridge_contract 取常量（不硬编码消息类型）
 //!   SW-3  shell.html 只接受内容 iframe 且 origin 回环，回复 targetOrigin = ev.origin
-//!   SW-4  安装只有一处实现 core_apply_inner；kernel_update_apply 安装后由所有者停+重拉守卫
+//!   SW-4  安装只有一处实现 core_apply_inner；kernel_update_apply 安装后由所有者停+重拉守卫；
+//!         总预算不得在命令层再写一份数字（B4b）
 //!   SW-5  两个新命令已在 main.rs 注册
 //!   SW-6  反向：判据能识别「不校验来源 / 回复 '*'」的桥（门禁非空转）
+//!   SW-7  内核安装进度必须**多帧中继**给面板（面板无 IPC），且 kernelKind/maxWaitMs 由契约下发
+//!   SW-8  反向：判据能识别「只回一条 stage:'start' 就不管了」的旧形态（B4b 前的真实形态）
 //!
 //! 说明：这是**静态源码断言**（与 platform_launch_contract / bootstrap_flow 同一惯例）。
 
@@ -50,7 +53,7 @@ fn bridge_is_valid(src: &str) -> bool {
     ]).is_empty()
 }
 
-// ── SW-1：桥契约常量（协议版本/消息类型/命令名）──
+// ── SW-1：桥契约常量（协议版本/消息类型/命令名/预算）──
 #[test]
 fn sw1_bridge_contract_constants() {
     let src = read("src/bridge.rs");
@@ -60,6 +63,9 @@ fn sw1_bridge_contract_constants() {
         "\"dsh:kernel-update-result\"",
         "\"dsh:kernel-update-progress\"",
         "\"kernel_update_apply\"",
+        // B4b：等待预算是**后端事实**，必须与消息类型同处一个单一事实源。
+        "KERNEL_UPDATE_BUDGET_MS: u64 = 17 * 60 * 1000",
+        "pub const KERNEL_UPDATE_MAX_WAIT_MS: u64 = KERNEL_UPDATE_BUDGET_MS + KERNEL_UPDATE_GRACE_MS",
     ]);
     assert!(missing.is_empty(), "SW-1 失败：桥契约常量缺失 {:?}", missing);
 }
@@ -86,7 +92,7 @@ fn sw3_source_and_origin_validated() {
     assert!(!src.contains("postMessage(msg, '*')"), "SW-3 失败：回复使用了 '*'");
 }
 
-// ── SW-4：安装单一实现 + 重启由所有者完成 ──
+// ── SW-4：安装单一实现 + 重启由所有者完成 + 预算只有一个定义处 ──
 #[test]
 fn sw4_single_install_and_owner_restart() {
     let src = read("src/commands/mod.rs");
@@ -96,10 +102,17 @@ fn sw4_single_install_and_owner_restart() {
         "core_apply_inner(app.clone()).await",
         "pub async fn kernel_update_apply",
         "crate::platform::service().stop()",
-        "guardctl::is_alive(port)",
+        "guardctl::port_open(port)",
         "guardctl::ensure_guard(&app)",
+        // B4b：deadline 必须**取**自 bridge.rs 的那个常量。原写法是 `from_secs(17 * 60)`，
+        //   于是同一事实有 Rust 与 JS 两份账，改一处就静默失配。
+        "Duration::from_millis(crate::bridge::KERNEL_UPDATE_BUDGET_MS)",
     ]);
     assert!(missing.is_empty(), "SW-4 失败：安装/重启语义缺失 {:?}", missing);
+    assert!(
+        !src.contains("from_secs(17 * 60)"),
+        "SW-4 失败：命令层又写了一份 17 分钟总预算（唯一来源是 bridge::KERNEL_UPDATE_BUDGET_MS）"
+    );
     let start = src.find("pub async fn kernel_update_apply").expect("kernel_update_apply");
     let body = &src[start..];
     let end = body.find("\n}").map(|i| start + i).unwrap_or(src.len());
@@ -123,4 +136,49 @@ fn sw6_reverse_judgement_is_not_vacuous() {
     assert!(!bridge_is_valid(bad), "SW-6 失败：判据把不校验来源、回复 '*' 的坏桥当成合格（门禁空转）");
     let good = read("bootstrap/shell.html");
     assert!(bridge_is_valid(&good), "SW-6 失败：判据无法识别合格桥");
+}
+
+/// 进度中继是否**成形**的可判定谓词（SW-7 及其反向自检共用）。
+///
+/// 每一项都对应一个真实失效模式：
+///   · 没有 install_progress 监听 —— 面板全程只有一句「start」，17 分钟零反馈（B4b 的根因）；
+///   · 按 `BRIDGE.kernelKind` 筛 —— 在 JS 里写死 `"kernel"` 就是给 kind 开第二份账（G-12B 同源）；
+///   · 第一帧带 `maxWaitMs` —— 面板的等待上界必须由后端事实给出，而不是自己编一个 6 分钟；
+///   · 终结路径清 `kernelPending` 且拒第二个在途请求 —— 否则两次 npm install 并发写同一前缀。
+fn relay_is_wired(src: &str) -> Vec<String> {
+    has_all(src, &[
+        "listen('install_progress'",
+        "BRIDGE.kernelKind",
+        "kernelPending",
+        "maxWaitMs",
+        "type: BRIDGE.types.progress, requestId: kernelPending.id",
+    ])
+}
+
+// ── SW-7：内核安装进度必须中继给面板，且面板的等待上界来自后端（B4b）──
+#[test]
+fn sw7_kernel_progress_relayed_to_panel() {
+    let html = read("bootstrap/shell.html");
+    let missing = relay_is_wired(&html);
+    assert!(missing.is_empty(), "SW-7 失败：进度中继接线不完整（缺 {:?}）", missing);
+    // 面板只应收到**内核**的事件：桌面壳自更新（kind=shell）走的是另一条 UI 路径。
+    assert!(
+        html.contains("p.kind !== BRIDGE.kernelKind"),
+        "SW-7 失败：中继未按契约下发的 kernelKind 过滤（会把别的 kind 念给面板）"
+    );
+    // 契约必须真的把这两件事实下发（否则 shell.html 只能硬编码）。
+    let cmd = read("src/commands/mod.rs");
+    let missing2 = has_all(&cmd, &["\"kernelKind\": InstallKind::Kernel.as_str()", "\"maxWaitMs\": crate::bridge::KERNEL_UPDATE_MAX_WAIT_MS"]);
+    assert!(missing2.is_empty(), "SW-7 失败：桥契约未下发 {:?}", missing2);
+}
+
+// ── SW-8：反向：旧形态（只回一条 start、无在途去重）必须被判为不合格 ──
+#[test]
+fn sw8_relay_reverse_detects_old_form() {
+    let old = "replyToPanel(src, origin, { v: BRIDGE.v, type: BRIDGE.types.progress, requestId: rid, stage: 'start' });";
+    assert!(
+        !relay_is_wired(old).is_empty(),
+        "SW-8 失败：判据认不出「只回一条 start 就不管了」的旧形态（门禁空转）"
+    );
+    assert!(relay_is_wired(&read("bootstrap/shell.html")).is_empty(), "SW-8 失败：当前实现被误判");
 }

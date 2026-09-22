@@ -206,6 +206,88 @@ pub struct NodeArtifact {
     pub file: String,
 }
 
+/// 把**要交给外部工具的路径**规范成它们能接受的形式 —— 全仓唯一实现。
+///
+/// 目前唯一的规则：剥掉 Windows 的 verbatim（`\\?\`、`\\?\UNC\`）与 device（`\\.\`）
+/// 命名空间前缀。`std::env::current_exe()` 与 `std::fs::canonicalize()` 都会返回这种
+/// 形式，而**外部工具不一定接受**：npm 侧已实测栽在这种形态上（`--prefix` 带前缀 →
+/// arborist `realpathCached` 栈溢出、以及 1.1.5 的 `EISDIR`，见
+/// `tests/kernel_install_evidence_test.rs` 首部）。计划任务的动作串（`schtasks /TR`）
+/// 来自同一个源头，因此它也是 Windows 启动失败的**第一个要排除项**；在收口之前，这类
+/// 失败连「写进定义的路径长什么样」都看不到。
+///
+/// ## 为什么必须是「一处实现」（2026-09-21 B2 合并）
+/// 此前有**两份规则不同的实现**：`domain/coreloc.rs`（Path 版，`UNC` 段大小写敏感、
+/// 无 `\\.\`）与 `core.rs`（str 版，大小写不敏感、含 `\\.\`）。同一个 `canonicalize()`
+/// 结果经两条路径可得到两个不同字符串，而「外部工具能否执行它」恰好取决于这个字符串。
+/// 现取两者规则的**并集**，落在平台层（路径形态属平台事实，不是业务选择）。
+///
+/// ## 为什么写成**不带 `#[cfg]`** 的纯函数
+/// 若写成 `#[cfg(windows)]`，POSIX CI 既编译不到也测不到这段规则 —— 那正是两份分叉
+/// 实现能长期存活的原因。非 Windows 路径在这里恒等，于是三平台的 CI 都跑同一份实现。
+pub fn external_path(p: &std::path::Path) -> std::path::PathBuf {
+    // concat! 拼出「以反斜杠结尾」的字面量（raw string 不能以反斜杠结尾）。
+    const VERBATIM: &str = concat!(r"\\?", "\\");
+    const VERBATIM_UNC: &str = concat!(r"\\?\UNC", "\\");
+    const DEVICE: &str = concat!(r"\\.", "\\");
+    let s = p.to_string_lossy();
+    // UNC 必须先判：`\\?\UNC\...` 也以 `\\?\` 开头，顺序反了会把服务器名一起剥掉。
+    if s.len() >= VERBATIM_UNC.len()
+        && s.is_char_boundary(VERBATIM_UNC.len())
+        && s[..VERBATIM_UNC.len()].eq_ignore_ascii_case(VERBATIM_UNC)
+    {
+        return std::path::PathBuf::from(format!(r"\\{}", &s[VERBATIM_UNC.len()..]));
+    }
+    for prefix in [VERBATIM, DEVICE] {
+        if let Some(rest) = s.strip_prefix(prefix) {
+            return std::path::PathBuf::from(rest);
+        }
+    }
+    p.to_path_buf()
+}
+
+/// 壳自身可执行文件的**规范路径**（全仓唯一入口）。
+///
+/// 为什么必须单点：三个调用点曾各自 `std::env::current_exe()`，对失败的处理**各不相同** ——
+/// `LaunchSpec::from_runtime` 用 `unwrap_or_default()`，取不到时得到**空路径**并照原样写进
+/// 服务定义（`"" --run-guard`），随后 schtasks `/Run` 以退出码 1 失败且无处说明原因；
+/// 另两处把同一个失败咽成 `null`。真机上 Windows 的 `current_exe()` 还返回 **verbatim
+/// 形式**（`\\?\C:\...`），计划任务的动作串就是这个字符串 —— `/Run` 报「找不到指定的
+/// 文件」时它是第一个要排除的对象。取不到**必须报错**、取到**必须规范**：两类静默降级
+/// 一次消除，`--service-plan` 也因此能把「将要写进定义的那一行」如实打出来给人看。
+pub fn self_exe() -> Result<std::path::PathBuf, String> {
+    let p = std::env::current_exe().map_err(|e| format!("无法取得壳自身可执行路径：{}", e))?;
+    Ok(external_path(&p))
+}
+
+/// 守卫子进程的标准流：**stdin 关死，输出汇入守卫日志**。
+///
+/// 为什么不能再 `Stdio::null()`（`--run-guard` 兜底 spawn 与 `exec_guard` 共 3 处）：
+/// 内核守卫是 node 进程，它**启动崩溃的原因只写在自己的 stderr 上**。全部丢弃后，
+/// `READY_TIMEOUT` 只能报「超时」，现场没有任何正文 —— 与 B1 修掉的「丢真话」同类。
+/// 日志打不开时退回 null：诊断通道不得反过来阻断启动（可用性优先，见 trait 文档）。
+pub fn guard_stdio(cmd: &mut std::process::Command) {
+    use std::process::Stdio;
+    let (out, err) = guard_stdio_streams(crate::update::guard_log_file());
+    cmd.stdin(Stdio::null()).stdout(out).stderr(err);
+}
+
+/// 「日志句柄 → 三条标准流」的**纯映射**（行为门禁的落点，避免测试依赖真实状态根）。
+fn guard_stdio_streams(
+    log: Option<std::fs::File>,
+) -> (std::process::Stdio, std::process::Stdio) {
+    use std::process::Stdio;
+    match log {
+        // 两条流各持一个句柄（O_APPEND 下单次写原子，两进程交叉写不会互相截断）。
+        Some(f) => match f.try_clone() {
+            Ok(out) => (Stdio::from(out), Stdio::from(f)),
+            // 克隆失败时**保住 stderr**：崩溃原因在那条流上，stdout 只是噪声。
+            Err(_) => (Stdio::null(), Stdio::from(f)),
+        },
+        None => (Stdio::null(), Stdio::null()),
+    }
+}
+
 /// 守卫启动所需的**已解析运行期事实**（来自 `runtime_contract`，见其头部的根因说明）。
 ///
 /// 为什么单独成类型：守卫是 `#!/usr/bin/env node` 脚本；服务管理器与 spawn 的 ambient PATH
@@ -234,14 +316,24 @@ pub struct LaunchSpec {
 impl LaunchSpec {
     /// 由运行期契约 + 已定位守卫组装（PATH 经 runtime_contract 单一实现）。
     /// 状态根取壳进程解析值（单一事实源），随服务定义与 spawn 注入内核。
-    pub fn from_runtime(rt: &crate::runtime_contract::NodeRuntime, guard: std::path::PathBuf) -> Self {
-        LaunchSpec {
-            node: rt.node.clone(),
-            guard,
+    ///
+    /// **构造即规范化**：四个路径字段全部过 [`external_path`]（壳路径经 [`self_exe`]）。
+    /// 归一必须发生在这里、而不是各平台实现里 —— 三平台的服务定义与 spawn 都从本类型
+    /// 取路径，只要有一条带 verbatim 前缀漏过去，那条路径在该平台上就**永久拉不起来**，
+    /// 且事后回读不到当时写进去的值（2026-09-21 Windows 真机的启动链正卡在这一段）。
+    ///
+    /// 返回 `Result`：壳自身路径取不到时**必须报错**，不得退化成空路径写进服务定义。
+    pub fn from_runtime(
+        rt: &crate::runtime_contract::NodeRuntime,
+        guard: std::path::PathBuf,
+    ) -> Result<Self, String> {
+        Ok(LaunchSpec {
+            node: external_path(&rt.node),
+            guard: external_path(&guard),
             env_path: crate::runtime_contract::env_path(&rt.node_bin_dir),
-            state_root: crate::env::state_root(),
-            shell: std::env::current_exe().unwrap_or_default(),
-        }
+            state_root: external_path(&crate::env::state_root()),
+            shell: self_exe()?,
+        })
     }
 
     /// 服务定义应执行的**稳定入口**：壳自身 + --run-guard。
@@ -279,6 +371,8 @@ pub fn exec_guard(spec: &LaunchSpec) -> Result<(), String> {
         .arg("daemon")
         .env("PATH", &spec.env_path)
         .env("DSH_SUPERVISOR_HOME", &spec.state_root);
+    // exec 前接管标准流：日志文件句柄随 exec 保留，node 的输出即落在守卫日志里。
+    guard_stdio(&mut cmd);
     Err(format!("exec 守卫失败: {}", cmd.exec()))
 }
 
@@ -305,12 +399,11 @@ pub fn exec_guard(spec: &LaunchSpec) -> Result<(), String> {
         c
     };
     cmd.env("PATH", &spec.env_path)
-        .env("DSH_SUPERVISOR_HOME", &spec.state_root)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        // DETACHED_PROCESS | CREATE_NO_WINDOW：分离运行，父进程（计划任务实例）即可退出。
-        .creation_flags(0x0000_0008 | 0x0800_0000);
+        .env("DSH_SUPERVISOR_HOME", &spec.state_root);
+    // 计划任务实例退出后 node 仍在跑，其 stderr 是**唯一**的崩溃证据 → 落盘而非丢弃。
+    guard_stdio(&mut cmd);
+    // DETACHED_PROCESS | CREATE_NO_WINDOW：分离运行，父进程（计划任务实例）即可退出。
+    cmd.creation_flags(0x0000_0008 | 0x0800_0000);
     cmd.spawn().map_err(|e| format!("启动守卫失败: {}", e))?;
     Ok(())
 }
@@ -614,5 +707,113 @@ mod launch_spec_tests {
         assert_eq!(line, "\"/home/John Smith/dsh-supervisor\" --run-guard");
         assert!(!line.contains("NODE SENTINEL") && !line.contains("GUARD SENTINEL"),
             "服务定义不得含 node/guard 路径：{}", line);
+    }
+
+    // ── verbatim / device 前缀剥除：**两份分叉实现合并后的唯一用例集** ──
+    //
+    // 这里跑在**所有** CI 平台上（函数无 `#[cfg]`）。原来 Windows 专属的那份
+    // 在 POSIX runner 上根本不参与编译，所以「规则分叉」从来没有门禁看得见。
+
+    fn ext(s: &str) -> String {
+        external_path(std::path::Path::new(s)).to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn external_path_strips_verbatim_drive_and_device_prefix() {
+        assert_eq!(ext(r"\\?\C:\Users\x\dsh.exe"), r"C:\Users\x\dsh.exe");
+        assert_eq!(ext(r"\\.\C:\x"), r"C:\x");
+    }
+
+    #[test]
+    fn external_path_strips_verbatim_unc_case_insensitively() {
+        assert_eq!(ext(r"\\?\UNC\srv\share\x"), r"\\srv\share\x");
+        // coreloc 版曾是大小写敏感的 —— `\\?\unc\...` 漏剥；合并后必须覆盖。
+        assert_eq!(ext(r"\\?\unc\srv\share"), r"\\srv\share");
+    }
+
+    #[test]
+    fn external_path_leaves_clean_and_unix_paths_untouched() {
+        // 反向：干净路径**不得**被改写（否则会引入新的「路径变了」问题）。
+        for p in [r"C:\Users\x", "/home/u/bin/dsh-supervisor", ""] {
+            assert_eq!(ext(p), p, "不应改写: {}", p);
+        }
+    }
+
+    #[test]
+    fn external_path_accepts_multibyte_without_splitting_char_boundary() {
+        // `is_char_boundary` 守卫的用例：前缀后紧跟多字节目录名时不得 panic
+        // （原 core.rs 版用 `s.len() >= VU.len()` 已避坑，合并后必须保住这个性质）。
+        let p = r"\\?\UNC\srv\中文共享\x";
+        assert_eq!(ext(p), r"\\srv\中文共享\x");
+        assert_eq!(ext(r"\\?\C:\用户\x"), r"C:\用户\x");
+    }
+
+    #[test]
+    fn self_exe_is_normalized_and_reports_failure() {
+        // 真机行为：能取到时必须是**可交给外部工具**的绝对路径（不含 verbatim 前缀）。
+        let got = self_exe().expect("测试环境应能取得壳自身路径");
+        assert!(got.is_absolute(), "壳路径必须是绝对路径: {}", got.display());
+        assert!(
+            !got.to_string_lossy().starts_with(r"\\?\"),
+            "壳路径不得带 verbatim 前缀（外部工具不接受该形态，写进服务定义后失败无从归因）: {}",
+            got.display()
+        );
+    }
+
+    #[test]
+    fn guard_streams_keep_child_output_and_fall_back_to_null() {
+        // 兜底 spawn 与 exec_guard 共用 `guard_stdio` → 本函数的两条流：
+        // 日志可用时 stderr **必须**指向文件，否则内核崩溃原因再次进入黑洞
+        // （本轮 Windows 事故的直接后果：READY_TIMEOUT 只报「超时」，没有任何正文）。
+        let dir = std::env::temp_dir().join(format!("dsh-guardio-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join("guard.log"))
+            .unwrap();
+
+        // 正向按**现场**判，不按 `{:?}` 判：std 的 `Stdio` 的 Debug 恒为 `Stdio { .. }`
+        //   （1.98.1 的 `impl fmt::Debug for Stdio` 用 finish_non_exhaustive），
+        //   运行期从返回值里取不出「这条流最终指向 null 还是文件」——判不出来的断言就是空转。
+        //   所以这里真的拉起一个子进程，看它的两条流有没有落到那个文件里。
+        let (out, err) = guard_stdio_streams(Some(f));
+        spawn_marker_child(out, err).wait().expect("子进程应能跑完");
+        let log = std::fs::read_to_string(dir.join("guard.log")).unwrap_or_default();
+        assert!(
+            log.contains("dsh-mark-out") && log.contains("dsh-mark-err"),
+            "日志可用时两条流都得进文件: {log:?}"
+        );
+
+        // 反向：日志不可用时**退回 null**（不是 inherit 灌进宿主，也不是让拉起整体失败）。
+        //   这一半没有可观察的现场（null 与「父进程不读的管道」在小写入下都跑得完），
+        //   只能钉形态：判据读的是本文件里那段实现，函数改名/分支变化都会立刻判红。
+        let (out, err) = guard_stdio_streams(None);
+        spawn_marker_child(out, err).wait().expect("无日志时也必须能拉起");
+        //   include_str! 嵌的是**磁盘字节**，Windows 检出可能是 CRLF → 锚点里的 `\n` 永不匹配。
+        let src = include_str!("mod.rs").replace("\r\n", "\n");
+        let body = &src[src.find("fn guard_stdio_streams(").expect("guard_stdio_streams 已改名：同步本判据")..];
+        let body = &body[..body.find("\n}\n").expect("guard_stdio_streams 边界") + 3];
+        assert!(
+            body.contains("None => (Stdio::null(), Stdio::null())"),
+            "无日志时两条流必须退回 null（原断言用 Stdio 的 Debug 渲染判 Null，std 不渲染该字段，恒假）"
+        );
+        assert!(!body.contains("Stdio::inherit()"), "不得把守卫输出接到宿主进程");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 用给定的两条流拉起一个「各写一行到 stdout/stderr」的子进程。
+    fn spawn_marker_child(
+        out: std::process::Stdio,
+        err: std::process::Stdio,
+    ) -> std::process::Child {
+        let mut c = std::process::Command::new(if cfg!(windows) { "cmd" } else { "/bin/sh" });
+        if cfg!(windows) {
+            c.args(["/C", "echo dsh-mark-out & echo dsh-mark-err>&2"]);
+        } else {
+            c.args(["-c", "echo dsh-mark-out; echo dsh-mark-err >&2"]);
+        }
+        c.stdin(std::process::Stdio::null()).stdout(out).stderr(err).spawn().expect("spawn 标记子进程")
     }
 }

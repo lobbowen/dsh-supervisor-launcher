@@ -15,8 +15,15 @@ fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
+/// 读源码文本。换行一律归一化为 LF：Windows 检出可能是 CRLF（actions/checkout 的
+/// auto-normalize），而 G-12/G-13 的反向针脚是**跨行字面量**，带 `\r` 时永不匹配 →
+/// 「已收口」的假绿。口径同各 `tests/*.rs` 的 `read()` 与 B57。
+fn lf(s: String) -> String {
+    if s.contains('\r') { s.replace("\r\n", "\n") } else { s }
+}
+
 fn read(rel: &str) -> String {
-    fs::read_to_string(root().join(rel)).unwrap_or_else(|e| panic!("读取 {} 失败: {}", rel, e))
+    lf(fs::read_to_string(root().join(rel)).unwrap_or_else(|e| panic!("读取 {} 失败: {}", rel, e)))
 }
 
 /// 递归收集目录下所有常规文件。
@@ -39,7 +46,7 @@ fn walk(rel: &str) -> Vec<(PathBuf, String)> {
     walk_files(&root().join(rel), &mut files);
     files
         .into_iter()
-        .filter_map(|p| fs::read_to_string(&p).ok().map(|s| (p, s)))
+        .filter_map(|p| fs::read_to_string(&p).ok().map(|s| (p, lf(s))))
         .collect()
 }
 
@@ -88,16 +95,31 @@ fn code_only(body: &str) -> String {
         .join("\n")
 }
 
-/// G-1：node_status 必须回传 npm 两字段，且来源是**真实探测**（probe_npm）。
+/// G-1：node_status 必须回传 npm 三字段，且 npm 可用性只出自**一条真实执行**的探针。
 /// 不变量 T-1：npmOk 不得伪造 —— 字段存在还不够，必须能追溯到 probe_npm。
+/// 2026-09-22（B5）：探针实现从命令层下沉到 `domain/probes.rs`，命令层只做组装 ——
+///   原先命令层自己 spawn npm，于是「面板用的探针」与「契约用的探针」是两条代码路径，
+///   同一次轮询里 npm 被执行两遍（第三遍在 derive_usable）。
 #[test]
 fn g1_node_status_exposes_real_npm_probe() {
     let cmd = read("src/commands/mod.rs");
     assert!(cmd.contains("npmOk"), "node_status 未回传 npmOk（npm 与 node 同权，缺失即漏判）");
     assert!(cmd.contains("npmPath"), "node_status 未回传 npmPath（UI/排障无法定位 npm）");
-    assert!(cmd.contains("probe_npm"), "node_status 的 npmOk 未追溯 probe_npm（禁止伪造 npm 存在）");
     // 判 false 时必须同时给出**为什么**：面板只有拿到原因才能区分「缺 npm」与「npm 拉不起来」。
     assert!(cmd.contains("npmWhy"), "node_status 未回传 npmWhy（不可用原因不上屏，排障只能靠猜）");
+    assert!(
+        cmd.contains("probes::dependents"),
+        "node_status 未取用 domain/probes 的探测事实（npm 结论必须有唯一来源）"
+    );
+    assert!(
+        !code_only(&cmd).contains("probe_npm_usable("),
+        "命令层仍自行执行 npm（B5 后唯一调用点是 domain/probes.rs）—— 两条 spawn 路径会给出两个结论"
+    );
+    let pb = read("src/domain/probes.rs");
+    assert!(
+        pb.contains("probe_npm_usable("),
+        "probes.rs 的 npmOk 未追溯 probe_npm_usable（禁止伪造 npm 存在，不变量 T-1b）"
+    );
     let rt = read("src/runtime_contract.rs");
     assert!(rt.contains("fn probe_npm"), "runtime_contract 缺 probe_npm（npm 真实探测的唯一实现）");
     // 唯一探测口必须能**输出**失败原因；返回 Option 的版本会把三类根因合并成一个 None。
@@ -117,10 +139,11 @@ fn has_npm_usable_call(body: &str) -> bool {
 
 /// G-2：run_install 函数体内必须校验 npm —— 否则「安装成功」只保证 node，
 /// 干净机器上 npm 仍缺失却 emit done（SSOT §1 的根因正是它）。
+/// 2026-09-21（B4）：管线随安装语义一起住在 `src/domain/install.rs`。
 #[test]
 fn g2_run_install_validates_npm_inside_body() {
-    let main = read("src/main.rs");
-    let body = code_only(&fn_body(&main, "fn run_install"));
+    let inst = read("src/domain/install.rs");
+    let body = code_only(&fn_body(&inst, "fn run_install"));
     let final_body = code_only(&fn_body(&read("src/node.rs"), "fn finalize_install"));
     // 校验可以下沉到 node::finalize_install（G-3 要求 main.rs 只做组装），
     //   但下沉后必须在**被委派的那一侧**真实发生 —— 注释不算证据。
@@ -229,12 +252,14 @@ fn g6_ui_js_exports_unified_install_api() {
     }
 }
 
-/// 抽出每个 `handle.emit(` 调用（到与之配平的右括号为止）。
-/// 为什么按调用切块：kind 与 version 必须在**同一次 emit 内**对账。按字符窗口取会串到下一条
+/// 抽出每个 `sig` 调用（到与之配平的右括号为止）。
+/// 为什么按调用切块：kind 与 version 必须在**同一次发射里**对账。按字符窗口取会串到下一条
 ///   事件，于是「npm 的事件带 node 版本」这种串位永远查不出来。
-fn emit_calls(src: &str) -> Vec<String> {
+/// 2026-09-21（B4）：签名不再是 `handle.emit(` —— 发射统一走 `install::done(`，
+///   而「只允许一个发射点」由 G-12 单独钉。
+fn call_args(src: &str, sig: &str) -> Vec<String> {
     let chars: Vec<char> = src.chars().collect();
-    let sig: Vec<char> = "handle.emit(".chars().collect();
+    let sig: Vec<char> = sig.chars().collect();
     let mut out = Vec::new();
     let mut i = 0;
     while i + sig.len() <= chars.len() {
@@ -267,9 +292,9 @@ fn emit_calls(src: &str) -> Vec<String> {
 
 /// run_install 签名 + 完成事件的版本归属，返回违规项（空 = 通过）。
 /// 抽成纯函数是为了能对**旧形态样本**跑一遍：判据认不出旧形态就是空转。
-fn g7_violations(main: &str, cmd: &str) -> Vec<String> {
+fn g7_violations(inst: &str, cmd: &str) -> Vec<String> {
     let mut v: Vec<String> = Vec::new();
-    let head = main
+    let head = inst
         .lines()
         .find(|l| l.contains("fn run_install"))
         .unwrap_or("")
@@ -278,10 +303,7 @@ fn g7_violations(main: &str, cmd: &str) -> Vec<String> {
         v.push("run_install 未返回运行期契约：node 与 npm 的事实被拆成字段子集，npm 版本无处可来".into());
     }
     let body = code_only(&fn_body(cmd, "pub fn start_node_install"));
-    let done: Vec<String> = emit_calls(&body)
-        .into_iter()
-        .filter(|c| c.contains("\"install_done\""))
-        .collect();
+    let done: Vec<String> = call_args(&body, "install::done(");
     if done.len() < 2 {
         v.push("install_done 未覆盖 node 与 npm 两个 kind（SSOT §2.4：完成事件按 kind 各发一条）".into());
     }
@@ -306,9 +328,9 @@ fn g7_violations(main: &str, cmd: &str) -> Vec<String> {
 ///   「npm 已就绪（v22.x）」从来不是 npm 的版本，而字符串拼接对类型系统完全合法，没人能发现。
 #[test]
 fn g7_install_done_events_carry_their_own_kind_version() {
-    let main = read("src/main.rs");
+    let inst = read("src/domain/install.rs");
     let cmd = read("src/commands/mod.rs");
-    let hits = g7_violations(&main, &cmd);
+    let hits = g7_violations(&inst, &cmd);
     assert!(
         hits.is_empty(),
         "G-7 失败：\n{}\n",
@@ -316,9 +338,9 @@ fn g7_install_done_events_carry_their_own_kind_version() {
     );
 
     // 反向 1：旧形态（返回 (String, String)、只发一条 kind=npm 带 node 版本）必须逐条判红。
-    let old_main = "fn run_install(app: &H) -> Result<(String, String), Failure> {\n    Ok((p, v))\n}\n";
-    let old_cmd = "pub fn start_node_install() -> R {\n    let _ = handle.emit(\"install_done\", json!({ \"kind\": Npm.as_str(), \"version\": version }));\n}\n";
-    let old = g7_violations(old_main, old_cmd);
+    let old_inst = "fn run_install(app: &H) -> Result<(String, String), Failure> {\n    Ok((p, v))\n}\n";
+    let old_cmd = "pub fn start_node_install() -> R {\n    install::done(&handle, Npm, json!(version));\n}\n";
+    let old = g7_violations(old_inst, old_cmd);
     for want in [
         "未返回运行期契约",
         "两个 kind",
@@ -334,8 +356,8 @@ fn g7_install_done_events_carry_their_own_kind_version() {
 
     // 反向 2：两条事件都发、但 npm 那条串的仍是 node 版本 —— 串位必须单独被查出来。
     let mixed = "pub fn start_node_install() -> R {\n\
-         let _ = handle.emit(\"install_done\", json!({ \"kind\": InstallKind::Node.as_str(), \"version\": rt.version }));\n\
-         let _ = handle.emit(\"install_done\", json!({ \"kind\": InstallKind::Npm.as_str(), \"version\": rt.version, \"note\": rt.npm_version }));\n\
+         install::done(&handle, InstallKind::Node, json!(rt.version));\n\
+         install::done(&handle, InstallKind::Npm, json!(rt.version));\n\
          }\n";
     let mv = g7_violations("fn run_install() -> Result<NodeRuntime, E> { }\n", mixed);
     assert!(
@@ -530,4 +552,254 @@ fn g11_windows_real_artifact_step_actually_runs_the_ignored_test() {
         "真实归档测试的 #[ignore] 离声明过远（可能标在别的测试上）：{} 字节",
         at - guard
     );
+}
+
+/// 安装事件唯一发射点的结构性判据（B4），返回违规项（空 = 通过）。
+///
+/// 四条子判据各自的失效模式（都是**本轮真实修掉**的）：
+///   A `src` 里第二处按事件名发射 install_* —— 于是同一件事有两个作者，形态会分叉；
+///   B `"kind": "node|npm|kernel|shell"` —— 安装 kind 的字面量只允许来自
+///     `InstallKind::as_str` 的四个分支，否则「哪些东西可被安装」在 Rust 与前端各有一份账
+///     （前端 `10-ui.js` 的 `INSTALL_TARGET` 有四个，旧枚举只有两个）。
+///     判据只认这四个值：`error.rs` / `mirror.rs` 里另有**语义完全不同**的 `kind` 字段，
+///     泛判 `"kind": "` 会把它们误伤（第一版就是这样，靠反向样本外的大面积假阳性才发现）。
+///   C 「正在下载」/「正在安装内核」在 install.rs 之外被拼装 —— 文案与比值分两处写就会出现
+///     自相矛盾（旧桌面壳下载行就是这样：文字说 MB、比值另算一套）。
+///     反向保证：`install.rs` 里必须**出现**这两个措辞（见下面的前置断言），
+///     否则「不得有第二处」会退化成「一处都没有」的空转门禁。
+///   D `progress` 被写成裸数字 —— 旧的阶段分数（0.1 / 0.3 / 0.85）按代码顺序编造，
+///     与真实进度无关，前端因此删掉了进度条；无分母必须发 `None`。
+fn g12_violations(files: &[(String, String)]) -> Vec<String> {
+    let mut v = Vec::new();
+    for (path, text) in files {
+        let in_owner = path.ends_with("src/domain/install.rs");
+        for line in code_only(text).lines() {
+            let t = line.trim();
+            if t.is_empty() {
+                continue;
+            }
+            for event in ["\"install_progress\"", "\"install_done\"", "\"install_error\""] {
+                if t.contains(event) && !in_owner {
+                    v.push(format!("{}: 第二处发射 {}（install_* 只能由 domain/install.rs 发）", path, event));
+                }
+            }
+            for kind in ["node", "npm", "kernel", "shell"] {
+                if t.contains(&format!("\"kind\": \"{}\"", kind)) {
+                    v.push(format!("{}: 安装 kind 用了裸字符串 {:?}（唯一来源是 InstallKind::as_str）", path, kind));
+                }
+            }
+            for wording in ["正在下载", "正在安装内核"] {
+                if t.contains(wording) && !in_owner {
+                    v.push(format!("{}: 在 install.rs 之外拼装安装/下载文案：{}", path, t));
+                }
+            }
+            // 快照的写入点同样只允许在 owner 里带上比值；其余位置必须显式 Some(..)/None。
+            if !in_owner && t.contains(".progress =") && !t.contains("Some(") && !t.contains("None") {
+                v.push(format!("{}: progress 被写成裸数字（无分母必须是 None）：{}", path, t));
+            }
+        }
+    }
+    // 类型的形状就是判据本身：`f32` 无法表达「这一步没有可测分母」，那正是编造分数的入口。
+    match files.iter().find(|(p, _)| p.ends_with("src/main.rs")) {
+        Some((_, text)) if code_only(text).contains("progress: f32") => {
+            v.push("RunState.progress 仍是裸 f32（应为 Option<f32>）".into())
+        }
+        _ => {}
+    }
+    v
+}
+
+/// G-12：安装/下载进度语义只有一个所有者（B4）。
+#[test]
+fn g12_install_progress_semantics_have_single_owner() {
+    let files: Vec<(String, String)> = walk("src")
+        .into_iter()
+        .map(|(p, text)| (p.display().to_string().replace('\\', "/"), text))
+        .collect();
+    let hits = g12_violations(&files);
+    assert!(hits.is_empty(), "G-12 失败：\n{}", hits.join("\n"));
+
+    // 前置：唯一所有者必须**真的在发射**（否则上面的「不得有第二处」会退化成「一处都没有」）。
+    let owner = read("src/domain/install.rs");
+    for event in ["install_progress", "install_done", "install_error"] {
+        assert!(
+            owner.contains(&format!("\"{}\"", event)),
+            "G-12 前置失败：install.rs 未发射 {}（SSOT §2.4 三条事件必须齐）",
+            event
+        );
+    }
+    assert!(
+        code_only(&owner).contains("progress: Option<f32>"),
+        "G-12 前置失败：install::push 的比值不是 Option<f32>"
+    );
+    // C 的反向保证：唯一所有者必须**真的**持有这两句措辞。
+    for wording in ["正在下载", "正在安装内核"] {
+        assert!(
+            owner.contains(wording),
+            "G-12 前置失败：install.rs 未持有「{}」措辞（判据 C 将无的放矢）",
+            wording
+        );
+    }
+
+    // 反向：旧形态（main.rs 里 push_status 自行发射 + 命令层裸 kind + 编造分数）必须逐条判红。
+    let old = vec![
+        (
+            "src-tauri/src/main.rs".to_string(),
+            "pub(crate) struct RunState { progress: f32 }\n\
+             let _ = app.emit(\"install_progress\", json!({ \"kind\": kind.as_str(), \"progress\": p }));\n"
+                .to_string(),
+        ),
+        (
+            "src-tauri/src/commands/mod.rs".to_string(),
+            "st.progress = 0.0;\n\
+             let _ = handle.emit(\"install_progress\", json!({ \"kind\": \"shell\", \"status\": text }));\n\
+             let text = format!(\"正在下载桌面版本 {:.1} MB…\", got);\n"
+                .to_string(),
+        ),
+    ];
+    let oh = g12_violations(&old);
+    for want in [
+        "第二处发射",
+        "kind 用了裸字符串",
+        "之外拼装",
+        "裸数字",
+        "裸 f32",
+    ] {
+        assert!(
+            oh.iter().any(|s| s.contains(want)),
+            "G-12 判据对旧形态的 {} 无反应（空转）：{:?}",
+            want,
+            oh
+        );
+    }
+}
+
+/// 环境探测记录的所有者判据（B5）。返回违规清单，空 = 结构成立。
+///
+/// 缺陷形状（同一类问题第三次换皮出现）：探测结论以「散装字段 + 各处手工拼接文案」的形态
+///   散在 nodeprobe（只有 node 候选）、命令层（npm 现拼现用）与前端（`env_trace=` 再拼一遍）
+///   三处。后果：加一个维度要改三遍文案，漏改不报错 —— 用户看到的即「检测环境时看不见
+///   npm 检测」；而真正会打死内核安装的「prefix 不可写」从来没被探测过。
+/// 判据：维度表、记录形态与两种渲染（文本 / JSON）都在 `domain/probes.rs`，其余只许消费。
+fn g13_violations(files: &[(String, String)]) -> Vec<String> {
+    let mut v = Vec::new();
+    for (path, text) in files {
+        let code = code_only(text);
+        let in_owner = path.ends_with("src/domain/probes.rs");
+        if path.ends_with(".js") || path.ends_with(".html") {
+            // 维度名与顺序由壳回传的记录给出：前端抄一份表，就会和壳侧漂移。
+            if text.contains(".probes") && !path.ends_with("js/10-ui.js") {
+                v.push(format!("{}: 在 10-ui.js 之外解析探测记录（渲染出口只有一个）", path));
+            }
+            if text.contains("env_trace=") {
+                v.push(format!("{}: 仍手工拼接逐候选追踪（应渲染壳给的记录表）", path));
+            }
+            continue;
+        }
+        if code.contains("pub enum Probe") && !in_owner {
+            v.push(format!("{}: 第二份探测维度表（唯一来源是 domain/probes.rs 的 Probe）", path));
+        }
+        if code.contains("struct TraceEntry") {
+            v.push(format!("{}: 仍有单维度追踪类型 TraceEntry（应登记为 Probe::Node 记录）", path));
+        }
+        // 类型的形状就是判据本身：裸 `bool` 无法表达「这一步还没跑完」，
+        //   于是未知被显示成失败（旧实现把在飞步骤记成 ok=false）。
+        //   只约束**记录形态**（含 `pub ms`）的类型：mirror 的逐源探测结果是另一件事，
+        //   它的 ok 没有第三种可能（请求要么发了要么没发）。
+        if code.contains("pub ok: bool") && code.contains("pub ms:") {
+            v.push(format!("{}: 探测结论是裸 bool（三态必须是 Option<bool>，未知 != 失败）", path));
+        }
+        // 记录 → JSON 的字段形态只有一处（Record::json）：第二处拼字段就是第二份契约。
+        if code.contains("\"probe\":") && code.contains("\"note\":") && !in_owner {
+            v.push(format!("{}: 第二处拼装探测记录字段（形态在 Record::json）", path));
+        }
+        // npm 只能被执行一次（T-1b 的真实执行 + T-10 的同一条 spawn 路径）。
+        //   允许出现的地方：定义与内部复用（runtime_contract）、探针所有者（probes）。
+        if code.contains("probe_npm_usable(") && !in_owner && !path.ends_with("src/runtime_contract.rs") {
+            v.push(format!("{}: 自行调用 npm 可用性探针（探针只有一个所有者）", path));
+        }
+    }
+    v
+}
+
+/// G-13：环境探测记录只有一个所有者，且所有者确实持有全部维度与三态形态。
+#[test]
+fn g13_env_probe_records_have_single_owner() {
+    let mut files: Vec<(String, String)> = walk("src")
+        .into_iter()
+        .map(|(p, text)| (p.display().to_string().replace('\\', "/"), text))
+        .collect();
+    files.extend(
+        walk("bootstrap")
+            .into_iter()
+            .map(|(p, text)| (p.display().to_string().replace('\\', "/"), text)),
+    );
+    let hits = g13_violations(&files);
+    assert!(hits.is_empty(), "G-13 失败：\n{}", hits.join("\n"));
+
+    // 前置：所有者必须**真的**登记了四个维度并持有两种渲染 —— 否则上面的判据会退化成「一处都没有」。
+    let owner = read("src/domain/probes.rs");
+    for arm in ["Node", "Npm", "Registry", "Prefix"] {
+        assert!(
+            owner.contains(&format!("Probe::{}", arm)),
+            "G-13 前置失败：probes.rs 未登记维度 {}（判据将无的放矢）",
+            arm
+        );
+    }
+    assert!(owner.contains("pub fn render"), "G-13 前置失败：缺文本渲染唯一出口");
+    assert!(owner.contains("pub fn json"), "G-13 前置失败：缺 JSON 渲染（面板字段来自它）");
+    assert!(
+        code_only(&owner).contains("ok: Option<bool>"),
+        "G-13 前置失败：记录结论不是三态 Option<bool>"
+    );
+    assert!(
+        owner.contains("DEPENDENT_TTL"),
+        "G-13 前置失败：依赖维度无复用窗口（node_status 每 400ms 轮询，每次都 spawn 子进程即新的卡死源）"
+    );
+    // 前缀探测会 stat/写文件：非本地固定盘必须先被挡掉（网络盘上的 exists() 本身就无界）。
+    assert!(
+        owner.contains("is_local_fixed_dir"),
+        "G-13 前置失败：prefix 探针未做本地固定盘判定（可能把探测拖成网络盘阻塞）"
+    );
+    // node 侧必须复用同一形态，而不是留一份自己的追踪类型。
+    let np = read("src/nodeprobe.rs");
+    assert!(np.contains("Probe::Node"), "nodeprobe 的逐候选结论未登记为 Probe::Node 记录");
+    assert!(np.contains("Record::pending"), "nodeprobe 的在飞步骤未以「未知」形态入表");
+
+    // 反向：旧形态（单维度 TraceEntry + 裸 bool + 命令层自拼 JSON + 前端再拼一段 + 第二处探针）
+    //   必须逐条判红 —— 逐条列出，防止某一条判据空转。
+    let old = vec![
+        (
+            "src-tauri/src/nodeprobe.rs".to_string(),
+            "pub struct TraceEntry { pub source: String, pub ms: u128, pub ok: bool }\n".to_string(),
+        ),
+        (
+            "src-tauri/src/commands/mod.rs".to_string(),
+            "pub enum Probe { Node, Npm }\n\
+             o[\"trace\"] = serde_json::json!({ \"probe\": t.source, \"note\": t.note });\n\
+             let u = crate::runtime_contract::probe_npm_usable(p, b);\n"
+                .to_string(),
+        ),
+        (
+            "src-tauri/bootstrap/js/20-env.js".to_string(),
+            "st.probes.map(function (p) { return p.path; });\n'env_trace=' + x\n".to_string(),
+        ),
+    ];
+    let oh = g13_violations(&old);
+    for want in [
+        "第二份探测维度表",
+        "TraceEntry",
+        "裸 bool",
+        "第二处拼装探测记录字段",
+        "自行调用 npm",
+        "10-ui.js 之外",
+        "逐候选追踪",
+    ] {
+        assert!(
+            oh.iter().any(|s| s.contains(want)),
+            "G-13 判据对旧形态的 {} 无反应（空转）：{:?}",
+            want,
+            oh
+        );
+    }
 }

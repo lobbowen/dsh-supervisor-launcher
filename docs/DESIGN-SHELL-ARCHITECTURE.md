@@ -35,9 +35,16 @@
 > 已落地：`platform/`（含 `unsupported.rs`）分层与平台分支收口、`domain/` 存在、`error.rs` 的
 > `ShellError`、`bounded.rs` 有界执行、`commands/mod.rs` 只做校验+委托（门禁 G3）。
 > **未落地**：`commands/` 尚未按 `env/node/core/mirror/shell/window` 拆文件（仍是单个 `mod.rs`）；
-> `domain/` 实际是 `cli / coreloc / guardctl / localhttp / windowing`，没有 `probe/provision/mirror/update/contract` 子层；
-> 没有 `infra/` 目录（`bounded.rs`、`env.rs` 直接在 `src/` 下）；`main.rs` 538 行（目标 < 150）。
+> `domain/` 实际是 `cli / coreloc / guardctl / install / localhttp / probes / windowing`，没有 `provision/mirror/update/contract` 子层；
+> 没有 `infra/` 目录（`bounded.rs`、`env.rs` 直接在 `src/` 下）；`main.rs` 363 行（目标 < 150）。
 > 契约读写当前落在 `mirror.rs` / `runtime_contract.rs` / `core_contract.rs` / `update.rs`（见 §3.2）。
+> **已落地（2026-09-21 B4）**：安装/下载进度语义收口为 `domain/install.rs` —— `install_*` 三条事件的唯一
+> 发射点、`kind` 枚举的唯一来源、下载与心跳文案的唯一渲染点（判据 G-12，SSOT §2.4 T-13）。
+> **已落地（2026-09-22 B5）**：环境探测记录收口为 `domain/probes.rs` —— 维度表（`Probe`：node / npm /
+> registry / prefix）、记录形态（`Record`，结论三态 `Option<bool>`）、文本与 JSON 两种渲染的唯一出口
+> （判据 G-13，SSOT §2.5）。`nodeprobe.rs` 的逐候选结论改为登记 `Probe::Node` 记录（原私有类型
+> `TraceEntry` 与 `render_trace` 已删除）；npm / registry / prefix 是它的下游，按 10s 窗口复用缓存，
+> 因为 `node_status` 每 400ms 被轮询一次。目标态里的 `domain/probe/` 子层当前以单文件形式落地。
 
 ### 2.1 分层与依赖方向（单向，可门禁）
 
@@ -163,10 +170,12 @@ pub enum ShellError {
 | 能力 | Linux | macOS | Windows | 实现位（当前落点）|
 |---|---|---|---|---|
 | 环境探针（候选枚举/版本/PATH）| 共用 | 共用 | 共用 | `nodeprobe.rs`（候选表来自 `platform/*::node_candidate_paths`）|
-| Node 制品解析 | `tar.gz` | `tar.gz` | `zip` | `platform/*::node_artifact` |
+| Node 制品解析 | `tar.gz` | `tar.gz` | `zip` | `p| 环境探测记录（node / npm / registry / prefix）| 共用 | 共用 | 共用 | `domain/probes.rs`（**唯一**维度表与渲染出口，判据 G-13；候选枚举的有界执行仍在 `nodeprobe.rs`）|
+latform/*::node_artifact` |
 | Node 安装（**用户级/零权限**）| `tar` → `<状态根>/node` | `tar` | `Expand-Archive` | `platform/*::install_node` |
 | 镜像测速与选择 | 共用 | 共用 | 共用 | `mirror.rs`（契约投放见 §3.2）|
 | 内核安装/升级 | 共用 | 共用 | 共用 | `core.rs` + `core_contract.rs`；定位 `domain/coreloc.rs` |
+| 安装/下载进度语义（`install_*` 事件）| 共用 | 共用 | 共用 | `domain/install.rs`（**唯一**发射点与文案源，判据 G-12；心跳量取自 `bounded::run_watch`）|
 | 服务定义（守卫）| systemd | LaunchAgent | schtasks | `platform/*::ServiceControl` |
 | 服务启停 | `systemctl --user` | `launchctl` | `schtasks` | 同上 |
 | 提权通道探测 | 有 `pkexec`/`sudo` 才算有 | 恒有（osascript）| 恒有（UAC）| `platform/*::has_privilege_channel` —— **只服务壳自更新** |
@@ -251,6 +260,8 @@ ExecStart 以 127 失败 → **内核装上了却永远拉不起来**。
   │                                 │      且 origin 为回环
   │                                 │ invoke('kernel_update_apply')
   │                                 ├────────────────────────────────►│ 安装→停守卫→等端口落→重启
+  │ postMessage({v:1,type:'dsh:kernel-update-progress',...})          │ 逐源/心跳/字节进度
+  │◄───────────────────────────────┤ listen('install_progress') 中继 │
   │ postMessage({v:1,type:'dsh:kernel-update-result',...}, ev.origin)  │
   │◄───────────────────────────────┤
 ```
@@ -262,8 +273,18 @@ ExecStart 以 127 失败 → **内核装上了却永远拉不起来**。
 | **K3** | 回复 `targetOrigin = ev.origin`（**不回 `*`**）|
 | **K4** | 无壳宿主（`window.parent === window`）时面板**禁用**内核更新入口并说明 |
 | **K5** | 重启成功后壳重载面板 iframe（守卫已换新二进制）|
+| **K6** | 进度帧**非终结**、可多次；只中继 `kind == kernelKind` 的 `install_progress`（否则 Node/npm/壳自身的进度会串台）|
+| **K7** | 等待上界由壳下发：`shell_bridge_contract` 携 `maxWaitMs`，面板据此重设超时，**不得写死** |
 
-**门禁**：src-tauri/tests/kernel_update_single_writer_test.rs（SW-1..SW-6，含反向判据）。
+**进度与预算（2026-09-21 B4b）**：内核安装单源上限 15 分钟、总上限 `KERNEL_UPDATE_BUDGET_MS`（17 分钟），
+三者只在 `src/bridge.rs` + `src/core.rs` 定义；面板原先写死 6 分钟，几乎必然先于后端报「桌面壳无响应」，
+用户重试即两个进程并发写同一 npm 全局前缀（正是本契约消灭的事故形状）。故壳在**首帧**进度里下发
+`maxWaitMs`，面板按 `maxWaitMs - 已等时长` 重设上界；面板仍留一个**明显大于**预算的兜底值以兼容旧壳。
+协议版本**保持 1**：进度本就是「非终结、可多次」，旧面板对未知帧直接忽略，语义未破坏 —— 递增反而会让
+K1 拒收旧面板的请求（升级期间新旧并存，这是真实的兼容悬崖）。
+
+**门禁**：src-tauri/tests/kernel_update_single_writer_test.rs（SW-1..SW-8，含反向判据）；
+面板侧 test/kernel-update-single-writer-test.js（SW-1..SW-9）。
 
 ### 3.3 前端隔离（消除「静默死亡」）
 

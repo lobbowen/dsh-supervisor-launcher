@@ -412,7 +412,7 @@ pub fn installed_version(bin: &Path) -> Option<String> {
     //   引导页就会永久停在「正在检查内核版本」。
     let mut cmd = std::process::Command::new(bin);
     cmd.arg("--version");
-    match run_command_bounded(cmd, VERSION_PROBE_TIMEOUT) {
+    match run_command_bounded(cmd, VERSION_PROBE_TIMEOUT, None) {
         Ok(o) if o.success => parse_version_output(&o.stdout),
         _ => None,
     }
@@ -437,13 +437,11 @@ pub fn parse_version_output(s: &str) -> Option<String> {
 ///   既有内核位置与 npm prefix -g 可能不一致，用它选前缀会把新内核装到别处）。
 pub fn npm_global_prefix() -> Option<PathBuf> {
     let rt = crate::runtime_contract::read_node()?;
-    let mut cmd = std::process::Command::new(&rt.npm);
-    cmd.args(&rt.npm_prefix);
-    cmd.args(["prefix", "-g"]);
-    let o = run_command_bounded(cmd, VERSION_PROBE_TIMEOUT).ok()?;
-    if !o.success { return None; }
-    let p = o.stdout.trim();
-    if p.is_empty() { None } else { Some(PathBuf::from(p)) }
+    // 与 npm 可用性探针**同一条 spawn 路径**（T-10）：程序与前置参数都取自契约，
+    //   尾参才换。此前这里自建 `Command`，于是「探针能跑、这里跑不起来」的缺陷只在一条路上复现。
+    crate::runtime_contract::run_npm_line(&rt.npm, &rt.npm_prefix, &["prefix", "-g"])
+        .ok()
+        .map(|line| PathBuf::from(line.trim()))
 }
 
 /// 从内核真实路径反推 npm 全局前缀（跨平台布局差异见下）。
@@ -458,7 +456,7 @@ pub fn global_prefix_for(bin: &Path) -> Option<PathBuf> {
             let mut p = PathBuf::new();
             for c in &comps[..cut] { p.push(c.as_os_str()); }
             if p.as_os_str().is_empty() { return None; }
-            return Some(simplify(p));
+            return Some(crate::platform::external_path(&p));
         }
     }
     // Windows npm 垫片兜底（2026-09-11 修复）：
@@ -468,7 +466,7 @@ pub fn global_prefix_for(bin: &Path) -> Option<PathBuf> {
     //   判据：该目录直接含 node_modules 时，它本身就是 npm 全局前缀。
     if let Some(dir) = bin.parent() {
         if dir.join("node_modules").is_dir() {
-            return Some(simplify(dir.to_path_buf()));
+            return Some(crate::platform::external_path(dir));
         }
     }
     None
@@ -488,12 +486,22 @@ fn tail(s: &str, n: usize) -> String {
 ///   · 首次失败且**快失败**时，用全新临时缓存目录重试一次（隔离损坏的 npm 缓存）；
 ///     仅在 FAST_FAIL_RETRY 窗口内重试，避免突破引导页预算。
 ///   · 失败时**必须回传证据**（命令 / prefix / 源 / 两次尝试输出）。
-pub fn install_version(pkg: &str, version: &str, prefix: Option<&Path>, registry: Option<&str>) -> Result<String, String> {
+///   · `on_live` 是**运行期心跳**（每 [`NPM_HEARTBEAT`] 一次）。本函数只交出事实
+///     （`bounded::Live`：已用时 / 真实输出行数与末行），**不拼任何用户文案** ——
+///     措辞属于 `domain::install`（那是安装进度的唯一文字出口），
+///     而「npm install 期间一个字都不发」正是用户报「强制更新卡住 15 分钟」的根因。
+pub fn install_version(
+    pkg: &str,
+    version: &str,
+    prefix: Option<&Path>,
+    registry: Option<&str>,
+    on_live: Option<&dyn Fn(&crate::bounded::Live)>,
+) -> Result<String, String> {
     if !is_valid_version(version) { return Err(format!("非法目标版本: {}", version)); }
     let spec = format!("{}@{}", pkg, version);
 
     let t0 = std::time::Instant::now();
-    let first = run_npm_install(&spec, prefix, registry, None);
+    let first = run_npm_install(&spec, prefix, registry, None, on_live);
     match &first {
         Ok(out) if out.success => return Ok(tail(&out.stdout, 500)),
         Err(_) => {} // 连启动都失败（npm 不存在等）—— 直接回报，不重试
@@ -502,10 +510,10 @@ pub fn install_version(pkg: &str, version: &str, prefix: Option<&Path>, registry
     let first_out = first.as_ref().ok();
 
     // 只在**快失败**时做缓存隔离重试（见上方说明）
-    let mut second: Option<crate::bounded::Output> = None;
+    let mut second: Option<crate::bounded::ExecRecord> = None;
     if first_out.is_some() && t0.elapsed() <= FAST_FAIL_RETRY {
         if let Some(dir) = fresh_cache_dir() {
-            let s = run_npm_install(&spec, prefix, registry, Some(&dir));
+            let s = run_npm_install(&spec, prefix, registry, Some(&dir), on_live);
             let ok = matches!(&s, Ok(o) if o.success);
             if !ok { second = s.ok(); }
             let _ = std::fs::remove_dir_all(&dir); // 尽力清理，失败不报错
@@ -520,12 +528,14 @@ pub fn install_version(pkg: &str, version: &str, prefix: Option<&Path>, registry
     // 组织**完整证据**（现场定位所需：命令 / prefix / 源 / 两次输出）
     let mut ev = String::new();
     ev.push_str(&format!("cmd: {} install -g --no-audit --no-fund {}", npm_exe(), spec));
-    if let Some(p) = prefix { ev.push_str(&format!(" --prefix {}", p.display())); }
+    // 证据里的 prefix = npm **实际收到**的那个值（run_npm_install 交出去前会归一）。
+    //   报一个「我们内部推导用的」路径而执行的是另一个，等于把最有价值的线索藏起来。
+    if let Some(p) = prefix { ev.push_str(&format!(" --prefix {}", crate::platform::external_path(p).display())); }
     if let Some(r) = registry { if !r.is_empty() { ev.push_str(&format!(" [registry {}]", r)); } }
-    let fmt = |o: &crate::bounded::Output| {
-        let code = o.code.clone().unwrap_or_else(|| "killed".into());
-        format!("退出码 {}：{}", code, tail(&o.stderr, 700))
-    };
+    // 失败正文一律由 `ExecRecord::failure` 渲染：退出状态与**实际**程序+参数都在记录里。
+    //   （npm 常以 `node <npm-cli.js>` 形态被拉起，与上面 `cmd:` 记录的**逻辑**命令
+    //     并列呈现时，两者不一致本身就是现场要查的证据。）
+    let fmt = |o: &crate::bounded::ExecRecord| o.failure("npm install");
     match (first_out, second.as_ref()) {
         (Some(a), Some(b)) => Err(format!("{}；缓存隔离重试仍失败：{}", fmt(a), fmt(b))),
         (Some(a), None) => Err(format!("{}{}", fmt(a), FAST_SKIP_NOTE)),
@@ -543,40 +553,6 @@ pub fn install_version(pkg: &str, version: &str, prefix: Option<&Path>, registry
 pub fn is_node_install_prefix(p: &Path) -> bool {
     p.join("node_modules").join("npm").is_dir()
 }
-/// 剥掉 Windows verbatim / device 命名空间前缀 —— **交给外部工具（npm / node）前必须做**。
-///
-/// 剥除 Windows verbatim/device 命名空间前缀（交给外部工具 npm/node 前必须做）。
-///
-/// ## 规则
-///   \\?\UNC\server\share -> \\server\share（UNC 段大小写不敏感）
-///   \\?\C:\x             -> C:\x
-///   \.\C:\x             -> C:\x
-///   其它                             原样返回（非 Windows 路径不受影响）
-pub fn strip_verbatim(s: &str) -> String {
-    // concat! 拼出「以反斜杠结尾」的字面量（raw string 不能以反斜杠结尾）
-    const V: &str = concat!(r"\\?", "\\");
-    const VU: &str = concat!(r"\\?\UNC", "\\");
-    const D: &str = concat!(r"\\.", "\\");
-    if s.len() >= VU.len() && s.is_char_boundary(VU.len()) && s[..VU.len()].eq_ignore_ascii_case(VU) {
-        return format!("{}{}", r"\\", &s[VU.len()..]);
-    }
-    if let Some(r) = s.strip_prefix(V) {
-        return r.to_string();
-    }
-    if let Some(r) = s.strip_prefix(D) {
-        return r.to_string();
-    }
-    s.to_string()
-}
-
-/// 把 PathBuf 中的 verbatim 前缀剥掉（无前缀时原样返回，不做多余分配）。
-/// 单一实现：global_prefix_for 与 npm 参数构造都调它，避免两份规则分叉。
-fn simplify(p: PathBuf) -> PathBuf {
-    let s = p.to_string_lossy();
-    let cleaned = strip_verbatim(&s);
-    if cleaned == s { p } else { PathBuf::from(cleaned) }
-}
-
 /// 缓存隔离重试窗口：首次失败耗时不超过此值才重试（避免突破引导页 17 分钟预算）。
 const FAST_FAIL_RETRY: std::time::Duration = std::time::Duration::from_secs(120);
 /// 未重试时的说明——让现场知道「为什么没有第二次尝试」。
@@ -595,7 +571,8 @@ fn run_npm_install(
     prefix: Option<&Path>,
     registry: Option<&str>,
     cache: Option<&Path>,
-) -> Result<crate::bounded::Output, String> {
+    on_live: Option<&dyn Fn(&crate::bounded::Live)>,
+) -> Result<crate::bounded::ExecRecord, String> {
     // 单一事实源：优先用运行期契约里的**绝对 npm** 与 PATH（不再依赖 ambient PATH 的裸名）。
     //   根因同守卫拉起：GUI/服务环境的 PATH 常不含 nvm/fnm 的 npm。
     let (npm_bin, npm_prefix, env_path) = match crate::runtime_contract::read_node() {
@@ -613,7 +590,7 @@ fn run_npm_install(
     // npm 仅有包内 JS 时：npmBin=node、npmPrefix=[npm-cli.js]（带上才能调用）。
     cmd.args(&npm_prefix);
     cmd.args(["install", "-g", "--no-audit", "--no-fund"]).arg(spec);
-    if let Some(p) = prefix { cmd.arg("--prefix").arg(simplify(p.to_path_buf())); }
+    if let Some(p) = prefix { cmd.arg("--prefix").arg(crate::platform::external_path(p)); }
     if let Some(r) = registry { if !r.is_empty() { cmd.env("npm_config_registry", r); } }
     if let Some(c) = cache { cmd.env("npm_config_cache", c); }
     // CREATE_NO_WINDOW：GUI 进程调 npm 不弹控制台。
@@ -626,28 +603,41 @@ fn run_npm_install(
     //   实现要点：输出重定向到**临时文件**而非管道 —— 若用 Stdio::piped() 且不读取，
     //   冗长的 npm 输出（npm 会打印大量进度）填满 OS 管道缓冲区（约 64KB）后子进程会阻塞，
     //   反而制造死锁。临时文件无此问题，且便于超时后保留现场。
-    run_command_bounded(cmd, NPM_INSTALL_TIMEOUT)
+    run_command_bounded(cmd, NPM_INSTALL_TIMEOUT, on_live)
 }
 /// npm install 的时间上限。npm 在慢网下确实可能耗时数分钟，故给足预算；
 /// 但绝不无限等待 —— 超时即杀进程并如实报错（引导页据此给出重试/回退）。
-const NPM_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+/// `pub(crate)`：开工行的「单源上限 N 分钟」措辞由 `domain::install` **从本常量算出**，
+///   不再手写数字 —— 预算写进文案的第二处，改一处就会出现「说的是 15 分钟、干的是 20 分钟」。
+pub(crate) const NPM_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// npm install 的**心跳节奏**。取值权衡：再密只是重复同一句话（每次都要过 IPC 与 DOM），
+/// 再疏则「看起来又卡住了」；2s 与守卫看门的 tick 同量级，且远小于人的耐心阈值。
+const NPM_HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// 有界执行子进程 —— **委托给 `bounded.rs` 的统一实现**（P2 去重，2026-09-12）。
 ///
 /// 此处原有 `struct BoundedOutput` + 一份 `run_command_bounded` 的**完整复制**：
-///   字段与 `bounded::Output` 逐一相同，逻辑也几乎逐行相同，但**行为已经分叉**：
+///   字段与 `bounded::ExecRecord` 逐一相同，逻辑也几乎逐行相同，但**行为已经分叉**：
 ///     · 漏 `cmd.stdin(Stdio::null())` —— 子进程会继承 GUI 进程的 stdin；
 ///     · 曾用 `as_millis()` 做临时名（并发撞名）而 bounded 一直用 nanos；
 ///     · `prepare()`（Windows CREATE_NO_WINDOW）只在 npm 路径手动调过，物探路径漏了 → 闪控制台。
 ///   这正是 `bounded.rs` 顶部「所有外部命令一律经它执行」被违反的又一例。
 ///
-///   现统一走 `crate::bounded::run`：stdin/prepare/nanos/超时杀进程全部一致，
-///   返回类型直接用 `bounded::Output`（字段本就相同，无需再定义一份）。
+///   现统一走 `crate::bounded`：stdin/prepare/nanos/超时杀进程全部一致，
+///   返回类型直接用 `bounded::ExecRecord`（字段本就相同，无需再定义一份）。
+///
+/// `on_live` 为 `Some` 时走 `bounded::run_watch`（**同一个实现体** + 一条心跳回调），
+///   否则走 `bounded::run`。本文件因此不持有任何自己的轮询代码。
 fn run_command_bounded(
     mut cmd: std::process::Command,
     timeout: std::time::Duration,
-) -> Result<crate::bounded::Output, String> {
-    crate::bounded::run(&mut cmd, timeout)
+    on_live: Option<&dyn Fn(&crate::bounded::Live)>,
+) -> Result<crate::bounded::ExecRecord, String> {
+    match on_live {
+        Some(cb) => crate::bounded::run_watch(&mut cmd, timeout, NPM_HEARTBEAT, cb),
+        None => crate::bounded::run(&mut cmd, timeout),
+    }
 }
 
 
@@ -872,31 +862,6 @@ mod tests {
         assert!(nv >= 15, "合法性向量过少：{}", nv);
         assert!(nc >= 8, "比较向量过少：{}", nc);
         eprintln!("版本向量通过：合法性 {} 条 / 比较 {} 条", nv, nc);
-    }
-
-// verbatim 前缀剥除的针对性回归。
-    #[test]
-    fn strips_verbatim_drive_prefix() {
-        assert_eq!(strip_verbatim("\\\\?\\C:\\Users\\x"), "C:\\Users\\x");
-    }
-
-    #[test]
-    fn strips_verbatim_unc_prefix_case_insensitively() {
-        assert_eq!(strip_verbatim("\\\\?\\UNC\\srv\\share\\x"), "\\\\srv\\share\\x");
-        assert_eq!(strip_verbatim("\\\\?\\unc\\srv\\share"), "\\\\srv\\share");
-    }
-
-    #[test]
-    fn strips_device_prefix() {
-        assert_eq!(strip_verbatim("\\\\.\\C:\\x"), "C:\\x");
-    }
-
-    #[test]
-    fn leaves_clean_paths_untouched() {
-        // 反向：干净路径**不得**被改写（否则引入新的「路径变了」问题）
-        for p in ["C:\\Users\\x", "/home/u/x", ""] {
-            assert_eq!(strip_verbatim(p), p, "不应改写: {}", p);
-        }
     }
 
     // ═══════════════════════════════════════════════════════════════════
