@@ -1,38 +1,21 @@
-// 内核（dsh-supervisor）版本治理 —— 引导期的强制更新。
-//
-// "强制"的准确含义（2026-09-16 随发布通道契约修正）：
-//   · **正常路径**：只要目标版本严格高于本机，就必须更新（不跳过、不忽略）；
-//   · **非降级**：正常路径**不因版本比较**而降级（否则会被陈旧 tag 带回旧版）；
-//   · **回退是显式通道**：只有运维设了 dist-tags.rollback 才回退（契约 §3 第 ① 步、RC-2）。
-// 故本文件不再自称"无回退"——回退是**契约的一部分**，只是它必须由显式信号触发。
-//   ⚠ 2026-09-16 已收口：回退目标低于当前版本时，build_plan 依**通道信号**（via=rollback）
-//     判为需动手（action=upgrade）——纯版本比较无法识别回退，故必须把选版依据一并下传
-//     （latest_pick → build_plan → latestVia/isRollback）。执行体 core_apply 不做版本比较，
-//     升级与回退共用同一写入路径（刻意如此：避免"升级/回退两套逻辑"分叉）。
+// 内核（dsh-supervisor）版本治理：引导期的强制更新。
+// 强制 = 目标高于本机就必须更新；不因版本比较而降级。
+// 回退只走显式 dist-tags.rollback 通道；版本比较认不出回退，
+// 故 latest_pick 把选版依据 via 下传给 build_plan（升级/回退共用同一执行路径）。
 
-// 跨平台规范性（本模块的全部设计依据）：
-//   1) 包名按 os/arch 映射：@dsh-sup/dsh-core-<linux|darwin|win>-<x64|arm64>。
-//   2) npm 可执行文件：Windows = npm.cmd，其余 = npm。
-//   3) 全局前缀从「已定位内核的真实路径」反推——**绝不用 npm prefix -g**：
-//      nvm/自定义 prefix 下 npm prefix -g 与内核实际安装位置可能不一致（2026-09 实证：
-//      prefix 报 nvm 路径，内核却在 ~/.npm-global），直接用 npm i -g 会装到别处、
-//      旧内核继续遮蔽新内核（「更新了却没生效」）。
-//   4) 镜像顺序尊重内核 registry.json（mode=manual 用 manualOrigin；否则 origins；缺失用内建默认）。
-//   5) **选版遵循发布通道契约**（RELEASE-CHANNEL-CONTRACT §3，见 release_channel.rs）——
-//      优先信 dist-tags.rollback / canary / latest，仅在 latest 缺失时兜底取 versions 最高。
-//
-//      ⚠ 本文件此前写的是「取全量最高（与内核 fetchNpmLatest 同语义）……只信 latest 会导致
-//        强制更新变强制降级」。**该结论已作废**，且与契约 §3 直接冲突：
-//        · 「取全量最高」会**绕过通道控制**——BETA 的数字可能压过 RC/正式，正式用户被装上测试版（RC-1）；
-//        · 那段注释举的实证（latest=0.1.1-BETA.1 而 max=0.1.5-BETA.7）事后查明是
-//          **latest 陈旧未更新**（SEA 时代遗留），不是「有人在回退」——恰是契约 §2 第 1 条
-//          「语义歧义」的活证据：latest 低于 max 有两种成因，机器不可分；
-//        · 紧急回退因此改用**独立 rollback tag**（显式信号，不依赖版本比较）。
-//      留此说明是为了让后来者知道「为什么不能改回全量最高」，而不是重复踩坑。
+// 跨平台规范：包名按 os/arch 映射（@dsh-sup/dsh-core-<os>-<arch>）；
+// npm 可执行名由 platform 层给出（Windows 为 npm.cmd）；
+// 镜像顺序：内核 registry.json（manual 用 manualOrigin，否则 origins），缺失用内建默认。
+
+// 安装前缀从已定位内核的真实路径反推，绝不用 npm prefix -g：
+// nvm/自定义 prefix 下两者可能与内核实际位置不一致，
+// 直接装会把新内核装到别处、旧内核继续遮蔽（「更新了却没生效」）。
+
+// 选版遵循发布通道契约（见 release_channel.rs）：优先信
+// dist-tags.rollback / canary / latest，仅 latest 缺失时兜底取 versions 最高。
+// 不得改回「跨源取全量最高」：那会绕过通道控制，BETA 的数字可能压过正式版。
 
 use serde_json::Value;
-// 原 `use std::io::Read;` 已移除（2026-09-12）：read_log 改用 fs::read + from_utf8_lossy，
-//   不再需要 Read trait（会触发 unused_imports 警告）。
 use std::path::{Path, PathBuf};
 
 /// 内建默认镜像（与内核 config.registries 同集合；registry.json 缺失时的兜底）。
@@ -47,7 +30,7 @@ const DEFAULT_ORIGINS: [&str; 6] = [
     "https://r.cnpmjs.org",
 ];
 
-/// 平台 → npm 子包名（唯一真源；错误提示/安装/查询共用，杜绝散落硬编码）。
+/// 平台 -> npm 子包名（唯一真源；错误提示/安装/查询共用，杜绝散落硬编码）。
 pub fn package_name() -> Result<String, String> {
     // 平台标签是**平台事实**，只在 platform 层解析（门禁 G1）；
     // 这里只负责拼包名，不得再出现 std::env::consts 的平台分支。
@@ -68,18 +51,15 @@ fn num_ok(s: &str) -> bool {
     s.chars().all(|c| c.is_ascii_digit())
 }
 
-/// 版本字面量合法性：`X.Y.Z[-pre][+build]`。
-///
-/// 按 semver：build 段须匹配 `[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*`。
-///
-/// 行为规格由 `shell-release/version-vectors.json` 锁定（内核侧有同一份，
-/// 两侧测试套件都按它断言）—— 跨语言无法共享代码，但可共享行为规格。
+/// 版本字面量合法性：`X.Y.Z[-pre][+build]`，build 段须匹配 `[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*`。
+/// 行为规格由 `shell-release/version-vectors.json` 锁定（内核侧同一份）——
+/// 跨语言无法共享代码，但可共享行为规格，两侧测试都按它断言。
 pub fn is_valid_version(v: &str) -> bool {
     let mut it = v.splitn(2, '+');
     let core = it.next().unwrap_or("");
     let build = it.next();
 
-    // ── 主段 + 预发布段 ──
+    // 主段 + 预发布段
     let mut core_it = core.splitn(2, '-');
     let nums = core_it.next().unwrap_or("");
     let parts: Vec<&str> = nums.split('.').collect();
@@ -91,7 +71,7 @@ pub fn is_valid_version(v: &str) -> bool {
         }
     }
 
-    // ── build 段（**不再忽略**）：非空，且每段为 [0-9A-Za-z-]+ ──
+    // build 段（不忽略）：非空，且每段为 [0-9A-Za-z-]+
     if let Some(b) = build {
         if b.is_empty() { return false; }
         for seg in b.split('.') {
@@ -146,11 +126,9 @@ pub fn semver_cmp(a: &str, b: &str) -> i32 {
     0
 }
 
-/// 镜像候选集合（2026-09-11 重写）：**壳自持配置优先**，其次内核 registry.json，最后内建默认。
-///
-/// 为什么壳配置优先：装机时**没有内核**（registry.json 尚不存在），壳必须自带镜像能力；
-/// 而壳在引导阶段选出的最快源若能被内核继承，就不必让内核再盲选一次。
-/// 若内核已进入 manual 模式（用户在面板里手动锁定），则**尊重内核的选择**。
+/// 镜像候选集合：壳自持配置优先，其次内核 registry.json，最后内建默认。
+/// 装机时没有内核（registry.json 尚不存在），壳必须自带镜像能力；
+/// 内核已进入 manual 模式（用户手动锁定）时，尊重内核的选择。
 pub fn registry_origins() -> Vec<String> {
     let path = crate::env::supervisor_dir().join("registry.json");
     let mut kernel_manual: Option<String> = None;
@@ -192,39 +170,17 @@ fn encode_pkg(pkg: &str) -> String {
     pkg.chars().map(|c| if c == '/' { "%2F".to_string() } else { c.to_string() }).collect()
 }
 
-/// 目标版本：**并行**探测全部镜像，按发布通道契约 §3 选版；返回 (version, 命中镜像)。
-///
-/// ## 为什么"并行 + 跨源取最高"本身还是对的
-///
-/// 镜像**同步存在延迟**：同一个包在不同源上可能停在不同的时刻。若"首个成功的源即采信"，
-/// 一个滞后的源会把新版本掩盖成旧版本。故仍然**并行探测全部源**，再看它们各自的元数据。
-///
-/// ## 变的是**选版判据**（2026-09-16，契约 §3 冻结算法）
-///
-/// 旧实现：跨全部源取 `dist-tags` + `versions` 的**全量最高**。
-/// 那是"挑数字最大的版本"，会**绕过通道控制**（RC-1）——BETA 的数字可能压过正式版。
-/// 现在每个源的元数据都交给 `release_channel::select`（rollback / canary / latest / versions 兜底），
-/// 再在**同一通道**内跨源取最高，最后选提供该版本的最快源。
-///
-/// 为什么"直接按通道决策"要先于"跨源合并"：**通道是全局事实，元数据是逐源的**。
-///   若先把各源的 dist-tags 并起来（例如 A 源的 rollback 与 B 源的 latest 混在一起），
-///   就等于**发明了一个并不存在的发布状态** —— 回退必须由真实存在的那个 tag 决定。
-///   故本函数对每个源独立决策，再比较决策结果。
-///
-/// ## 不变量
-///
-/// · 每个源各自走完整 §3 五步，**绝不**跨源拼接 dist-tags；
-/// · 回退（rollback）优先于灰度（canary）优先于正式（latest）—— 详见 release_channel；
-/// · 同通道内多源给出不同版本时，取**较高**者（与旧行为一致；这不改变通道，只解决镜像滞后）；
-/// · 全部源都失败 → 原样回传**每个源**的失败原因（RC-5：绝不静默，也不谎报"已是最新"）。
+/// 目标版本：并行探测全部镜像，按发布通道契约选版；返回 (version, 命中镜像, via)。
+/// 并行因镜像同步有延迟：首个成功即采信会把新版本掩盖成旧版本。
+/// 每个源各自走完整通道决策，绝不跨源拼接 dist-tags（见 better_candidate）；
+/// 全部源失败时原样回传每个源的失败原因（RC-5：不静默、不谎报「已是最新」）。
 pub fn latest_pick(pkg: &str) -> Result<LatestPick, String> {
     if pkg.is_empty() { return Err("包名为空".into()); }
     let path = encode_pkg(pkg);
     let origins = registry_origins();
     let probes = crate::mirror::probe_all(&origins, &path);
 
-    // §5 灰度判定**只做一次**（不要放进循环：那意味着每个源都去查一次名单包）。
-    //   本函数只在这一处调用；普通机器在此返回 false 且**零额外请求**（见 release_channel）。
+    // 灰度判定只做一次（放进循环 = 每个源都查一次名单包）；普通机器零额外请求。
     let canary = canary_here();
 
     let mut cands: Vec<Candidate> = Vec::new();
@@ -234,7 +190,7 @@ pub fn latest_pick(pkg: &str) -> Result<LatestPick, String> {
         reachable += 1;
         let Some(body) = &p.body else { continue };
         let Ok(j) = serde_json::from_str::<Value>(body) else { continue };
-        // 该源独立走 §3 五步 —— 一个源坏掉/缺 tag 不影响其它源的决策。
+        // 该源独立走完整通道决策 —— 一个源坏掉/缺 tag 不影响其它源的决策。
         let Ok(pick) = crate::release_channel::select(&j, canary) else { continue };
         cands.push((pick.version, p.latency_ms, p.source.clone(), pick.via));
     }
@@ -252,11 +208,9 @@ pub fn latest_pick(pkg: &str) -> Result<LatestPick, String> {
     }
 }
 
-/// 选版结果 + **选版依据**（契约 §3 的通道）。
-///
-/// 为什么必须把 `via` 带回上层：`rollback` 生效时目标版本**低于**当前版本 ——
-///   若上层只看"目标 vs 已装"的版本比较，回退会被判成"无需动手"（RC-2 端到端断裂）。
-///   通道信息是"这是不是一个回退指令"的**唯一可靠依据**。
+/// 选版结果 + 选版依据（通道）。
+/// via 必须带回上层：rollback 生效时目标版本低于当前版本，
+/// 只看版本比较会把回退判成「无需动手」；通道是识别回退的唯一可靠依据。
 pub struct LatestPick {
     pub version: String,
     pub origin: String,
@@ -272,16 +226,10 @@ pub fn latest_version(pkg: &str) -> Result<(String, String), String> {
 /// 一个镜像给出的候选：(版本, 延迟ms, 源, 通道)。
 type Candidate = (String, u128, String, &'static str);
 
-/// 候选 a 是否**优于**候选 b（跨源仲裁的唯一判据）。
-///
-/// 顺序（**契约 §3 的优先级**，不是数字大小）：
-///   ① 通道优先级：rollback > canary > latest > versions；
-///   ② 同通道内：版本更高者胜（解决**镜像同步滞后**——同一通道不同源可能停在不同版本）；
-///   ③ 版本相同：延迟更低者胜（与旧行为一致，让"最快源"仍被优先命中）。
-///
-/// 为什么 ① 必须压过 ②：**回退目标是低于 latest 的**（这正是它的用途）。
-///   若按数字大小比较，一个尚未同步 rollback 的源会用更大的 latest 把它压过去，
-///   紧急回退就无法全量生效（RC-2 被违反）。
+/// 候选 a 是否优于候选 b（跨源仲裁的唯一判据）。
+/// 优先级：1) 通道（rollback > canary > latest > versions，契约的步序而非数字大小）；
+/// 2) 同通道内版本更高者胜（解决镜像同步滞后）；3) 版本相同延迟更低者胜。
+/// 通道必须压过版本比较：回退目标本就低于 latest，按数字仲裁会被别的源压过去（RC-2）。
 fn better_candidate(a: &Candidate, b: &Candidate) -> bool {
     let (av, alat, _, avia) = a;
     let (bv, blat, _, bvia) = b;
@@ -310,11 +258,8 @@ fn pick_best(cands: Vec<Candidate>) -> Option<Candidate> {
     best
 }
 
-/// 通道优先级（数值越小越优先）——**契约 §3 的顺序**，不是版本高低。
-///
-/// 为什么必须单列：跨源比较时，"哪个源的决策更该被采纳"取决于**通道**。
-///   若退回"比版本号大小"，回退目标（通常低于 latest）会被别的源的 latest 压过去，
-///   而这正是契约 §2 三条硬缺陷要根除的推断方式（RC-2）。
+/// 通道优先级（数值越小越优先）——顺序来自发布通道契约，不是版本高低。
+/// 若退回比版本号，回退目标（低于 latest）会被别的源的 latest 压过去（RC-2）。
 fn channel_rank(via: &str) -> u8 {
     match via {
         crate::release_channel::CH_ROLLBACK => 0,
@@ -324,22 +269,13 @@ fn channel_rank(via: &str) -> u8 {
     }
 }
 
-/// 本机是否在**灰度名单**内（契约 §5）。
-///
-/// 短路顺序见 `release_channel::canary_machine_with`（契约 §5.5，**顺序未变**）：
-///   ① 本机配置 `canary: true`（或 `DSH_CANARY=1`）→ 命中，**不查包**；
-///   ② 未标记且未 opt-in（`canaryAllowlist: true` / `DSH_CANARY_ALLOWLIST=1`）→ false，**零额外请求**；
-///   ③ 只有**显式进入候选**的机器才读 `@dsh-sup/canary-allowlist`（可选包，读不到只留日志）。
-///      名单只认 §5.3 唯一格式（`schema:1` + `entries[].installId` 主依据 + `hostnames[]` 兜底）；
-///      本机 installId 取自内核写的 `<supervisorDir>/install-id`（**壳不生成**，见 release_channel）。
-///
-/// ③ 的代价是"多一次网络请求"，故它**绝不能**发生在普通机器上 —— 这正是 ①② 短路的理由。
-///   也正因如此，这一次请求发生在**探测循环之外**：多源探测已经并行跑完，
-///   这里是全程串行的一次（最多 PROBE_TIMEOUT），不会随镜像数量放大。
+/// 本机是否在灰度名单内（短路顺序见 `release_channel::canary_machine_with`）：
+/// 1) 本机标记 canary（或环境变量）即命中，不查包；
+/// 2) 未标记且未 opt-in 直接 false，零额外请求；
+/// 3) 只有显式 opt-in 才读名单包（多一次请求，在探测循环之外，不随镜像数量放大）。
 fn canary_here() -> bool {
     let local = crate::release_channel::local_canary_hit();
-    // 普通机器（未标记、未 opt-in）在此**直接返回 false**，连 fetch 闭包都不会被调用
-    //   —— 于是"多一次网络请求"这件事对绝大多数用户根本不存在。
+    // 普通机器在此直接返回 false：fetch 闭包不被调用，零额外网络请求。
     let opt_in = crate::release_channel::allowlist_opt_in();
     if !local && !opt_in {
         return false;
@@ -348,16 +284,9 @@ fn canary_here() -> bool {
     crate::release_channel::canary_machine(local, opt_in, move |pkg| fetch_pkg_meta(&origins, pkg))
 }
 
-/// 按镜像顺序**串行**取一份包元数据，首个成功即返回。
-///
-/// ## 为什么复用 `probe_all` 的**单个源**而不是调用它整个
-///
-/// `probe_all` 的并行是为"测速"服务的：它要打满全部源才能选出最快者。
-///   而这里要的是"谁能给我这份可选内容"——第一个能回答的源就够了，
-///   打满全部源只会把这个**可选**查询的成本放大到 N 倍。
-/// 但也**不另写一套 HTTP**：仍经 `probe_all`（单源）取回响应体 ——
-///   URL 编码、超时（`mirror::PROBE_TIMEOUT`）、响应体读取全仓只有那一份实现，
-///   避免此处成为"第二份 registry 客户端"。单源时它内部只 spawn 一个线程，无额外代价。
+/// 按镜像顺序串行取一份包元数据，首个成功即返回。
+/// 复用 probe_all 的**单源**而非整个并行：并行测速要打通全部源，这里只是可选查询，
+/// 打满全部源会把成本放大 N 倍；也不另写 HTTP，避免成为第二份 registry 客户端。
 fn fetch_pkg_meta(origins: &[String], pkg: &str) -> Result<Value, String> {
     let path = encode_pkg(pkg);
     let mut last = String::from("无可用镜像");
@@ -381,13 +310,13 @@ fn fetch_pkg_meta(origins: &[String], pkg: &str) -> Result<Value, String> {
 /// 无 GUI 场景下定位内核可执行文件（与 main.rs 的 locate_core 同一候选集）。
 /// 供 --service-plan 等 CLI 自检使用：它们没有 AppHandle。
 pub fn locate_core_for_cli() -> Option<std::path::PathBuf> {
-    // CLI 无 AppHandle → 不提供资源目录兜底（那是 GUI 形态的最后一层）
+    // CLI 无 AppHandle，不提供资源目录兜底（那是 GUI 形态的最后一层）
     crate::domain::coreloc::locate_core_candidates(None)
         .into_iter()
         .find(|p| p.is_file())
 }
 
-/// 内核包目录（<pkg>/bin/<exe> → <pkg>）。
+/// 内核包目录（<pkg>/bin/<exe> 反推 <pkg>）。
 fn package_dir_of(bin: &Path) -> Option<PathBuf> {
     let bin_dir = bin.parent()?;              // <pkg>/bin
     if bin_dir.file_name().and_then(|s| s.to_str()) != Some("bin") { return None; }
@@ -405,11 +334,8 @@ pub fn installed_version(bin: &Path) -> Option<String> {
             }
         }
     }
-    // 兜底：执行 --version。
-    // 必须有界（2026-09-11 修复，与「检测环境卡死」同一类缺陷）：
-    //   原实现用 Command::output() **无限阻塞**，且 locate_core 会对**每个候选**都调用一次；
-    //   一旦某个候选不可执行（损坏的 shim、被安全软件拦截、架构不符），
-    //   引导页就会永久停在「正在检查内核版本」。
+    // 兜底：执行 --version。必须有界：候选不可执行（损坏 shim/拦截/架构不符）时，
+    //   无限阻塞会让引导页永久停在「正在检查内核版本」（locate_core 对每个候选都调一次）。
     let mut cmd = std::process::Command::new(bin);
     cmd.arg("--version");
     match run_command_bounded(cmd, VERSION_PROBE_TIMEOUT, None) {
@@ -430,23 +356,21 @@ pub fn parse_version_output(s: &str) -> Option<String> {
     None
 }
 
-/// 读 **npm 自己**的全局 prefix（`<contract npm> prefix -g`）。
-///
-/// 用途**仅限**「安装刚完成后回读 npm 把包装到了哪」——用于 P2 记录 core.json。
-/// **不得**用它来选择安装前缀（选择仍用 global_prefix_for，理由见文件头注释：
-///   既有内核位置与 npm prefix -g 可能不一致，用它选前缀会把新内核装到别处）。
+/// 读 npm 自己的全局 prefix（`<contract npm> prefix -g`）。
+/// 用途仅限安装完成后回读 npm 把包装到了哪（记录 core.json）；
+/// 不得用它选择安装前缀（选择用 global_prefix_for：内核位置与 prefix -g 可能不一致）。
 pub fn npm_global_prefix() -> Option<PathBuf> {
     let rt = crate::runtime_contract::read_node()?;
-    // 与 npm 可用性探针**同一条 spawn 路径**（T-10）：程序与前置参数都取自契约，
-    //   尾参才换。此前这里自建 `Command`，于是「探针能跑、这里跑不起来」的缺陷只在一条路上复现。
+    // 与 npm 可用性探针走同一条 spawn 路径（T-10）：程序与前置参数取自契约，只换尾参；
+    //   自建 Command 会让「探针能跑、这里跑不起来」的缺陷只在一路上复现。
     crate::runtime_contract::run_npm_line(&rt.npm, &rt.npm_prefix, &["prefix", "-g"])
         .ok()
         .map(|line| PathBuf::from(line.trim()))
 }
 
 /// 从内核真实路径反推 npm 全局前缀（跨平台布局差异见下）。
-///   Unix    : <prefix>/lib/node_modules/@scope/pkg/bin/exe  → <prefix>
-///   Windows : <prefix>/node_modules/@scope/pkg/bin/exe      → <prefix>
+///   Unix    : <prefix>/lib/node_modules/@scope/pkg/bin/exe  -> <prefix>
+///   Windows : <prefix>/node_modules/@scope/pkg/bin/exe      -> <prefix>
 pub fn global_prefix_for(bin: &Path) -> Option<PathBuf> {
     let comps: Vec<std::path::Component> = bin.components().collect();
     for i in 0..comps.len() {
@@ -459,10 +383,8 @@ pub fn global_prefix_for(bin: &Path) -> Option<PathBuf> {
             return Some(crate::platform::external_path(&p));
         }
     }
-    // Windows npm 垫片兜底（2026-09-11 修复）：
-    //   路径形如 `%APPDATA%\npm\dsh-supervisor.cmd` —— **不含 node_modules 段**，
-    //   故上面的循环返回 None，进而 install_version 丢失 --prefix，
-    //   可能装到 npm 默认前缀而非内核当前所在前缀（旧内核遮蔽新内核）。
+    // Windows npm 垫片兜底：路径形如 `%APPDATA%\npm\dsh-supervisor.cmd`，不含 node_modules 段，
+    //   上面的循环返回 None、install_version 丢失 --prefix，可能装错前缀（旧内核遮蔽新内核）。
     //   判据：该目录直接含 node_modules 时，它本身就是 npm 全局前缀。
     if let Some(dir) = bin.parent() {
         if dir.join("node_modules").is_dir() {
@@ -479,17 +401,9 @@ fn tail(s: &str, n: usize) -> String {
 }
 
 /// 安装/升级到指定版本（npm install -g [--prefix] pkg@version）。
-/// 显式 --prefix 保证装回「内核当前所在前缀」，避免 npm 默认前缀不一致导致旧内核遮蔽新内核。
-/// 返回 npm 输出（成功）或含退出码与 stderr 的错误（失败——供引导页如实呈现，不再吞错）。
-///
-/// 不变量：
-///   · 首次失败且**快失败**时，用全新临时缓存目录重试一次（隔离损坏的 npm 缓存）；
-///     仅在 FAST_FAIL_RETRY 窗口内重试，避免突破引导页预算。
-///   · 失败时**必须回传证据**（命令 / prefix / 源 / 两次尝试输出）。
-///   · `on_live` 是**运行期心跳**（每 [`NPM_HEARTBEAT`] 一次）。本函数只交出事实
-///     （`bounded::Live`：已用时 / 真实输出行数与末行），**不拼任何用户文案** ——
-///     措辞属于 `domain::install`（那是安装进度的唯一文字出口），
-///     而「npm install 期间一个字都不发」正是用户报「强制更新卡住 15 分钟」的根因。
+/// 显式 --prefix 保证装回内核当前所在前缀，避免默认前缀不一致导致旧内核遮蔽新内核。
+/// 成功返回 npm 输出；失败回传完整证据（命令/prefix/源/两次尝试输出），不吞错。
+/// 快失败窗口内用全新临时缓存重试一次；on_live 只交出事实，用户文案属 domain::install。
 pub fn install_version(
     pkg: &str,
     version: &str,
@@ -509,7 +423,7 @@ pub fn install_version(
     }
     let first_out = first.as_ref().ok();
 
-    // 只在**快失败**时做缓存隔离重试（见上方说明）
+    // 只在快失败窗口内做缓存隔离重试（避免突破引导页预算）
     let mut second: Option<crate::bounded::ExecRecord> = None;
     if first_out.is_some() && t0.elapsed() <= FAST_FAIL_RETRY {
         if let Some(dir) = fresh_cache_dir() {
@@ -544,12 +458,9 @@ pub fn install_version(
     .map_err(|e| format!("{}\n  [{}]", e, ev))
 }
 
-/// prefix 是否为 **Node 安装目录**（含 node_modules/npm）。
-///
-/// 为什么单独判定：把包 --prefix 装进 Node 自身，通常需要管理员权限，
-/// 且会让 npm 遍历自身庞大的依赖树；现场那条栈溢出无法本地复现，
-/// 故此处**只回传证据**、不擅自改变语义（丢弃 prefix 可能装到别的前缀，
-/// 反而制造「装了但检测不到」）。
+/// prefix 是否为 Node 安装目录（含 node_modules/npm）。
+/// 现场那条栈溢出无法本地复现，故只回传证据、不擅自丢弃 prefix：
+/// 丢弃可能装到别的前缀，反而制造「装了但检测不到」。
 pub fn is_node_install_prefix(p: &Path) -> bool {
     p.join("node_modules").join("npm").is_dir()
 }
@@ -597,12 +508,10 @@ fn run_npm_install(
     // 经 bounded::prepare（**infra 原语**，与 bounded::run 同一处实现）——
     // 本文件因此不再需要平台分支（门禁 G1）。
     crate::bounded::prepare(&mut cmd);
-    // 必须有界（2026-09-11 修复，与引导页「网络步骤无超时 → 永久卡住」属同一类缺陷）：
-    //   原实现用 `cmd.output()` **无限阻塞** —— npm 因网络停滞/registry 无响应而挂起时，
-    //   引导页会永久停在「正在安装内核…」，用户除了杀进程别无选择。
-    //   实现要点：输出重定向到**临时文件**而非管道 —— 若用 Stdio::piped() 且不读取，
-    //   冗长的 npm 输出（npm 会打印大量进度）填满 OS 管道缓冲区（约 64KB）后子进程会阻塞，
-    //   反而制造死锁。临时文件无此问题，且便于超时后保留现场。
+    // 必须有界：原实现用 `cmd.output()` 无限阻塞 —— npm 因网络停滞/registry 无响应挂起时，
+    //   引导页会永久停在「正在安装内核…」。
+    //   输出重定向到临时文件而非管道：不读取的管道被 npm 冗长输出填满（约 64KB）会死锁，
+    //   临时文件无此问题，且便于超时后保留现场。
     run_command_bounded(cmd, NPM_INSTALL_TIMEOUT, on_live)
 }
 /// npm install 的时间上限。npm 在慢网下确实可能耗时数分钟，故给足预算；
@@ -615,20 +524,10 @@ pub(crate) const NPM_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration:
 /// 再疏则「看起来又卡住了」；2s 与守卫看门的 tick 同量级，且远小于人的耐心阈值。
 const NPM_HEARTBEAT: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// 有界执行子进程 —— **委托给 `bounded.rs` 的统一实现**（P2 去重，2026-09-12）。
-///
-/// 此处原有 `struct BoundedOutput` + 一份 `run_command_bounded` 的**完整复制**：
-///   字段与 `bounded::ExecRecord` 逐一相同，逻辑也几乎逐行相同，但**行为已经分叉**：
-///     · 漏 `cmd.stdin(Stdio::null())` —— 子进程会继承 GUI 进程的 stdin；
-///     · 曾用 `as_millis()` 做临时名（并发撞名）而 bounded 一直用 nanos；
-///     · `prepare()`（Windows CREATE_NO_WINDOW）只在 npm 路径手动调过，物探路径漏了 → 闪控制台。
-///   这正是 `bounded.rs` 顶部「所有外部命令一律经它执行」被违反的又一例。
-///
-///   现统一走 `crate::bounded`：stdin/prepare/nanos/超时杀进程全部一致，
-///   返回类型直接用 `bounded::ExecRecord`（字段本就相同，无需再定义一份）。
-///
-/// `on_live` 为 `Some` 时走 `bounded::run_watch`（**同一个实现体** + 一条心跳回调），
-///   否则走 `bounded::run`。本文件因此不持有任何自己的轮询代码。
+/// 有界执行子进程 —— 委托给 `bounded.rs` 的统一实现。
+/// 此处原有 `struct BoundedOutput` + `run_command_bounded` 的完整复制体，行为已分叉
+/// （漏 stdin(null)、prepare 覆盖不全、临时名并发撞名）；现 stdin/prepare/超时杀进程
+/// 统一走 `crate::bounded`，返回 `bounded::ExecRecord`；on_live 为 Some 时走 run_watch。
 fn run_command_bounded(
     mut cmd: std::process::Command,
     timeout: std::time::Duration,
@@ -641,46 +540,22 @@ fn run_command_bounded(
 }
 
 
-// ── 注：本文件原有的 `read_log` 已删除（2026-09-12 去重）。
-//    它随 `run_command_bounded` 的复制体一起存在；统一到 `bounded.rs` 后成为死代码。
-//    GBK/非 UTF-8 的容忍现由 `bounded.rs::read_log` 单点负责（B62 锁定）。
-
-
-/// 计算规划：只有目标版本**严格大于**已装版本才需动手（正常路径不因版本比较而降级）。
-///
-/// ## 与契约 §3 的边界（**已知缺口，需上层收口**）
-///
-/// 选版（`latest_version`）回答"**目标是谁**"：`rollback` tag 生效时它会给出
-///   **低于当前**的目标（这正是回退的用途）。本函数回答"**要不要动手**"，
-///   而它只按 `semver_cmp(目标, 已装) > 0` 判 `upgrade` ——
-///   于是**回退目标在这里被判成 `action=none`**，前端据此显示"已是最新"，
-///   回退到不了用户（RC-2 端到端未闭合）。
-///
-/// 为什么不在此处就地修：
-///   · 判"回退也要动手"必须知道**选版依据（via）**，而入参只有 `(version, origin)`；
-///     把 via 透传下来要改 `latest_version` 的返回形态与 `commands/mod.rs` 的调用点
-///     （本文件之外），并同步前端 `bootstrap/js/50-kernel.js`（它只认 install/upgrade/none）；
-///   · 只改这里的输出会让"后端说回退、前端不执行"变成**静默失效**——比现状更糟。
-/// 故此处**如实标注**，由上层一次性收口（选版依据 → action → 前端执行）。
-/// 注意 `core_apply` 本身**不做版本比较**：它直接安装选出的目标版本，回退机制本身是可用的。
+/// 计算规划：正常路径只有目标严格大于已装才需动手（不因版本比较而降级）。
+/// 回退（via=rollback）时目标低于已装仍判需动手 —— 纯版本比较认不出回退，必须看通道信号。
+/// `core_apply` 不做版本比较，升级/回退共用同一执行路径（前端只有 install/upgrade，刻意如此）。
 pub fn build_plan(installed: Option<String>, latest: Result<LatestPick, String>) -> Value {
     let (latest_v, origin, err, via) = match latest {
         Ok(p) => (Some(p.version), Some(p.origin), None, Some(p.via)),
         Err(e) => (None, None, Some(e), None),
     };
-    // 回退判定（2026-09-16 收口 RC-2 端到端）：
-    //   `rollback` 通道生效时，目标版本**低于**当前版本 —— 这正是回退的目的，
-    //   但纯版本比较会把它判成"无需动手"（旧缺口：前端显示"已是最新"，回退到不了用户）。
-    //   故：**通道 = rollback 时，目标与已装不同即视为需动手**（action 仍用升级词，
-    //   因为前端的执行路径只有 install/upgrade —— 执行体 `core_apply` 不做版本比较，
-    //   直接装选出的目标版本，故"回退"与"升级"共用同一执行路径是正确且刻意的）。
+    // 回退判定：通道 = rollback 且目标与已装不同即视为需动手（RC-2 端到端）。
     let is_rollback = via.as_deref() == Some("rollback");
     let action = match (&installed, &latest_v) {
         (None, Some(_)) => "install",
         (Some(i), Some(l)) => {
             let cmp = semver_cmp(l, i);
             if cmp > 0 { "upgrade" }
-            else if is_rollback && cmp != 0 { "upgrade" }   // ← 回退：显式通道信号，非版本比较
+            else if is_rollback && cmp != 0 { "upgrade" }   // 回退：显式通道信号，非版本比较
             else { "none" }
         }
         _ => "unknown",
@@ -707,10 +582,8 @@ pub fn build_plan(installed: Option<String>, latest: Result<LatestPick, String>)
 }
 
 /// 无头自检输出（--core-plan 用，便于发布后冒烟验证，无需 GUI）。
-///
-/// 输出含 `latest_via`（本次是从 **rollback / canary / latest / versions** 哪条通道选出来的）：
-///   契约 §4 把"rollback tag 存在 = 回退进行中"当作**可观测性**承诺 ——
-///   而运维在无 GUI 的机器上核对回退是否生效，靠的就是这个自检入口。
+/// 输出含 latest_via（本次从 rollback / canary / latest / versions 哪条通道选出）：
+/// 运维在无 GUI 的机器上核对"rollback tag 存在 = 回退进行中"，靠的就是这个入口。
 pub fn plan_text() -> String {
     let pkg = match package_name() { Ok(p) => p, Err(e) => return format!("pkg_error={}", e) };
     let mut lines = vec![format!("package={}", pkg)];
@@ -726,13 +599,9 @@ pub fn plan_text() -> String {
     lines.join(" | ")
 }
 
-/// 目标版本是经哪条通道选出的（**仅供自检/日志**，不参与安装决策）。
-///
-/// 为什么**重新查一遍**而不是让 `latest_version` 也返回通道：
-///   · `latest_version` 的签名（version, origin）被 8 处调用点依赖，改动面远大于收益；
-///   · 本函数**只在 `--core-plan` 自检路径上执行**，不在引导主链路上 ——
-///     多一次元数据探测的代价可接受（自检本就是"多花几秒换确定性"的入口）。
-/// 失败一律回传原因，绝不编造通道（RC-5）。
+/// 目标版本是经哪条通道选出的（仅供自检/日志，不参与安装决策）。
+/// 重新查一遍而不改 latest_version 签名：其调用点多、改动面大，
+/// 且本函数只在 --core-plan 自检路径执行，多一次探测的代价可接受。失败绝不编造通道（RC-5）。
 fn decision_channel(pkg: &str) -> String {
     let path = encode_pkg(pkg);
     let origins = registry_origins();
@@ -753,22 +622,10 @@ fn decision_channel(pkg: &str) -> String {
 mod tests {
     use super::*;
 
-    /// 版本语义**共享测试向量**（2026-09-11）。
-    ///
-    /// ## 为什么需要它
-    ///
-    /// 壳（Rust）与内核（JS）各自实现版本校验/比较 —— **实测 3 处分歧**：
-    /// `1.0.0+` / `1.0.0+!!!` / `1.0.0+あ` 壳判合法、内核判非法
-    /// （旧壳现在验证前 `split('+')` 丢弃 build 段）。
-    ///
-    /// 跨语言无法共享代码，故共享**行为规格**：
-    /// `shell-release/version-vectors.json`（内核仓有逐字节相同的一份）。
-    /// 两侧测试套件都加载它并按自己的实现断言。
-    ///
-    /// 任何一侧改了语义而没同步 → 本测试失败。这是防止再次分叉的唯一可靠手段。
-    ///
-    /// `include_str!` 是**编译期**嵌入：文件缺失或路径错误会直接编译失败，
-    /// 比运行时读取的门禁更强（不会因「文件恰好不在」而静默跳过）。
+    /// 版本语义共享测试向量：壳（Rust）与内核（JS）各自实现校验/比较，实测过分叉。
+    /// 跨语言无法共享代码，故共享行为规格 `shell-release/version-vectors.json`
+    /// （内核仓有逐字节相同的一份），单侧改语义而没同步则本测试失败。
+    /// include_str! 编译期嵌入：文件缺失直接编译失败，强于运行时读取的静默跳过。
     const VECTORS: &str = include_str!("../../shell-release/version-vectors.json");
 
     /// 从形如 `{"input": "x", "valid": true}` 的对象体里取字符串字段。
@@ -799,12 +656,8 @@ mod tests {
         digits.parse().ok()
     }
 
-    /// 把 JSON 文本里的**每个**对象块（`{` … `}`）都取出来。
-    ///
-    /// 实现：栈记录每个 `{` 的起始位置，遇 `}` 弹出即得一个完整对象。
-    /// 随后按**大小**过滤掉根对象（根对象包住整份文件，必然最长）——
-    /// 只留逐条向量的小对象。
-    ///
+    /// 把 JSON 文本里每个对象块（`{` … `}`）都取出来：栈记录 `{` 起点，遇 `}` 弹出一个对象。
+    /// 再按长度过滤掉包住整份文件的根对象，只留逐条向量的小对象。
     /// 已知足够：向量文件里字符串不含花括号（数据由本仓维护）。
     fn object_bodies(raw: &str) -> Vec<String> {
         let mut all = Vec::new();
@@ -864,12 +717,8 @@ mod tests {
         eprintln!("版本向量通过：合法性 {} 条 / 比较 {} 条", nv, nc);
     }
 
-    // ═══════════════════════════════════════════════════════════════════
-    // 跨源仲裁（契约 §3 + 镜像同步滞后）—— `latest_version` 的决策内核。
-    //
-    // §3 五步本身由 release_channel.rs 的单元测试逐分支覆盖；
-    //   此处覆盖**第二步**：多个源各自决策之后，谁的目标版本会被采纳。
-    // ═══════════════════════════════════════════════════════════════════
+    // 跨源仲裁（通道契约 + 镜像同步滞后）—— latest_pick 决策路径的测试。
+    // 通道决策本身由 release_channel.rs 的单测逐分支覆盖；此处覆盖多源各自决策后的仲裁。
 
     use crate::release_channel::{CH_CANARY, CH_LATEST, CH_ROLLBACK, CH_VERSIONS};
 
@@ -901,8 +750,8 @@ mod tests {
 
     #[test]
     fn pick_best_rollback_beats_other_sources_latest() {
-        // **RC-2 回归（跨源形态）**：A 源已同步 rollback（低版本），B 源还是 latest（高版本）。
-        //   若按"数字大小"仲裁，B 会压过 A → 紧急回退无法全量生效。
+        // RC-2 回归（跨源形态）：A 源已同步 rollback（低版本），B 源还是 latest（高版本）。
+        //   若按数字大小仲裁，B 会压过 A，紧急回退无法全量生效。
         let got = pick_best(vec![
             cand("0.2.0", 5, "synced-latest", CH_LATEST),
             cand("0.1.4", 800, "synced-rollback", CH_ROLLBACK),
@@ -914,7 +763,7 @@ mod tests {
 
     #[test]
     fn channel_priority_is_rollback_canary_latest_versions() {
-        // 通道优先级即契约 §3 的步序；**与版本数字无关**。
+        // 通道优先级即发布通道契约的步序；与版本数字无关。
         assert!(channel_rank(CH_ROLLBACK) < channel_rank(CH_CANARY));
         assert!(channel_rank(CH_CANARY) < channel_rank(CH_LATEST));
         assert!(channel_rank(CH_LATEST) < channel_rank(CH_VERSIONS));
@@ -928,15 +777,14 @@ mod tests {
     }
 
     /// RC-G5 反向：判据必须能识别"取全量最高"的旧形态 —— 否则门禁是空转的。
-    ///
-    /// 旧形态与 §3 在**同一份元数据**上给出不同答案，故"改回旧实现"必然被测试抓到。
+    /// 旧形态与通道契约在同一份元数据上给出不同答案，改回旧实现必然被本测试抓到。
     #[test]
     fn pick_best_rejects_old_highest_of_all_form() {
         let meta = serde_json::json!({
             "dist-tags": { "latest": "0.1.5-BETA.3" },
             "versions": { "0.1.5-BETA.3": {}, "1.0.0-BETA.1": {} },
         });
-        // 契约 §3 第 ③ 步：信 latest（BETA 数字大也不动）
+        // 契约第 3 步：信 latest（BETA 数字大也不动）
         let picked = crate::release_channel::select(&meta, false).unwrap();
         assert_eq!(picked.version, "0.1.5-BETA.3");
         // 旧的"全量最高"会选 1.0.0-BETA.1 —— 两者不同，故本门禁非空转
@@ -949,11 +797,8 @@ mod tests {
         assert!(pick_best(vec![]).is_none(), "无候选必须返回 None（由调用方如实报错，RC-5）");
     }
 
-    // ── 回退端到端（RC-2）：契约最关键的运维能力，必须有回归锚点 ──
-    //
-    // 缺口背景：回退目标**低于**当前版本，若 build_plan 只做版本比较会判 action=none
-    //   → 前端显示"已是最新" → 回退到不了用户。修法是让**通道信号**（via=rollback）参与判定。
-    // 本测试锁定该行为，防止将来有人"简化"回版本比较。
+    // 回退端到端（RC-2）：回退目标低于当前版本，必须由通道信号（via=rollback）参与判定，
+    // 否则被判 action=none、回退到不了用户。本组测试锁定该行为，防止退回纯版本比较。
 
     fn pick(v: &str, via: &'static str) -> Result<LatestPick, String> {
         Ok(LatestPick { version: v.to_string(), origin: "test".into(), via: via.to_string() })
@@ -961,7 +806,7 @@ mod tests {
 
     #[test]
     fn rollback_lower_version_still_triggers_action() {
-        // 本机 0.1.5，回退目标 0.1.4（更低）→ **必须**判为需动手，而非"已是最新"
+        // 本机 0.1.5，回退目标 0.1.4（更低）：必须判为需动手，而非"已是最新"
         let p = build_plan(Some("0.1.5".into()), pick("0.1.4", "rollback"));
         assert_eq!(p["action"], "upgrade", "回退目标更低时必须触发（否则 RC-2 端到端断裂）");
         assert_eq!(p["available"], true);
@@ -980,8 +825,8 @@ mod tests {
 
     #[test]
     fn non_rollback_lower_version_does_not_trigger() {
-        // **反向对照**：非回退通道给出更低版本（陈旧 latest）→ 不得触发
-        //   （这正是契约 §2 缺陷 1 的场景：陈旧 ≠ 回退，必须区分）
+        // 反向对照：非回退通道给出更低版本（陈旧 latest）不得触发
+        //   （契约缺陷 1 的场景：陈旧与回退必须区分）
         let p = build_plan(Some("0.1.5".into()), pick("0.1.1-BETA.1", "latest"));
         assert_eq!(p["action"], "none", "陈旧 latest 不得被误判为回退");
         assert_eq!(p["isRollback"], false);
@@ -989,7 +834,7 @@ mod tests {
 
     #[test]
     fn rollback_above_current_is_normal_upgrade() {
-        // 回退 tag 指向更高版本（运维设错/已恢复正常）→ 按正常升级处理
+        // 回退 tag 指向更高版本（运维设错/已恢复正常）：按正常升级处理
         let p = build_plan(Some("0.1.5".into()), pick("0.1.6", "rollback"));
         assert_eq!(p["action"], "upgrade");
         assert_eq!(p["isRollback"], true);

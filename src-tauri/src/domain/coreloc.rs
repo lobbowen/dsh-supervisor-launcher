@@ -1,14 +1,7 @@
-//! 内核（`dsh-supervisor`）的定位：候选枚举 + 版本仲裁。
-//!
-//! 内核是 npm 全局包，落点随安装方式而异（PATH / %APPDATA%\\npm / Homebrew /
-//! ~/.local/bin 软链 / 资源目录内嵌）。故**枚举全部候选**再按版本取最高 ——
-//! 只认一个路径会在「装了却找不到」或「装了新版却用旧版」时出错。
-//!
-//! 平台差异（Windows %APPDATA% / macOS Homebrew）已下沉到 platform 层；
-//!   本模块是**平台无关**的（门禁 G1）。
-//!
-//! 不变量 B1（有界）：is_file/canonicalize 在断开的映射盘或 UNC 上会触网 ——
-//!   故先问 `platform::is_local_fixed_dir`（GetDriveTypeW 不触网）再访问文件系统。
+//! 内核（`dsh-supervisor`）的定位：候选枚举 + 版本仲裁。内核是 npm 全局包，落点随安装方式而异，
+//! 故枚举全部候选再按版本取最高；只认一个路径会在「装了却找不到」或「装了新版却用旧版」时出错。
+//! 平台差异已下沉到 platform 层，本模块平台无关（门禁 G1）。is_file/canonicalize 在断开的映射盘或 UNC 上
+//! 会触网，故先问 `platform::is_local_fixed_dir`（GetDriveTypeW 不触网）再访问文件系统。
 use tauri::Manager;
 
 use std::path::PathBuf;
@@ -18,14 +11,10 @@ pub(crate) fn core_exe_names() -> &'static [&'static str] {
     crate::platform::current().core_exe_names()
 }
 
-/// 把 npm 垫片规范化为**可被 node 执行的 JS 入口**。
-///
-/// Windows 的 npm 全局 bin 是 `<prefix>\<name>.cmd` 批处理垫片；`node <垫片>` 会把它
-///   当 JS 解析 → 必然失败。真实入口在 `<prefix>\node_modules\<pkg>\bin\<name>`。
-/// 找不到包内入口时原样返回（Windows 平台层会退回 `cmd /C` 执行垫片）。
-///
-/// 返回值总是**外部工具可用**的规范路径（入参不必已归一 —— 归一在 `platform::external_path`
-///   这一处完成，本函数顺带做完，调用方不得再各自剥一遍前缀）。
+/// 把 npm 垫片规范化为可被 node 执行的 JS 入口。Windows 的 npm 全局 bin 是 `<prefix>\<name>.cmd`
+/// 批处理垫片，`node <垫片>` 会当 JS 解析而必然失败；真实入口在
+/// `<prefix>\node_modules\<pkg>\bin\<name>`，找不到包内入口时原样返回（平台层会退回 `cmd /C`）。
+/// 返回值总是外部工具可用的规范路径：归一在 `platform::external_path` 一处完成，调用方不得再各自剥前缀。
 pub fn normalize_guard(bin: PathBuf, pkg: Option<&str>) -> PathBuf {
     let bare = crate::platform::external_path(&bin);
     let ext = bare.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase());
@@ -51,56 +40,51 @@ pub fn pick_highest(cands: Vec<PathBuf>) -> Option<PathBuf> {
         .map(|(c, _)| c)
 }
 
-/// 收集全部内核候选（去重 + 解析符号链接），供「按版本最高仲裁」使用。
-/// 跨平台路径规范：
-///   - PATH（crate::env::find_in_path，Windows 走 PATHEXT）
-///   - Windows: %APPDATA%\npm（npm 全局 bin 目录）+ 包内真实脚本
-///   - macOS:   /opt/homebrew/bin（Apple Silicon）、/usr/local/bin（Intel）
-///   - Unix:    ~/.npm-global/bin、~/.local/bin（内核 install 写入的软链）
-///   - 资源目录内嵌兜底（旧版过渡）
-///
-/// `resource_dir` 为 None 时跳过「资源目录内嵌兜底」——CLI 自检（无 AppHandle）走这条。
+/// 收集全部内核候选（去重 + 解析符号链接）供版本仲裁：PATH（Windows 走 PATHEXT）、
+/// %APPDATA%\npm 与包内真实脚本、/opt/homebrew/bin 与 /usr/local/bin、
+/// ~/.npm-global/bin 与 ~/.local/bin、资源目录内嵌兜底。
+/// `resource_dir` 为 None 时跳过内嵌兜底 —— CLI 自检（无 AppHandle）走这条。
 pub(crate) fn locate_core_candidates(resource_dir: Option<PathBuf>) -> Vec<PathBuf> {
     let home = crate::env::home();
     let mut out: Vec<PathBuf> = Vec::new();
-    // 与 env.rs 的 PATH 探测同一类防护（2026-09-11 架构修复）：
-    //   is_file() / canonicalize() 底层会触网 —— 在断开的映射盘或 UNC 路径上
-    //   可能阻塞数十秒，而本函数在**内核定位的关键路径**上（引导页每一步都要用）。
-    //   故先做「本地固定盘」判定（GetDriveTypeW 自身不触网），再访问文件系统。
+  // 与 env.rs 的 PATH 探测同一类防护：
+  //  is_file() / canonicalize() 底层会触网 —— 在断开的映射盘或 UNC 路径上
+  //  可能阻塞数十秒，而本函数在**内核定位的关键路径**上（引导页每一步都要用）。
+  //  故先做「本地固定盘」判定（GetDriveTypeW 自身不触网），再访问文件系统。
     let pkg_for_add = crate::core::package_name().ok();
     let add = |p: PathBuf, out: &mut Vec<PathBuf>| {
         if let Some(dir) = p.parent() {
             if !crate::env::is_local_fixed_dir(dir) { return; }
         }
         if !p.is_file() { return; }
-        // ① 解析 ~/.local/bin 软链到包内真实路径；
-        // ②③ 都由 normalize_guard 完成：剥掉 Windows verbatim/device 前缀（外部工具不接受，
-        //      规则只在 platform::external_path 一处），并把 .cmd 垫片换成包内 JS 入口。
+  // 1) 解析 ~/.local/bin 软链到包内真实路径；
+  // 2)3) 都由 normalize_guard 完成：剥掉 Windows verbatim/device 前缀（外部工具不接受，
+  //  规则只在 platform::external_path 一处），并把 .cmd 垫片换成包内 JS 入口。
         let real = normalize_guard(
             std::fs::canonicalize(&p).unwrap_or(p),
             pkg_for_add.as_deref(),
         );
         if !out.contains(&real) { out.push(real); }
     };
-    // ① 位置契约优先（core.json.bin）—— 安装成功后壳写入的**确切位置**。
-    //    为什么必须最先：npm 全局 prefix 可能是 nvm/volta/fnm 的 node 目录或任何自定义目录，
-    //    PATH 与下面两个硬编码目录都不含它；契约是唯一可靠的事实源。
+  // 1) 位置契约优先（core.json.bin）—— 安装成功后壳写入的**确切位置**。
+  //  为什么必须最先：npm 全局 prefix 可能是 nvm/volta/fnm 的 node 目录或任何自定义目录，
+  //  PATH 与下面两个硬编码目录都不含它；契约是唯一可靠的事实源。
     let names_owned: Vec<&str> = crate::domain::coreloc::core_exe_names().to_vec();
     if let Some(c) = crate::core_contract::read() {
         add(c.bin.clone(), &mut out);
     }
-    // ② 运行期契约派生：内核由 npm 装到 node 所在 prefix，其 bin 就在 nodeBinDir。
+  // 2) 运行期契约派生：内核由 npm 装到 node 所在 prefix，其 bin 就在 nodeBinDir。
     if let Some(rt) = crate::runtime_contract::read_node() {
         for name in &names_owned {
             add(rt.node_bin_dir.join(name), &mut out);
         }
     }
-    // ③ 启发式：壳进程 PATH。
+  // 3) 启发式：壳进程 PATH。
     for name in crate::domain::coreloc::core_exe_names().iter().copied() {
         if let Some(p) = crate::env::find_in_path(name) { add(p, &mut out); }
     }
-    // 平台额外候选（Windows 的 %APPDATA%\npm 与包内真实脚本；macOS 的 Homebrew 落点）
-    // —— 已下沉到 platform 层（2026-09-11），本文件不再出现平台分支。
+  // 平台额外候选（Windows 的 %APPDATA%\npm 与包内真实脚本；macOS 的 Homebrew 落点）
+  // —— 已下沉到 platform 层，本文件不再出现平台分支。
     {
         let names: Vec<&str> = crate::domain::coreloc::core_exe_names().to_vec();
         let pkg = crate::core::package_name().ok();
@@ -120,8 +104,8 @@ pub(crate) fn locate_core_candidates(resource_dir: Option<PathBuf>) -> Vec<PathB
 
 /// 在候选集（含指定 prefix 的平台候选）中找**恰好等于 `version`** 的内核。
 ///
-/// 用途：P2「安装成功后回读确切位置并记录 core.json」。找不到 → None：
-///   调用方必须**如实报**「已安装但定位不到目标版本（安装前缀不一致）」，绝不假装成功。
+/// 用途：P2「安装成功后回读确切位置并记录 core.json」。找不到 -> None：
+///  调用方必须**如实报**「已安装但定位不到目标版本（安装前缀不一致）」，绝不假装成功。
 pub(crate) fn locate_core_at_version(
     app: &tauri::AppHandle,
     version: &str,
@@ -163,9 +147,9 @@ pub(crate) fn locate_core_with_version(app: &tauri::AppHandle) -> Option<(PathBu
 
 #[cfg(test)]
 mod tests {
-    //! 行为门禁（2026-09-15 架构修正）：直接驱动路径规范化与版本仲裁，
-    //! 而不是 `str::contains` —— 真机 1.1.4/1.1.5 的失效正是「静态断言全绿、运行时把
-    //! `.cmd` 交给 node」。
+  //! 行为门禁：直接驱动路径规范化与版本仲裁，
+  //! 而不是 `str::contains` —— 真机 1.1.4/1.1.5 的失效正是「静态断言全部通过、运行时把
+  //! `.cmd` 交给 node」。
     use super::*;
     use std::path::{Path, PathBuf};
 
@@ -195,7 +179,7 @@ mod tests {
         std::fs::write(&internal, b"// js\n").unwrap();
         let got = normalize_guard(shim.clone(), Some("@dsh-sup/dsh-core-x"));
         assert_eq!(got, internal, "1.1.5 真机缺陷：.cmd 垫片被直接交给 node（EISDIR）");
-        // 已是 JS 入口时原样返回。
+  // 已是 JS 入口时原样返回。
         let js = prefix.join("bin").join("dsh-supervisor");
         std::fs::create_dir_all(js.parent().unwrap()).unwrap();
         std::fs::write(&js, b"// js\n").unwrap();
@@ -210,7 +194,7 @@ mod tests {
         let b = root.join("pkgB");
         fake_pkg(&a, "0.1.0");
         fake_pkg(&b, "0.2.0");
-        // pick_highest 的入参是**候选 bin 路径**（与 locate_core_candidates 同形），不是包目录。
+  // pick_highest 的入参是**候选 bin 路径**（与 locate_core_candidates 同形），不是包目录。
         let abin = a.join("bin").join("dsh-supervisor");
         let bbin = b.join("bin").join("dsh-supervisor");
         assert_eq!(pick_highest(vec![abin, bbin.clone()]), Some(bbin), "应按版本最高仲裁（内核只有最新版本）");

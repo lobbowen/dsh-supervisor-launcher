@@ -1,4 +1,4 @@
-// 50-kernel —— 3 个函数（拆分自 bootstrap.html，2026-09-11）。
+// 50-kernel：内核版本计划与安装过程呈现。
 // 共享状态与跨模块调用经 NS（window.__BOOT_NS）。
 (function (NS) {
   function stepCorePlan() {
@@ -17,18 +17,14 @@
         NS.install.begin('kernel', '发现新内核 v' + p.latest + '（当前 v' + p.installed + '）· 正在强制更新…');
         return NS.coreApply(p.latest);
       }
-      // 2026-09-13 修复（失效模式 f）：**远端版本查询失败时必须如实告知**。
-      //   缺陷：core.rs 的 build_plan 在 latest 查询失败时输出 action=unknown 且**带 error 原因**，
-      //     而前端在 installed 非空时**不看 p.error**，直接走下面的「内核已是最新」分支。
-      //   后果：离线 / 全部镜像不可达时，用户被告知「内核已是最新」，掩盖了
-      //     「这次根本没查成」——与仓库「如实回传成败、绝不吞错」的纪律相悖，
-      //     也让用户失去唯一的网络诊断线索。
-      // 联网检查失败：停在当前阶段，如实报因并给重试。不得继续。
+      // 远端版本查询失败必须如实告知：build_plan 在 latest 查询失败时给出 action=unknown 且带
+      // error 原因；installed 非空时若不看 p.error，就会把「这次根本没查成」报成「内核已是最新」，
+      // 抹掉用户唯一的网络诊断线索。故停在当前阶段，报因并给重试，不得继续。
       if (p.error) {
         NS.fail('内核版本检查失败：' + p.error);
         return null;
       }
-      // 显示**实际命中的镜像**（2026-09-11 修复）：
+      // 显示实际命中的镜像：
       //   core_plan 早就回传了 registry 字段，但前端从未使用 —— 数据链路断了。
       var mt = p.registry ? String(p.registry).replace(/^https?:\/\//, '') : NS.mirrorText();
       NS.status('内核已是最新（v' + p.installed + '）' + (mt ? ' · 源 ' + mt : ''));
@@ -64,7 +60,7 @@
     return NS.wait(300).then(NS.stepGuardStart);
   }
 
-  // ── 导出到 NS（跨模块可调用）──
+  // -- 导出到 NS（跨模块可调用）--
   NS.stepCorePlan = stepCorePlan;
   NS.coreApply = coreApply;
   NS.stepCoreDone = stepCoreDone;

@@ -1,27 +1,15 @@
 #!/usr/bin/env node
 'use strict';
 
-// 壳发布产物组装器（2026-09-11 新增，跨平台共用）
-//
-// 职责：把一个平台矩阵 job 产出的「安装包 + .sig」组装为可发布的 npm 包，
-//       并输出供汇总阶段生成 Tauri 静态清单的中间文件。
-//
-// 为什么需要它：
-//   1) Tauri 的 {{target}}/{{arch}} 取值（linux|windows|darwin / x86_64|aarch64）
-//      与 npm 包命名（linux|win|darwin / x64|arm64）不同，直接拼进包名会得到不存在的包；
-//      故采用【静态清单】解耦：清单内部用 Tauri 的 OS-ARCH 键映射到真实 npm 产物 URL。
-//   2) .sig 与安装包必须成对收集；--require-sig 时缺 .sig 直接失败（发布路径），
-//      不带该开关则只报告不失败（CI 验证路径：无密钥的构建本就产不出 .sig）。
-//
-// 用法：
-//   node assemble-shell-pkg.js --platform linux-x64 --ver 0.2.0 \
-//        --bundle-dir src-tauri/target/release/bundle --out dist/npm-shell \
-//        [--require-sig]
+// 把一个平台矩阵 job 的「安装包 + .sig」组装为可发布 npm 包，并产出汇总阶段生成清单的中间文件。
+// Tauri 的 {{target}}/{{arch}} 取值（linux|windows|darwin / x86_64|aarch64）与 npm 包命名
+// （linux|win|darwin / x64|arm64）不同，直接拼进包名会得到不存在的包，故清单内部用 OS-ARCH 键
+// 映射到真实 npm 产物 URL。--require-sig 时缺 .sig 即失败（发布路径）；不带则只报告不失败。
 
 const fs = require('node:fs');
 const path = require('node:path');
 
-// npm 包后缀 → Tauri 清单键（OS-ARCH）+ 运行时安装形态
+// npm 包后缀 -> Tauri 清单键（OS-ARCH）+ 运行时安装形态
 const PLATFORMS = {
   'linux-x64':    { os: 'linux',  cpu: 'x64',   manifestKey: 'linux-x86_64',   installer: 'deb'  },
   'linux-arm64':  { os: 'linux',  cpu: 'arm64', manifestKey: 'linux-aarch64',  installer: 'deb'  },
@@ -77,7 +65,7 @@ function findArtifacts(bundleDir, installer, version) {
     hits = by(FALLBACK_PATTERNS[installer]);
     if (hits.length) console.log('   主形态未命中，改用备用形态（关闭 updater 产物的验证构建）');
   }
-  // 必须按**版本**过滤（2026-09-11 修复）：bundle 目录会累积历史版本安装包，
+  // 必须按版本过滤：bundle 目录会累积历史版本安装包，
   //   不过滤会把旧版本一并打进发布包（体积膨胀 + 语义混乱，且清单与包内容不一致）。
   //   CI 每次全新 workspace 故只产一个版本，但本地开发/重跑会命中此问题（实测 1.0.1 与 1.0.2 同目录）。
   const versionHits = version ? hits.filter((f) => path.basename(f).includes(version)) : hits;

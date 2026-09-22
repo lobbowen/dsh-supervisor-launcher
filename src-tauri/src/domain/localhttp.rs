@@ -1,41 +1,23 @@
-//! 本地 HTTP 客户端（与内核对齐的**最小**实现）。
-//!
-//! 用途：壳与内核之间的**本机回环**交互（握手、会话态、停止握手）。
-//! 为什么不引 reqwest/ureq：这些请求极简（无 TLS / 无重定向 / 无连接复用），
-//! 而壳是**安装器** —— 少一个依赖就少一份供应链与体积负担。
-//!
-//! 不变量 B1（有界）：
-//!   · 连接必须用 `connect_timeout` —— 防火墙 DROP 时 `connect` 会等到
-//!     OS 的 SYN 重试耗尽（Windows 默认可达 20+ 秒）；
-//!   · 读写必须设超时 —— 守卫挂起时不得让壳无限阻塞。
-//!
-//! 不变量 B2（不阻塞 UI）：经 [`spawn_local_post`] 派发到独立线程 ——
-//!   托盘回调里的网络 I/O 一旦阻塞，整个界面（含重绘）都会冻结。
+//! 本地 HTTP 客户端（与内核对齐的最小实现），只服务壳与内核之间的本机回环交互（握手、会话态、停止握手）。
+//! 不引 reqwest/ureq：请求极简（无 TLS / 无重定向 / 无连接复用），而壳是安装器，少一个依赖就少一份供应链与体积负担。
+//! 连接必须用 connect_timeout（防火墙 DROP 时裸 connect 会等到 SYN 重试耗尽，Windows 默认 20+ 秒），读写必须设超时；
+//! 托盘回调里的网络 I/O 一律经 spawn_local_post 派发，否则整个界面含重绘冻结。
 use std::net::TcpStream;
 
 pub(crate) fn post_local(port: u16, path: &str) {
     let _ = post_local_timeout(port, path, std::time::Duration::from_secs(60));
 }
 
-/// 把本地 API 调用派发到独立线程（**绝不阻塞 UI 线程**）。
-///
-/// 用于托盘菜单等由 UI 线程派发的回调：这些回调里的网络 I/O 一旦阻塞，
-/// 整个界面（含重绘）都会被冻结 —— 实测观感是「点击无反应」。
-///
-/// 退出流程同样经此派发：即使守卫无响应，菜单也立即响应，
-/// 用户不会觉得「程序关不掉」。
+/// 把本地 API 调用派发到独立线程，绝不阻塞 UI 线程：托盘菜单等由 UI 线程派发的回调一旦阻塞，
+/// 整个界面（含重绘）都被冻结，观感是「点击无反应」。退出流程同样经此派发，守卫无响应时菜单也立即响应。
 pub(crate) fn spawn_local_post(port: u16, path: &'static str) {
     std::thread::spawn(move || post_local(port, path));
 }
 
-/// 同 post_local，但带读写超时（防止守卫挂起时壳无限阻塞）。返回响应体（解码 utf8 尽力）。
-/// 与本地守卫建立连接，**带连接超时**。
-///
-/// 必须用 `connect_timeout` 而非 `connect`（2026-09-11 审计）：`TcpStream::connect`
-///   **没有超时** —— 若端口被防火墙 DROP（而非 REJECT），连接会一直等到操作系统的
-///   SYN 重试耗尽，Windows 上默认可达 20+ 秒。而本函数被 `guard_ready`（引导页每次
-///   500ms 轮询一次、最多 40 次）与托盘动作调用，等同于反复长时间阻塞。
-///   回环地址正常时是微秒级，但**不能依赖「正常时很快」来省略上限**。
+/// 与本地守卫建立连接，带连接超时，返回响应体（utf8 尽力解码）。
+/// 必须用 connect_timeout：`TcpStream::connect` 没有超时，端口被防火墙 DROP（而非 REJECT）时会一直等到
+/// 操作系统 SYN 重试耗尽，Windows 默认可达 20+ 秒。本函数被 guard_ready（引导页 500ms 轮询、最多 40 次）
+/// 与托盘动作调用，等同于反复长时间阻塞；回环正常时是微秒级，但不能用「正常时很快」省略上限。
 pub(crate) fn connect_local(port: u16, timeout: std::time::Duration) -> Option<TcpStream> {
     use std::net::ToSocketAddrs;
     let addr = format!("127.0.0.1:{}", port);
@@ -60,11 +42,9 @@ pub(crate) fn post_local_timeout(port: u16, path: &str, timeout: std::time::Dura
     Some(String::from_utf8_lossy(&buf).into_owned())
 }
 
-/// 本地 HTTP GET（返回 (状态码, 全文)）——守卫就绪探针用。
-///
-/// `None` = **这次问不出状态码**：连不上、写不进去、或对方一个字节都没回。
-/// 不得把「没有状态行」糊成 `(0, "")` —— 那会让「端口通了但服务没起来」与
-/// 「服务回了 5xx」在报错里变成同一句话，而前者该再等、后者该去看日志。
+/// 本地 HTTP GET，返回 (状态码, 全文)，供守卫就绪探针用。
+/// `None` = 这次问不出状态码：连不上、写不进去、或对方一个字节都没回。不得把「没有状态行」糊成
+/// `(0, "")` —— 那会让「端口通了但服务没起来」与「服务回了 5xx」变成同一句话，而前者该再等、后者该去看日志。
 pub(crate) fn http_get_local(port: u16, path: &str, timeout: std::time::Duration) -> Option<(u16, String)> {
     let mut stream = connect_local(port, LOCAL_CONNECT_TIMEOUT)?;
     let _ = stream.set_read_timeout(Some(timeout));
@@ -74,7 +54,7 @@ pub(crate) fn http_get_local(port: u16, path: &str, timeout: std::time::Duration
     let mut buf = Vec::new();
     let _ = std::io::Read::read_to_end(&mut stream, &mut buf);
     let s = String::from_utf8_lossy(&buf).into_owned();
-    // 状态行固定是 `HTTP/1.1 <code> <reason>`：状态码是**第二个**空白段（第一段是版本）。
+  // 状态行固定是 `HTTP/1.1 <code> <reason>`：状态码是**第二个**空白段（第一段是版本）。
     let code = s.split_whitespace().nth(1)?.parse::<u16>().ok()?;
     Some((code, s))
 }

@@ -1,17 +1,9 @@
 #!/usr/bin/env node
 'use strict';
 
-// Tauri 静态更新清单生成器（2026-09-11）
-//
-// 汇总各平台 job 的 manifest-entry.json → shell-manifest.json（Tauri 静态清单语义）。
-//
-// 为什么用静态清单而非动态变量端点：
-//   Tauri 的 {{target}}（linux|windows|darwin）与 {{arch}}（x86_64|aarch64）
-//   与 npm 包命名（linux|win|darwin、x64|arm64）不同；把变量直接拼进包名会得到
-//   不存在的包。静态清单让「URL 构造」只在一处发生，且三平台行为一致。
-//
-// 用法：
-//   node make-manifest.js --ver 0.2.0 --entries <dir-with-manifest-entry-json...> --out dist/npm-shell/shell-manifest.json [--notes "..."]
+// 汇总各平台 job 的 manifest-entry.json 为 shell-manifest.json（Tauri 静态清单语义）。
+// 用静态清单而非动态变量端点：Tauri 的 {{target}}/{{arch}} 与 npm 包命名不同，把变量直接拼进
+// 包名会得到不存在的包；静态清单让 URL 构造只发生在一处，且三平台行为一致。
 
 const fs = require('node:fs');
 const path = require('node:path');
@@ -83,7 +75,7 @@ function main() {
   for (const k of Object.keys(platforms)) console.log('   ' + k + ' -> ' + platforms[k].url);
 }
 
-// 由清单键反推 npm 包平台后缀（OS-ARCH → npm 命名）
+// 由清单键反推 npm 包平台后缀（OS-ARCH -> npm 命名）
 function platToPkg(key) {
   const MAP = {
     'linux-x86_64': 'linux-x64', 'linux-aarch64': 'linux-arm64',

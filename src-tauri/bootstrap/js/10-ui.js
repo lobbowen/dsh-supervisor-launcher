@@ -1,4 +1,4 @@
-// 10-ui —— 13 个函数（拆分自 bootstrap.html，2026-09-11）。
+// 10-ui：面板渲染函数集。
 // 共享状态与跨模块调用经 NS（window.__BOOT_NS）。
 (function (NS) {
   function setStep(i, detail) {
@@ -22,12 +22,12 @@
   function wait(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
   function hideFail() { NS.$('fail').style.display = 'none'; }
 
-  // ── 安装/下载的统一文字出口（SSOT §3.2，唯一实现）──
+  // -- 安装/下载的统一文字出口（SSOT  节 3.2，唯一实现）--
   // 为什么集中在这里：历史上 node / npm / 内核 / 桌面壳各画各的（进度条与纯文字并存），
   //   同一件事在不同阶段长得不一样；而且进度条常与真实进度脱节，反而让人误判「卡死」。
   //   现在一律只改 status 单行文字与步骤条高亮，**不触碰任何进度条元素**（门禁 G-3/T-7）。
   var INSTALL_TARGET = { node: 'Node.js', npm: 'npm', kernel: '内核', shell: '桌面版本' };
-  // kind 是枚举（SSOT §2.4）：它只决定文案目标与步骤条落点，**不改变任何样式**。
+  // kind 是枚举（SSOT  节 2.4）：它只决定文案目标与步骤条落点，**不改变任何样式**。
   var INSTALL_STEP = { node: 0, npm: 0, shell: 1, kernel: 2 };
   var INSTALL_FAIL_PREFIX = {
     node: '运行环境安装失败：', npm: '运行环境安装失败：',
@@ -55,7 +55,7 @@
   function installText(kind, text) { if (text) status(text); }
 
   function installDone(kind, text) {
-    // 完成文案完全同形：<目标> <版本> 已就绪（SSOT §3.2）；形态归一只经 versionLabel 这一处。
+    // 完成文案完全同形：<目标> <版本> 已就绪（SSOT  节 3.2）；形态归一只经 versionLabel 这一处。
     var v = versionLabel(text);
     status(installTarget(kind) + (v ? ' ' + v : '') + ' 已就绪');
   }
@@ -103,7 +103,7 @@
     NS.status('启动未完成');
     NS.$('failMsg').textContent = msg;
     NS.$('fail').style.display = '';
-    // 网络/镜像类失败 → **自动展开**镜像设置，让用户一眼看到自助出口；
+    // 网络/镜像类失败 -> **自动展开**镜像设置，让用户一眼看到自助出口；
     // 其余失败（如内核安装报错）不展开，避免噪声。
     // 注意：**不含「超时」** —— 环境检测超时并非网络问题，展开镜像设置会误导用户。
     if (/网络|镜像|下载|不可达|network|mirror/i.test(String(msg))) {
@@ -111,16 +111,10 @@
     }
   }
 
-  // ── 环境探测记录的唯一渲染出口（B5，2026-09-21）──
-  //
-  //   为什么需要：同一份探测结论此前在这里被手工拼成一段逐候选追踪（只有 node 维度），
-  //   而 npm 的结论只以「npmOk 字段」的形式存在 —— 于是引导页的检测过程看不见 npm，
-  //   加一个维度（registry 可达、prefix 可写）就要再抄一遍拼接代码。
-  //   现由壳侧 `domain/probes.rs` 给出记录表，前端**只渲染、不登记维度**：
-  //   维度名与顺序都来自数据，前端没有第二份维度表可以漂移。
-  //
-  //   `ok` 三态必须原样显示：true=ok / false=no / 其余=?。把「未知」显示成失败，
-  //   用户会以为机器坏了 —— 而它只是探测还没跑到那一步。
+  // 环境探测记录的唯一渲染出口：维度名与顺序都来自壳侧 domain/probes.rs 的记录表，
+  // 前端不持有第二份维度表 - 否则每加一个维度就要在这里再抄一遍拼接代码。
+  // `ok` 三态原样显示：true=ok / false=no / 其余=?。把「未知」显示成失败，用户会以为
+  // 机器坏了，而它只是探测还没跑到那一步。
   function probeVerdict(ok) {
     if (ok === true) return 'ok';
     if (ok === false) return 'no';
@@ -165,13 +159,13 @@
       'plan=' + (NS.lastPlan ? JSON.stringify(NS.lastPlan) : 'none'),
       'shell=' + (NS.shellId ? (NS.shellId.version + '/' + NS.shellId.installKind + '/capable=' + NS.shellId.selfUpdateCapable) : 'unknown'),
       'shell_update=' + (NS.updPlan ? JSON.stringify({ available: NS.updPlan.available, latest: NS.updPlan.latest, skipped: NS.updPlan.skipped, error: NS.updPlan.error }) : 'none'),
-      // 环境探测（架构修复 2026-09-11，B5 结构化）：探测根因是**环境特有**的，
+      // 环境探测的根因是环境特有的，
       // 靠读代码无法确定；这份记录表是定位该类问题唯一可靠的手段。
       // 「当前卡在哪一步」也在其中 —— 进行中的步骤以 ok=? 形态带着耗时出现。
       'env_probes=' + (probeList(NS.lastEnv) || 'none'),
       'env_candidates=' + ((NS.lastEnv && NS.lastEnv.candidates) || 'none'),
       'env_probe_error=' + ((NS.lastEnv && NS.lastEnv.probeError) || 'none'),
-      // 镜像信息**必须始终有值**（2026-09-11 修复）：此前只在「需要下载 Node」时才有，
+      // 镜像信息必须始终有值：此前只在「需要下载 Node」时才有，
       // 于是 Node 达标的用户诊断串永远是 mirror=none —— 让人合理地怀疑镜像能力不存在。
       // 现从预热缓存读（与是否需要下载解耦），并在尚未就绪时明确说明「预热中」。
       'mirror=' + (
@@ -192,7 +186,7 @@
     ].join(' | ');
   }
 
-  // ── 导出到 NS（跨模块可调用）──
+  // -- 导出到 NS（跨模块可调用）--
   NS.setStep = setStep;
   NS.status = status;
   NS.versionLabel = versionLabel;

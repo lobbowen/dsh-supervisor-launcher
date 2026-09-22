@@ -1,21 +1,7 @@
 //! 环境探测：Node 定位 / 版本 / 产品状态根。
-//!
-//! == 为什么本文件里的子进程必须先经 `bounded::prepare`（2026-09-16） ==
-//!
-//! 壳在 release 下是 **GUI 子系统**（见 main.rs 顶部 `windows_subsystem = "windows"`），
-//!   自身不创建控制台；但 Windows 上子进程**默认会新建/继承控制台** ——
-//!   一个 GUI 进程去拉起控制台程序（node.exe 等）时，若不带 `CREATE_NO_WINDOW`，
-//!   系统就会为它弹出一个黑色控制台窗口。
-//! 本文件的 `node_version()` 每探测一个 Node 候选就执行一次，于是表现为
-//!   「引导期反复闪黑框」（NO-CONSOLE-WINDOW-STANDARD §1 记录的 S-W2 缺口）。
-//!
-//! `bounded::prepare` 是 `CREATE_NO_WINDOW` 的**唯一封装点**：平台分支只允许出现在
-//!   `bounded.rs` 与 `platform/`（门禁 G1），所以这里**只能调用它**，
-//!   不得在本文件写 `#[cfg(windows)]` + `creation_flags`。
-//! 为什么复用 prepare 而不改成 `bounded::run`：run 是「阻塞式收集输出 + 超时」，
-//!   而本函数必须保留「spawn 后轮询 try_wait 并自行计时」的既有非阻塞行为
-//!   （Windows 的 Store 别名存根会挂起，任何阻塞式等待都会把调用方拖死），
-//!   故只借用它「加标志」的能力，执行结构保持不变。
+//! 本文件的子进程一律先经 `bounded::prepare`（CREATE_NO_WINDOW 的唯一封装点）——
+//!   release 下壳是 GUI 子系统，不带该标志时每次探测都会弹一个控制台窗口。
+//! 复用 prepare 而非 `bounded::run`：须保留 spawn 后轮询 try_wait 的非阻塞行为（Store 别名存根会挂起）。
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -34,11 +20,9 @@ pub fn node_exe() -> &'static str {
     crate::platform::current().node_exe_name()
 }
 
-/// 候选是否可用（平台判定）。
-///
-/// 实现已下沉到 platform 层（2026-09-11）。Windows 必须过滤两类**伪可执行**：
-///   · `\WindowsApps\` 下的应用执行别名存根（执行它会挂起或唤起 Store）；
-///   · 0 字节文件。
+/// 候选是否可用（平台判定，实现在 platform 层）。
+/// Windows 必须过滤两类伪可执行：`\WindowsApps\` 下的 Store 执行别名存根（执行会挂起）、
+/// 0 字节文件。
 pub fn is_usable_candidate(cand: &Path) -> bool {
     crate::platform::current().is_usable_executable(cand)
 }
@@ -131,42 +115,24 @@ pub fn node_version(node: &Path) -> Option<String> {
 }
 
 /// 系统 PATH 中的 Node：缺失返回 None。
-///
-/// 必须**遍历全部候选**而非取第一个：PATH 靠前的候选可能是不可用的存根，
-///   若直接返回它就会掩盖后面真正可用的 Node 安装。
-/// 兼容入口：委托给**有界探测运行时**（nodeprobe）。
-///
-/// 架构说明（2026-09-11 二次修复）：原先本函数自行扫描 PATH 并执行候选二进制，
-/// 而它内含无法被自身预算约束的阻塞系统调用（见 env.rs 顶部与 nodeprobe.rs 的根因分析），
-/// 且被 setup() 同步调用 —— 一旦挂起，窗口创建都会被推迟。
-/// 现统一走 nodeprobe：分离线程执行 + 有界等待 + 结果缓存 + 全程追踪。
-/// 保留本函数是为了让所有既有调用点**自动**获得该保证，无需逐个改写。
+/// 必须**遍历全部候选**而非取第一个：PATH 靠前的可能是不可用存根，会掩盖后面真正可用的安装。
+/// 兼容入口：委托 nodeprobe 有界探测（分离线程 + 有界等待 + 结果缓存）；
+/// 保留本函数使所有既有调用点自动获得该保证，无需逐个改写。
 pub fn probe_system_node() -> Option<(PathBuf, String)> {
     crate::nodeprobe::resolve(NODE_PROBE_TOTAL_BUDGET)
 }
 
-/// 安装后已知候选路径（官方安装的标准落点）。
-///
-/// Windows 不得硬编码 `C:\Program Files`（2026-09-11 审计）：
-///   真实路径随**系统盘符**与**系统语言**变化（中文系统是 `Program Files` 的本地化目录名），
-///   也可能装在 `Program Files (x86)`。故一律经 `ProgramFiles` / `ProgramFiles(x86)`
-///   环境变量推导 —— 这也是 `nodeprobe::known_locations()` 采用的口径，两处必须一致。
 /// 用户级 Node 安装根（**零权限**）：<状态根>/node。
-///
-/// 为什么是用户级（2026-09-18 权限模型重写）：系统级安装（Windows MSI / macOS pkg /
-///   Linux /usr/local）都需要提权；而 Windows 上 UAC 提升到管理员账户后，常读不到
-///   当前用户 profile 下的安装包（msiexec 退出码 1619 = 安装包无法打开）。用户级归档
-///   解包三平台一致、**完全不需要授权**，也永不产生跨账户路径不可读问题。
+/// 系统级安装（Windows MSI / macOS pkg / Linux /usr/local）需提权，且 Windows 上 UAC 提升到
+/// 管理员账户后常读不到当前用户 profile 下的安装包；用户级归档三平台一致、完全不需要授权。
 pub fn node_install_root() -> PathBuf {
     state_root().join("node")
 }
 
-/// **安装后** Node 可执行文件应出现的位置（平台判定；用于校验安装成功）。
-///
-/// 实现已下沉到 platform 层（2026-09-11）。
-/// Windows 不得硬编码 `C:\Program Files`：真实路径随**系统盘符**与
-///   **系统语言**变化（中文系统是本地化目录名），也可能装在 `Program Files (x86)`，
-///   故一律经 `ProgramFiles` / `ProgramFiles(x86)` 环境变量推导。
+/// **安装后** Node 可执行文件应出现的位置（平台判定，实现在 platform 层）。
+/// Windows 不得硬编码 `C:\Program Files`：真实路径随系统盘符与系统语言变化
+/// （中文系统是本地化目录名），也可能装在 `Program Files (x86)`；
+/// 一律经 `ProgramFiles` / `ProgramFiles(x86)` 环境变量推导（nodeprobe 同口径，两处必须一致）。
 pub fn known_install_node_path() -> Option<PathBuf> {
     let p = crate::platform::current().node_bin_after_install();
     if p.is_file() {
@@ -202,7 +168,7 @@ pub fn shell_dir() -> PathBuf {
     state_root().join("shell")
 }
 
-/// 前向自愈迁移：旧位置（DSH 数据目录下）→ 产品状态根，按条目合并（不覆盖已存在文件）。
+/// 前向自愈迁移：把旧位置（DSH 数据目录下）的条目并入产品状态根，不覆盖已存在文件。
 /// 在壳启动早期调用一次；失败不阻断（下次启动再试）。
 pub fn migrate_legacy() {
     let home = home();
@@ -228,10 +194,9 @@ pub fn migrate_legacy() {
     }
 }
 
-/// 读取并解析守卫配置 <产品状态根>/supervisor/config.json（serde_json，**壳读内核配置的唯一解析入口**）。
-/// ⚠ 路径已迁离 DSH 数据目录（旧注释写的 `~/.dsh/supervisor/…` 是过时说法，见 state_root()）。
-/// 契约 ARCHITECTURE-CONTRACT-phase0 §3.5：一律真 JSON 解析，禁止字符串扫描
-/// （格式微调——空白/换行/转义差异——即会让扫描失效；此前 apiPort/closeAction 各有一份扫描实现）。
+/// 读取并解析守卫配置 <产品状态根>/supervisor/config.json（**壳读内核配置的唯一解析入口**）。
+/// 契约 ARCHITECTURE-CONTRACT-phase0：一律真 JSON 解析，禁止字符串扫描——
+/// 空白的格式微调即会让扫描失效（apiPort/closeAction 等字段都从这里取）。
 fn config_json() -> Option<serde_json::Value> {
     std::fs::read_to_string(supervisor_dir().join("config.json"))
         .ok()
@@ -241,8 +206,7 @@ fn config_json() -> Option<serde_json::Value> {
 /// 守卫本地 API 基址：读 config.json 的 apiPort（用户可改），失败/缺失回退默认端口。
 /// 壳极少更新但内核配置可演进——硬编码会让改过 apiPort 的用户导航到死端口（F7）。
 pub fn api_base_url() -> String {
-    // 默认端口来自**唯一常量**（见 DEFAULT_API_PORT）—— 此前这里是字面量 36360，
-    // 而 api_port() 的回退是另一个字面量 3100，同一事实两处默认。
+    // 默认端口只允许 DEFAULT_API_PORT 这一个事实源（api_port 的回退共用它）。
     let default_port = DEFAULT_API_PORT;
     let port = config_json()
         .and_then(|v| v.get("apiPort").and_then(|x| x.as_u64()))
@@ -253,12 +217,8 @@ pub fn api_base_url() -> String {
 }
 
 /// 读守卫 config.json 里的一个**布尔开关**（缺失/非布尔/解析失败 = false）。
-///
-/// 为什么单独抽出来：契约 §5 的灰度开关（`canary: true`）与灰度名单 opt-in
-/// （`canaryAllowlist: true`）都是`config.json`里的普通字段，而`config_json`是**私有**的
-/// —— 若各自再写一遍"读文件 + 解析"，就又出现第二份`config.json`解析实现（契约 §3.5 明令禁止）。
-/// 判定规则**只认真 JSON 布尔 true**（字符串 `"true"` 不算）：避免手改配置时把
-/// 灰度机悄悄变成灰度机（少读一位 = 稳定版用户被装上灰度版）。
+/// 判定**只认真 JSON 布尔 true**（字符串 `"true"` 不算）：防手改配置少读一位，
+/// 把稳定版机器悄悄变成灰度机。字段读取一律经本函数，不出现第二份解析实现。
 pub fn config_flag(key: &str) -> bool {
     config_json()
         .and_then(|v| v.get(key).and_then(|x| x.as_bool()))
@@ -267,7 +227,7 @@ pub fn config_flag(key: &str) -> bool {
 
 /// 关闭窗口时的行为（读守卫 config.closeAction；'exit'=退出管家全关，其余=隐藏至托盘）。
 pub fn close_action() -> String {
-// 真 JSON 解析（契约 §3.5）。语义：exit=退出管家；其余（含缺失/解析失败）= 隐藏至托盘。
+// 解析统一走 config_json（真 JSON，契约禁止字符串扫描）。语义：exit=退出管家；其余（含缺失/解析失败）= 隐藏至托盘。
     // serde_json 已是壳依赖（见 Cargo.toml），零新增依赖。
     config_json()
         .and_then(|v| v.get("closeAction").and_then(|x| x.as_str()).map(|s| s.to_string()))
@@ -275,9 +235,8 @@ pub fn close_action() -> String {
         .unwrap_or_else(|| "hide".into())
 }
 
-/// 守卫 API 的**默认端口**（单一事实源）。
-///
-/// 原有两个默认端口（36360 vs 3100）且已分叉；现两者共用本常量（单一事实源）。
+/// 守卫 API 的**默认端口**（单一事实源；api_base_url 与 api_port 的回退共用本常量）。
+/// 门禁 A-3（本文件 tests）锁定「全文件只允许一个默认端口字面量」。
 pub const DEFAULT_API_PORT: u16 = 36360;
 
 /// 壳可用性探测用守卫端口（与 api_base_url 同源解析）。
@@ -292,10 +251,9 @@ pub fn api_port() -> u16 {
 }
 
 /// 内核持久化的**实际** API 端口（ports.json 的 supervisor-api 记录）。
-///
-/// 为什么必须读实际值：内核在 EADDRINUSE 时会自动顺延端口并持久化
-///   （supervisor.js 的端口自动避让）。只认 config.json 的期望值会让壳
-///   永远等一个没人监听的端口 —— 表现为「守卫启动失败」，即使守卫已健康运行。
+/// 必须读实际值：内核在 EADDRINUSE 时会自动顺延端口并持久化；
+/// 只认 config.json 的期望值会让壳永远等一个没人监听的端口，
+/// 表现为「守卫启动失败」，即使守卫已健康运行。
 pub fn discovered_api_port() -> Option<u16> {
     let s = std::fs::read_to_string(supervisor_dir().join("ports.json")).ok()?;
     let v: serde_json::Value = serde_json::from_str(&s).ok()?;
@@ -326,31 +284,24 @@ pub fn home() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-    //! A-3 门禁：守卫 API 的「默认端口」必须是**单一事实源**（2026-09-13）。
-    //!
-    //! 缺陷：api_base_url() 的默认是 36360，而 api_port() 的回退是 3100 ——
-    //! 同一事实两个默认值且已分叉。正常路径下 api_port 由 api_base_url 解析而来，
-    //! 故 3100 那条回退**不可达**；但它是潜伏的第二默认：一旦 api_base_url 的返回
-    //! 形态变化（或有人改动解析），就会回退到一个早就退役的端口，
-    //! 现象是「守卫未运行」而非「端口取错」，排错方向被带偏。
-    //!
-    //! 断言的是「只有一个默认端口字面量」+「回退指向那个常量」——
-    //! 这正是该缺陷的判据。针脚在**运行时拼出**，避免命中本测试自己的源码。
+    //! A-3 门禁：默认 API 端口必须是**单一事实源**。
+    //! 判据：全文件只允许一个默认端口字面量，且 api_port 回退指向 DEFAULT_API_PORT。
+    //! 旧回退值 3100 一旦在代码中重现即判失败 —— 同一事实两个默认会把排错方向带偏。
+    //! 断言针脚在运行时拼出，避免命中本测试自己的源码。
     use super::*;
 
     #[test]
     fn a3_default_api_port_is_single_source() {
         let raw = include_str!("env.rs");
-        // 剥离注释：本仓两次被自己写的说明文字骗过（AUDIT-HANDOFF 9.2）
+        // 剥离整行注释：判据只看代码，不被说明文字误导。
         let code: String = raw
             .lines()
             .map(|l| if l.trim_start().starts_with("//") { "" } else { l })
             .collect::<Vec<_>>()
             .join("\n");
 
-        // 36460 与 3100 在测试源码里**不得以字面量出现**，否则自匹配。
-        //   针脚在运行时拼出，且**注释里也不写**那两个字面量 ——
-        //   本测试源码经 include_str! 被读入，任何逐字出现都会自匹配。
+        // 两个端口字面量不得以可执行代码之外的形态逐字出现：本文件经 include_str! 读入，
+        // 任何位置（含注释）的逐字出现都会自匹配，故针脚一律运行时拼出。
         let expected_default = (3636 * 10).to_string(); // 默认端口 = 3636 乘 10
         let old_stale_port = (31 * 100).to_string();    // 旧端口 = 31 乘 100
 
@@ -382,7 +333,7 @@ mod tests {
     #[test]
     fn a3_default_port_constant_value_and_url_derivation() {
         assert_eq!(DEFAULT_API_PORT, 3636 * 10, "A-3 FAIL 默认端口常量值被改动");
-        // 在一个**空 HOME** 下：无 config.json → 必须落回 DEFAULT_API_PORT。
+        // 在一个**空 HOME** 下：无 config.json，必须落回 DEFAULT_API_PORT。
         // 用锁串行，避免与其它读 HOME 的用例并发互踩。
         static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());

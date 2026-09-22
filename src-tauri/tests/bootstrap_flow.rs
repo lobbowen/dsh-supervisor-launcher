@@ -2010,7 +2010,10 @@ fn b60_service_definition_self_heals_on_content_drift() {
     // Windows：任务存在 **且** 动作记录一致才算最新（计划任务无法回读动作串）。
     let win = fs::read_to_string(manifest_dir().join("src").join("platform").join("windows.rs"))
         .expect("platform/windows.rs");
-    assert!(win.contains("record_current"), "B60 FAIL windows 未比对动作记录");
+    // 锚点取记录读写这对函数名（原锚 `record_current` 是局部变量名，通道判定并入记录后已改名；
+    //   锚到函数比锚到变量稳：函数是「比对发生过」的必然路径，变量名只是它当时的写法）。
+    assert!(win.contains("read_action_record"), "B60 FAIL windows 未比对动作记录");
+    assert!(win.contains("write_action_record"), "B60 FAIL windows 未在建立成功后回写动作记录");
     assert!(win.contains("guard-task.action"), "B60 FAIL windows 缺动作记录文件");
     assert!(
         win.contains("已存在且为最新"),

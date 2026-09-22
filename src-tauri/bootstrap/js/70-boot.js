@@ -1,8 +1,8 @@
-// 70-boot —— 1 个函数（拆分自 bootstrap.html，2026-09-11）。
+// 70-boot：启动引导入口与镜像预热触发
 // 共享状态与跨模块调用经 NS（window.__BOOT_NS）。
 (function (NS) {
   function boot() {
-    // 必须**明确报错**，不能静默返回（2026-09-11）：
+    // 必须明确报错，不能静默返回：
     // IPC 不可用时必须明确报错与指引（不能静默返回，否则页面停在静态文案）。
     //   现在若 IPC 不可用，直接给出结论与指引。
     if (!NS.core) {
@@ -18,10 +18,10 @@
     NS.$('btnForceNode').style.display = 'none';
     // 镜像预热**与引导并行**（后台，不阻塞）：任何步骤都可展示当前镜像。
     NS.startMirrorWarmup();
-    // 从**环境检测**开始（本地快检查在前）；随后 Node → 桌面版本 → 内核 → 守卫 → 控制面板。
+    // 从**环境检测**开始（本地快检查在前）；随后 Node -> 桌面版本 -> 内核 -> 守卫 -> 控制面板。
     NS.stepEnv().catch(function (e) { NS.fail('引导异常：' + NS.errText(e)); });
   }
 
-  // ── 导出到 NS（跨模块可调用）──
+  // -- 导出到 NS（跨模块可调用）--
   NS.boot = boot;
 })(window.__BOOT_NS);

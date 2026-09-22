@@ -12,17 +12,13 @@ pub const NAME: &str = "windows";
 /// 计划任务名（**定义由本文件建立**；内核不再管理，见 D6）。
 pub const GUARD_TASK: &str = "DSH-Supervisor";
 /// 崩溃自拉的保活任务（**由壳建立**；停止守卫时须先停它）。
-/// 2026-09-15：所有者从内核 `autostart.js` 收归壳（KERNEL-DAEMON-CONTRACT D6）。
+/// 所有者 = 壳（KERNEL-DAEMON-CONTRACT D6）。
 pub const WATCHDOG_TASK: &str = "DSH-Supervisor-Watchdog";
 
-/// 看护任务的调用参数：**只**是稳定入口的一个无头模式。
-///
-/// 为什么这里不再有脚本（2026-09-21 B3b）：旧实现把检测逻辑写成内嵌 PowerShell，于是
-///   「守卫活着吗」在本仓出现了第三种答案（`Test-NetConnection` = 只看 TCP 端口），
-///   而壳自更新/自重启期间 GUI 本就要消失几分钟 —— 那份脚本没有宽限、没有会话判定，
-///   会在那个空窗里把 GUI 拉回来（双壳、打断更新）。GUI 自愈的唯一所有者是守卫
-///   （内核 `domains/shell/watchdog`：进程实存 + 宽限 + 更新相位时效 + 风暴上限 + 会话可用），
-///   看护任务因此只剩一件壳该管的事：守卫没就绪时把它拉起来 —— 见 `domain::cli::cli_watchdog`。
+/// 看护任务的调用参数：只是稳定入口的一个无头模式（--watchdog），不再内嵌脚本。
+/// 「守卫活着吗」只看 TCP 端口存活（旧内嵌 PowerShell 用 `Test-NetConnection` 判活），
+/// GUI 自愈的唯一所有者是守卫（内核 `domains/shell/watchdog`：进程实存 + 宽限 + 更新相位时效），
+/// 看护任务只剩：守卫没就绪时把它拉起来 —— 见 `domain::cli::cli_watchdog`。
 pub const WATCHDOG_ARGS: &[&str] = &["--watchdog"];
 
 /// PowerShell 单引号字符串（内部单引号翻倍；反斜杠为字面量，无需转义）。
@@ -39,12 +35,9 @@ fn fresh_dir(dir: &Path) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())
 }
 
-/// 首选解包器：Windows 10 1803+ 内置的 bsdtar（`System32\tar.exe`）。
-///
-/// 为什么不用 PowerShell：`Expand-Archive` 走 .NET Framework 的 ZipFile，路径超过 260 字符的
-///   条目会被**静默丢弃且退出码为 0**（Node 的 npm 依赖树必然超过），
-///   而 bsdtar 用宽字符路径 API，直接支持深目录。
-/// 返回 Err 只代表「这条路走不通」（tar.exe 不存在 / 非零退出），由调用方决定是否回退。
+/// 首选解包器：Windows 10 1803+ 内置的 bsdtar（`System32\tar.exe`，走宽字符路径 API）。
+/// PowerShell 的 `Expand-Archive` 对超过 260 字符的路径条目会静默丢弃且退出码为 0
+///   （Node 的 npm 依赖树必然超过）。返回 Err 只代表「这条路走不通」，由调用方决定是否回退。
 fn extract_with_tar(archive: &Path, dest: &Path) -> Result<(), String> {
     fresh_dir(dest)?;
     let (src, dst) = (archive.display().to_string(), dest.display().to_string());
@@ -115,10 +108,8 @@ impl Platform for Impl {
     }
 
     fn node_artifact(&self, version: &str) -> Option<super::NodeArtifact> {
-        // 用户级安装：官方对 x64/arm64 都提供 zip，解包到 <状态根>/node，**无需 UAC**
-        //   （2026-09-18 权限模型重写）。原 MSI + UAC 路径在「提升到管理员账户」时
-        //   常读不到当前用户 profile 下的安装包 → msiexec 1619；zip 路径彻底消除该问题，
-        //   且 arm64 用**原生**制品（原实现只能退 x64 msi 靠模拟）。
+        // 用户级安装：官方对 x64/arm64 都提供 zip，解到 <状态根>/node，无需 UAC；
+        //   arm64 用原生制品（MSI 路径提权后常读不到用户 profile 下的包，msiexec 1619）。
         let arch = match std::env::consts::ARCH {
             "x86_64" => "x64",
             "aarch64" => "arm64",
@@ -132,9 +123,8 @@ impl Platform for Impl {
     }
 
     fn node_candidate_paths(&self) -> Vec<PathBuf> {
-        // 不得硬编码 C:\Program Files（2026-09-11 审计）：
-        //   真实路径随**系统盘符**与**系统语言**变化（中文系统是本地化目录名），
-        //   也可能装在 Program Files (x86)。故一律经环境变量推导。
+        // 不得硬编码 C:\Program Files：真实路径随系统盘符与系统语言变化（中文系统是本地化目录名），
+        //   也可能装在 Program Files (x86)，故一律经环境变量推导。
         let exe = "node.exe";
         // 用户级安装（<状态根>/node）**最先**：壳自己装的，优先于系统其它 Node。
         let mut v: Vec<PathBuf> = vec![self.node_bin_after_install()];
@@ -190,9 +180,8 @@ impl Platform for Impl {
     }
 
     fn is_usable_executable(&self, cand: &Path) -> bool {
-        // 过滤两类**伪可执行**：
-        //   · \WindowsApps\ 下的应用执行别名存根 —— 执行它会挂起或唤起 Store；
-        //   · 0 字节文件。
+        // 过滤两类伪可执行：\WindowsApps\ 下的应用执行别名存根（执行它会挂起或唤起 Store），
+        //   以及 0 字节文件。
         if !cand.is_file() {
             return false;
         }
@@ -204,19 +193,13 @@ impl Platform for Impl {
     }
 
     fn install_node(&self, file: &Path) -> Result<PathBuf, String> {
-        // 用户级解包（zip），**完全不需要管理员/UAC**（2026-09-18 权限模型重写）。
-        //   原 MSI + Start-Process -Verb RunAs 的两个致命问题：
-        //     ① UAC 提升到管理员账户后常读不到当前用户 profile 下的 .msi → msiexec 1619；
-        //     ② canonicalize() 在 Windows 返回 \\?\ 前缀路径，msiexec 不认。
-        //   zip 解包两问题都不存在（本进程直接写自己的状态目录）。
+        // 用户级解包（zip），零权限：MSI+UAC 路径提权后常读不到用户 profile 下的 .msi（msiexec 1619），
+        //   且 canonicalize() 返回的 \\?\ 前缀 msiexec 不认；zip 解包两条问题都不存在。
         let root = crate::env::node_install_root();
         let staging = root.with_file_name("node.extract");
-        // 解包器必须**长路径安全**：Node 官方 zip 里 npm 的依赖树深过 260 字符，而 PowerShell 5.1
-        //   的 Expand-Archive 走 .NET Framework 的 ZipFile，超长子路径被**静默丢弃、退出码仍为 0**；
-        //   旧实现只看退出码，于是 node.exe 完好而 npm 载荷残缺，「Node 已就绪」指向半棵树。
-        //   首选 bsdtar（Windows 10 1803+ 自带的 System32\tar.exe，走宽字符路径 API）。
-        //   每条解包路都以 commit_user_node 的工具链校验为准，校验不过就换下一条：两条路的失败
-        //   形态不同（tar 可能根本不存在 / Expand-Archive 会截断），信任单一退出码正是本次缺陷成因。
+        // 解包器必须长路径安全：npm 依赖树深过 260 字符，Expand-Archive 静默截断且退出码仍为 0。
+        //   每条解包路都以 commit_user_node 的工具链校验为准，校验不过就换下一条；
+        //   信任单一退出码会放行残缺树（tar 可能不存在 / Expand-Archive 会截断，失败形态不同）。
         let extractors: [(&str, fn(&Path, &Path) -> Result<(), String>); 2] = [
             ("tar.exe", extract_with_tar),
             ("Expand-Archive", extract_with_expand_archive),
@@ -297,11 +280,11 @@ impl Platform for Impl {
         use std::os::windows::ffi::OsStrExt;
         // 先做本地固定盘判定（不触网），再访问文件系统；按盘符缓存，每盘只查一次。
         let w: Vec<u16> = dir.as_os_str().encode_wide().collect();
-        // UNC（以两个反斜杠开头，ASCII 92）→ 跳过（纯字面判定，不触网）
+        // UNC（以两个反斜杠开头，ASCII 92）-> 跳过（纯字面判定，不触网）
         if w.len() >= 2 && w[0] == 92 && w[1] == 92 {
             return false;
         }
-        // 无盘符（相对路径等）→ 保守放行
+        // 无盘符（相对路径等）-> 保守放行
         if w.len() < 2 || w[1] != 58 {
             return true;
         }
@@ -313,7 +296,7 @@ impl Platform for Impl {
         true
     }
 
-    // ── 可执行文件名的平台差异（P2/G1：原为平台层之外的 cfg!() 宏）──
+    // 可执行文件名的平台差异（P2/G1：原为平台层之外的 cfg!() 宏）
     fn node_exe_name(&self) -> &'static str { "node.exe" }
     /// Windows 上 npm 是 `.cmd`；Node 的 spawn/execFileSync **不做 PATHEXT 解析** ——
     /// 与内核侧 `platform/os/exec-path.js::npmBin()` 同一事实（P1-C）。
@@ -323,12 +306,10 @@ impl Platform for Impl {
         &["dsh-supervisor.exe", "dsh-supervisor.cmd", "dsh-supervisor"]
     }
 
-    /// 只有 PE 可执行程序能被 CreateProcessW 直接拉起。
-    ///
-    /// `.cmd`/`.bat` 是 cmd.exe 的脚本、Node 目录里那个无扩展名的 `npm` 是 POSIX sh 脚本：
-    ///   三者都「文件存在」而 CreateProcessW 返回 ERROR_BAD_EXE_FORMAT。
-    /// 因此 Windows 上 npm 一律经 `node.exe + node_modules/npm/bin/npm-cli.js` 调用
-    ///   （见 runtime_contract::probe_npm），消费者与探针共用同一条 spawn 路径。
+    /// 只有 PE 可执行程序能被 CreateProcessW 直接拉起：
+    ///   `.cmd`/`.bat` 是 cmd.exe 的脚本、无扩展名的 `npm` 是 POSIX sh 脚本，
+    ///   都「文件存在而拉不起来」（ERROR_BAD_EXE_FORMAT）。
+    /// 因此 Windows 上 npm 一律经 node.exe + npm-cli.js 调用（见 runtime_contract::probe_npm）。
     fn is_directly_spawnable(&self, prog: &Path) -> bool {
         prog.extension()
             .map(|e| e.eq_ignore_ascii_case("exe"))
@@ -336,9 +317,57 @@ impl Platform for Impl {
     }
 }
 
-/// Windows 看护任务的固有实现（**不属于** ServiceControl 契约：它是壳的私有辅助，
-/// 由 `ensure_defined` 调用；放进 trait impl 内会触发 E0407）。
+/// Windows 的私有辅助（**不属于** ServiceControl 契约：放进 trait impl 会触发 E0407，
+/// 由 ensure_defined 调用）：守卫任务的建任务/免提权自启两个通道，与壳拥有的看护任务。
 impl Impl {
+    /// 建立/更新守卫计划任务，返回成功所用的方式。用户态守卫不需要最高权限，故不再请求
+    ///   `/RL HIGHEST`：非提权进程带这一项必被拒，而「先试必失败的一条再试同一条的另一形态」
+    ///   只是把同一句拒绝访问打印两遍。同名任务由更高权限持有时先 `/Delete` 再建一次；
+    ///   连删都拒绝，就把「谁持有它」说清并交回调用方换通道。
+    fn create_guard_task(&self, action: &str) -> Result<&'static str, String> {
+        let build = || {
+            let mut c = Command::new("schtasks");
+            c.args(["/Create", "/TN", GUARD_TASK, "/SC", "ONLOGON", "/F", "/TR", action]);
+            c
+        };
+        let mut first = build();
+        let r = crate::bounded::run(&mut first, SVC_NORMAL)?;
+        if r.success {
+            return Ok("普通权限");
+        }
+        let why = r.failure("schtasks /Create");
+        if !is_access_denied(&why) {
+            return Err(why);
+        }
+        let mut delcmd = Command::new("schtasks");
+        delcmd.args(["/Delete", "/TN", GUARD_TASK, "/F"]);
+        let del = crate::bounded::run(&mut delcmd, SVC_NORMAL)?;
+        if !del.success {
+            return Err(format!(
+                "{}（同名任务由更高权限持有，删不掉也无法覆盖：{}）",
+                why,
+                del.stderr.trim()
+            ));
+        }
+        let mut retry = build();
+        let again = crate::bounded::run(&mut retry, SVC_NORMAL)?;
+        if again.success {
+            return Ok("普通权限，先删除了旧任务");
+        }
+        Err(again.failure("schtasks /Create"))
+    }
+
+    /// 免提权的每用户自启：把稳定入口写进 HKCU 的 Run 键（登录时启动，语义同 ONLOGON 任务）。
+    fn ensure_run_key(&self, action: &str) -> Result<(), String> {
+        let mut cmd = Command::new("reg");
+        cmd.args(["add", RUN_KEY, "/v", RUN_VALUE, "/t", "REG_SZ", "/d", action, "/f"]);
+        let r = crate::bounded::run(&mut cmd, SVC_NORMAL)?;
+        if r.success {
+            return Ok(());
+        }
+        Err(r.failure("reg add 登录自启项"))
+    }
+
     /// 壳拥有的 Windows 看护任务（D6/H5）：计划任务直接指向稳定入口的无头模式。
     /// 幂等：每次 ensure_defined 都 `/Create /F`（覆盖语义），
     ///   故不会因守卫任务「已是最新」而被跳过；升级后旧版本留下的 `watchdog.ps1` 就地删除。
@@ -360,7 +389,9 @@ impl Impl {
         let tr = super::service_exec_line(shell, args);
         let r = crate::bounded::run(
             Command::new("schtasks").args([
-                "/Create", "/TN", WATCHDOG_TASK, "/SC", "MINUTE", "/MO", "5", "/RL", "HIGHEST", "/F", "/TR", &tr,
+                // 不提 /RL HIGHEST：看护跑的是用户态守卫入口，而最高权限在非提权进程里必被拒
+                //   （与守卫任务同一理由，见 ensure_defined）。
+                "/Create", "/TN", WATCHDOG_TASK, "/SC", "MINUTE", "/MO", "5", "/F", "/TR", &tr,
             ]),
             SVC_NORMAL,
         )?;
@@ -372,6 +403,60 @@ impl Impl {
     }
 
 }
+
+/// 定义通道：计划任务（可即时 `/Run`）与登录自启项（免提权，只能等下次登录）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Channel {
+    Task,
+    RunKey,
+}
+
+impl Channel {
+    fn tag(self) -> &'static str {
+        match self {
+            Channel::Task => "task",
+            Channel::RunKey => "runkey",
+        }
+    }
+
+    fn parse(s: &str) -> Option<Channel> {
+        match s {
+            "task" => Some(Channel::Task),
+            "runkey" => Some(Channel::RunKey),
+            _ => None,
+        }
+    }
+}
+
+/// 动作记录形如 `<通道>\t<动作串>`。无制表符的旧格式按**计划任务**解读（那是它当时唯一的
+/// 通道），否则升级后会把已装用户的任务判成过时并白重建一次。
+fn read_action_record(path: &Path) -> (Option<Channel>, String) {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(_) => return (None, String::new()),
+    };
+    let raw = raw.trim_end_matches(|c| c == '\r' || c == '\n');
+    match raw.split_once('\t') {
+        Some((chan, action)) => (Channel::parse(chan), action.to_string()),
+        None => (Some(Channel::Task), raw.to_string()),
+    }
+}
+
+fn write_action_record(path: &Path, channel: Channel, action: &str) -> Result<(), String> {
+    std::fs::write(path, format!("{}\t{}", channel.tag(), action))
+        .map_err(|e| format!("写入动作记录失败: {}", e))
+}
+
+/// 权限类失败：只有这一类值得换通道，参数/策略类失败重试同一条命令不会变好。
+/// 中英 Windows 的同一事实（`schtasks` 的 stderr 已由 bounded 按控制台码页解码）。
+fn is_access_denied(text: &str) -> bool {
+    let t = text.to_lowercase();
+    text.contains("拒绝访问") || t.contains("access is denied") || t.contains("access denied")
+}
+
+/// HKCU 的 Run 键与其中的值名：标准用户可写，不需要任何提权。
+const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+const RUN_VALUE: &str = "DSH Supervisor";
 
 impl ServiceControl for Impl {
     fn kind(&self) -> &'static str {
@@ -385,9 +470,7 @@ impl ServiceControl for Impl {
         PathBuf::from(format!("schtasks://{}", GUARD_TASK))
     }
 
-    /// Windows 的真实判定：`schtasks /Query` 成功即计划任务存在。
-    ///
-/// 覆写默认判定：以 `schtasks /Query` 成功为准（标识串用 is_file() 恒 false）。
+    /// Windows 覆写默认判定：`schtasks /Query` 成功即计划任务存在（标识串用 is_file() 恒 false）。
     fn is_defined(&self) -> bool {
         matches!(
             crate::bounded::run(
@@ -398,78 +481,55 @@ impl ServiceControl for Impl {
         )
     }
 
-    /// 建立计划任务（幂等，且**包装脚本过时时自愈**）。
-    ///
-    /// 2026-09-12（P2）：原实现「`/Query` 成功 → 直接返回」= **只创建、永不更新**。
-    ///   与 Linux unit / macOS plist 同病：模板演进后老用户永远跑旧定义。
-    ///
-    ///   Windows 与另两平台的区别：计划任务**本身**无法直接比对内容，
-    ///   但它的动作指向我们写的 `.cmd` 包装脚本（可比对）；
-    ///   故判据改为「任务存在 **且** 包装脚本内容一致」才提前返回，
-    ///   否则用 `/Create /F` 强制重建（`/F` 本就是覆盖语义）。
+    /// 建立守卫定义（幂等，且动作或通道过时时自愈）。计划任务本身回读不到动作串，
+    ///   故本地留一份动作记录比对；若以「Query 成功即返回」当完成，修复永远到不了已装用户。
     fn ensure_defined(&self, spec: &LaunchSpec) -> Result<String, String> {
-        let task_exists = matches!(
-            crate::bounded::run(
-                Command::new("schtasks").args(["/Query", "/TN", GUARD_TASK]),
-                SVC_QUICK,
-            ),
-            Ok(o) if o.success
-        );
-        // 稳定入口（2026-09-15 架构修正）：计划任务只指向 `<壳> --run-guard`。
-        //   定义中**不含** node/guard 路径 —— 检测由 --run-guard 在每次启动时完成。
-        //   旧实现把 node/guard 写进现场生成的 .cmd/.ps1（编码/前缀/垫片轮番咬），已整体删除。
+        let task_exists = self.is_defined();
+        // 计划任务只指向稳定入口 `<壳> --run-guard`，定义不含 node/guard 路径
+        //   （固化路径在 node 迁移即失效），检测由 --run-guard 在每次启动时完成。
         let (shell, args) = spec.service_command();
         let action = super::service_exec_line(shell, args);
-        // 动作内容记录（P2 自愈）：计划任务无法回读动作串，故本地留一份用于比对。
         let record = crate::env::supervisor_dir().join("guard-task.action");
         if let Some(dir) = record.parent() {
             std::fs::create_dir_all(dir).map_err(|e| format!("创建状态目录失败: {}", e))?;
         }
-        let record_current = std::fs::read_to_string(&record).ok().as_deref() == Some(action.as_str());
-        if task_exists && record_current {
+        let (channel, recorded) = read_action_record(&record);
+        if task_exists && channel == Some(Channel::Task) && recorded == action {
             // 即使守卫任务已是最新，也必须确保**壳拥有的看护任务**存在（幂等）。
             let wd = self.watchdog_status(spec);
             return Ok(format!("已存在且为最新 计划任务 {}{}", GUARD_TASK, wd));
         }
-        let is_update = task_exists;
-        std::fs::write(&record, &action).map_err(|e| format!("写入动作记录失败: {}", e))?;
-        // 看护任务（DSH-Supervisor-Watchdog）的所有者 = 壳（D6/H5）：随服务定义一并（重）建立。
-        let wd_note = self.watchdog_status(spec);
-        // `/TR` 值**自带引号**（写在值内部，非给 Rust args 加引号）：路径含空格时不被截断。
-        let tr_action = action;
-        let base = |rl: Option<&str>| {
-            let mut c = Command::new("schtasks");
-            c.args(["/Create", "/TN", GUARD_TASK, "/SC", "ONLOGON"]);
-            if let Some(level) = rl {
-                c.args(["/RL", level]);
+        let verb = if task_exists { "已更新" } else { "已建立" };
+        match self.create_guard_task(&action) {
+            Ok(how) => {
+                write_action_record(&record, Channel::Task, &action)?;
+                Ok(format!(
+                    "{} 计划任务 {}（{}）-> {}{}",
+                    verb, GUARD_TASK, how, action, self.watchdog_status(spec)
+                ))
             }
-            c.args(["/F", "/TR", &tr_action]);
-            c
-        };
-        let verb = if is_update { "已更新" } else { "已建立" };
-        let first = crate::bounded::run(&mut base(Some("HIGHEST")), SVC_NORMAL)?;
-        if first.success {
-            return Ok(format!(
-                "{} 计划任务 {}（最高权限）-> {}{}",
-                verb, GUARD_TASK, tr_action, wd_note
-            ));
+            // 免提权兜底：HKCU 登录自启项。它不能被即时启动（`start` 如实返回 Err，调用方
+            //   据此走直接拉起），但「下次登录拉起守卫」这条能力得以保留。
+            Err(e) => match self.ensure_run_key(&action) {
+                Ok(()) => {
+                    write_action_record(&record, Channel::RunKey, &action)?;
+                    Ok(format!(
+                        "计划任务不可用（{}）；已改用登录自启项 {} -> {}{}",
+                        e, RUN_VALUE, action, self.watchdog_status(spec)
+                    ))
+                }
+                Err(e2) => Err(format!("计划任务与登录自启项都建立不了：{}；{}", e, e2)),
+            },
         }
-        // 降级重试（去掉 /RL HIGHEST）
-        let second = crate::bounded::run(&mut base(None), SVC_NORMAL)?;
-        if second.success {
-            return Ok(format!(
-                "{} 计划任务 {}（普通权限，HIGHEST 被拒）-> {}{}",
-                verb, GUARD_TASK, tr_action, wd_note
-            ));
-        }
-        Err(format!(
-            "schtasks /Create 失败（含降级重试）: 首次={} / 降级={}",
-            first.stderr.trim(),
-            second.stderr.trim()
-        ))
     }
 
     fn start(&self) -> Result<(), String> {
+        // 定义写在哪个通道，就向哪个通道请求启动：对只存在于 Run 键的守卫发 `/Run`，
+        //   得到的是「找不到任务」，那会把兜底通道伪装成服务管理器故障。
+        let (channel, _) = read_action_record(&crate::env::supervisor_dir().join("guard-task.action"));
+        if channel == Some(Channel::RunKey) {
+            return Err("定义通道是登录自启项（HKCU Run），它不支持即时启动".to_string());
+        }
         crate::bounded::run_checked(
             Command::new("schtasks").args(["/Run", "/TN", GUARD_TASK]),
             SVC_NORMAL,
@@ -479,13 +539,9 @@ impl ServiceControl for Impl {
     }
 
     fn stop(&self) -> Result<(), String> {
-        // Windows：先停 watchdog 保活任务，再终止守卫进程（否则 watchdog 会立刻重新拉起）。
-        // 全部有界：退出流程也要能在服务管理器无响应时走完，否则用户会觉得「程序关不掉」。
-        // ⚠ 2026-09-18 修（严重缺陷：退出管家后自动重启）：
-        //   原只用 /End —— 那只结束**本次运行实例**，而 DSH-Supervisor-Watchdog 是
-        //   /SC MINUTE /MO 5 的**计划**（触发时跑 `<壳> --watchdog`，守卫端口未就绪就把它拉起）。
-        //   /End 不禁用计划 ⇒ ≤5 分钟后看护再次触发，把守卫拉回来。
-        //   故看护任务必须 **/Delete 计划**；下次启动 ensure_defined 会重建（幂等）。
+        // 看护任务必须 /Delete 整条计划：/End 只结束本次实例，/SC MINUTE /MO 5 的计划
+        //   仍会在 5 分钟内再次触发把守卫拉回来。删除后下次 ensure_defined 幂等重建。
+        //   全部有界：退出流程也要能在服务管理器无响应时走完。
         crate::bounded::run_lossy(
             Command::new("schtasks").args(["/Delete", "/TN", WATCHDOG_TASK, "/F"]),
             SVC_NORMAL,
@@ -494,9 +550,8 @@ impl ServiceControl for Impl {
             Command::new("schtasks").args(["/End", "/TN", GUARD_TASK]),
             SVC_NORMAL,
         );
-        // 守卫是 `node.exe`（**不是** dsh-supervisor.exe）——旧的按镜像名 taskkill 根本杀不掉它，
-        //   会残留进程/锁，导致后续启动被 guard.lock 拒绝（「永远拉不起来」）。
-        //   按**命令行**精确匹配 dsh-supervisor 的 node 进程再杀，绝不误杀 DSH 自身的 node。
+        // 守卫镜像名是 node.exe（不是 dsh-supervisor.exe），按镜像名 taskkill 杀不到它；
+        //   按命令行含 dsh-supervisor 精确匹配再杀，绝不误杀 DSH 自身的 node。
         crate::bounded::run_lossy(
             Command::new("powershell").args([
                 "-NoProfile",
@@ -543,11 +598,9 @@ fn drive_is_fixed(letter: u16) -> bool {
 
 #[cfg(test)]
 mod toolchain_tests {
-    //! Windows 工具链事实的行为门禁（2026-09-21：npm「装了却不在」的根因取证）。
-    //!
-    //! 本模块**只在 Windows 上编译**，这正是它的价值：`.cmd` 能否被 CreateProcessW 拉起、
-    //! 官方 zip 解出来 npm 载荷完不完整，都是只有本平台能判定的事实。
-    //! 这些断言在 Linux/macOS 上恒真，写在那里等于没写。
+    //! Windows 工具链事实的行为门禁：本模块只在 Windows 上编译才成立 ——
+    //! `.cmd` 能否被 CreateProcessW 拉起、官方 zip 解出来 npm 载荷完不完整，
+    //! 都是只有本平台能判定的事实，这些断言在 Linux/macOS 上恒真、写在那里等于没写。
 
     use super::*;
     use std::path::{Path, PathBuf};
@@ -574,8 +627,7 @@ mod toolchain_tests {
     #[test]
     fn cmd_shim_alone_is_not_reported_as_npm() {
         // 截断/裁剪后的现场：node.exe 与 npm.cmd 在，包内 JS 树没了。
-        // 旧实现在这里会返回 npm.cmd，探针再经 cmd /C 包装跑一次 --version：
-        // 要么报「环境已就绪」而后续 npm install 必失败，要么面板出现 npm 缺失。
+        //   只剩不可直接执行的垫片时必须判为不就绪，不得经 cmd 包装后当作可用。
         let d = tmp("cmd-only");
         let node = d.join("node.exe");
         std::fs::write(&node, b"").unwrap();
@@ -635,11 +687,9 @@ mod toolchain_tests {
         }
     }
 
-    /// 真机取证：下载官方归档并走**生产解包路径**，断言解出来的 npm 真实可用。
-    ///
-    /// 为什么必须存在：整条 zip -> node_modules\\npm -> `npm --version` 链在 CI 上
-    ///   从未被执行过（构建与门禁都不碰真归档），于是 Windows 上「装完 Node 仍没有 npm」
-    ///   只能靠用户报障发现。此测试由 build.yml 的 Windows leg 以 `--ignored` 显式执行。
+    /// 真机取证：下载官方归档并走生产解包路径，断言解出来的 npm 真实可用。
+    /// zip -> node_modules\\npm -> `npm --version` 整条链不被 CI 构建与门禁触碰（不碰真归档），
+    /// 故由 build.yml 的 Windows leg 以 `--ignored` 显式执行。
     #[test]
     #[ignore = "联网下载官方 Node 归档（约 30MB），仅由 CI 的 Windows leg 执行"]
     fn official_artifact_installs_usable_npm() {
@@ -694,5 +744,51 @@ mod toolchain_tests {
             node.display()
         );
         let _ = std::fs::remove_dir_all(&home);
+    }
+}
+
+#[cfg(test)]
+mod definition_tests {
+    //! 定义通道的形态门禁：权限类判定与通道记录是 Windows 拉起链唯一的分支点，
+    //! 判错的代价是用户看到「两次同样的拒绝访问」而不说原因。
+
+    use super::{is_access_denied, read_action_record, write_action_record, Channel};
+
+    fn tmp_record(tag: &str) -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!("dsh-rec-{}-{}.txt", tag, std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        p
+    }
+
+    #[test]
+    fn channel_record_roundtrips_and_defaults_to_task_for_legacy() {
+        let p = tmp_record("chan");
+        assert_eq!(read_action_record(&p).0, None, "文件不存在时必须报「无通道」而非猜一个");
+        write_action_record(&p, Channel::RunKey, r#""C:\a b\dsh.exe" --run-guard"#).unwrap();
+        let (c, a) = read_action_record(&p);
+        assert_eq!(c, Some(Channel::RunKey), "通道写进记录却没读回来 -> 下次比对会走错通道");
+        assert_eq!(a, r#""C:\a b\dsh.exe" --run-guard"#, "动作串被通道前缀污染");
+        // 旧格式（只有动作串）按计划任务解读：升级不该把已装用户的任务判成过时再重建一次。
+        std::fs::write(&p, r#""C:\x\dsh.exe" --run-guard"#).unwrap();
+        assert_eq!(read_action_record(&p).0, Some(Channel::Task), "旧记录未按计划任务解读");
+        // CRLF 与尾随换行不改变判定（记录由本模块写，但可能被人手工编辑过）。
+        std::fs::write(&p, "task\t\"C:\\x\\dsh.exe\"\r\n").unwrap();
+        let (c, a) = read_action_record(&p);
+        assert_eq!((c, a.as_str()), (Some(Channel::Task), "\"C:\\x\\dsh.exe\""));
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn only_permission_shaped_failures_change_channel() {
+        for denied in ["错误: 拒绝访问。\r\n", "ERROR: Access is denied.\n", "Access denied"] {
+            assert!(is_access_denied(denied), "权限类失败被漏判: {}", denied);
+        }
+        for other in [
+            "ERROR: The system cannot find the file specified.",
+            "错误: 无效的参数。",
+            "schtasks /Create 失败（超时被 kill）",
+        ] {
+            assert!(!is_access_denied(other), "非权限类失败被判成权限类 -> 白白换一次通道: {}", other);
+        }
     }
 }
