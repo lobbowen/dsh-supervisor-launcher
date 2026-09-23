@@ -133,7 +133,7 @@ sha256sum ~/.tauri/backup/dsh-supervisor.key.<时间戳> | cut -c1-16
 ```
 
 **第 2 步（本机，只签探针）**：`tauri signer sign` 对一个临时文件签名，成功即证明「私钥 + 口令」匹配。
-CLI 无 verify 子命令，且本机一律不得跑 `npx @tauri-apps/cli@2 build` —— 那会产出发布形态的产物，
+CLI 无 verify 子命令，且本机一律不得跑 `npx @tauri-apps/cli build` —— 那会产出发布形态的产物，
 直接违反 `RELEASE-STANDARD.md` §0 硬标准。
 
 **第 3 步（CI，唯一能证明「产线可用 + 客户端会接受」的地方）**：

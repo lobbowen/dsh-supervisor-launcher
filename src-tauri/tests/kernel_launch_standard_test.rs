@@ -700,7 +700,7 @@ fn k16_serving_gate_gates_early_return_and_navigation() {
     );
     assert!(load_at > ask_at, "K-16 失败：主帧没有「判据之后才投面板」这条顺序");
     // 出口本身必须是主帧导航：写成 iframe.src 就变成「把引导页塞进 iframe」，1.2.5 前的形状。
-    let back = fn_slice(&shell, "var backToBootstrap = function", "// 有界等守卫就绪后再重载面板");
+    let back = fn_slice(&shell, "var backToBootstrap = function", "var reloadPanelWhenReady = function");
     assert!(
         back.contains("window.location.replace('bootstrap.html')"),
         "K-16 失败：回引导页不是主帧导航"
@@ -728,7 +728,7 @@ fn k16_serving_gate_gates_early_return_and_navigation() {
         "K-16 失败：引导完成未武装稳态看护"
     );
     // 内核更新后的重载不许是固定延时（新守卫还没听完端口就会得到拒绝连接页）。
-    let reload = fn_slice(&shell, "var reloadPanelWhenReady = function", "// 引导完成 → 内容区切到面板");
+    let reload = fn_slice(&shell, "var reloadPanelWhenReady = function", "evt.listen('shell:goto-panel'");
     assert!(
         !shell.contains("}, 900);") && shell.contains("reloadPanelWhenReady(0)")
             && reload.contains("guard_ready") && reload.contains("p.serving === false"),

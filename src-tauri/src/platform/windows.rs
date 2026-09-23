@@ -380,6 +380,8 @@ impl Impl {
 
     fn ensure_watchdog(&self, spec: &LaunchSpec) -> Result<String, String> {
         // 脚本形态已废除（见 WATCHDOG_ARGS 注释）；清掉历史文件，避免留下无人维护的第二实现。
+        // 本仓的写入路径自 v1.2.2 起已移除，故本段对跑过它的装机是一次性的：清完即为 no-op。
+        // 退役期限：v1.3（删除前置 = 活跃装机最低版本 >= 1.2.2；K-13 钉着 remove_file 必须在）。
         let stale = crate::env::supervisor_dir().join("watchdog.ps1");
         if stale.exists() {
             let _ = std::fs::remove_file(&stale);
@@ -430,6 +432,8 @@ impl Channel {
 
 /// 动作记录形如 `<通道>\t<动作串>`。无制表符的旧格式按**计划任务**解读（那是它当时唯一的
 /// 通道），否则升级后会把已装用户的任务判成过时并白重建一次。
+/// 退役依据：带通道前缀是自 v1.2.3 起的唯一写入形态（见 `write_action_record`），旧记录只可能在
+/// 更早装机升上来、且尚未重装过通道时读到。退役期限 v1.4，删除前置 = 活跃装机最低版本 >= 1.2.3。
 fn read_action_record(path: &Path) -> (Option<Channel>, String) {
     let raw = match std::fs::read_to_string(path) {
         Ok(s) => s,

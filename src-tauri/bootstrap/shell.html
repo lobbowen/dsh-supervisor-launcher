@@ -34,7 +34,7 @@
     box-shadow: 0 24px 80px rgb(15 23 42 / 0.16);
   }
 
-  /* ── 唯一窗口栏（产品 WindowTitlebar 同款视觉） ── */
+  /* 唯一窗口栏（产品 WindowTitlebar 同款视觉） */
   #titlebar {
     height: 40px; flex: none; display: flex; align-items: center; justify-content: space-between;
     background: var(--sidebar);
@@ -50,7 +50,7 @@
   .tb-btns button:hover { background: rgb(0 0 0 / 5%); color: var(--text); }
   .tb-btns button.close:hover { background: var(--destructive); color: #fff; }
 
-  /* ── 内容区（空白容器, iframe 纯网页） ── */
+  /* 内容区（空白容器, iframe 纯网页） */
   #content { flex: 1; min-height: 0; position: relative; background: transparent; }
   #content iframe { width: 100%; height: 100%; border: 0; display: block; background: transparent; }
 </style>
@@ -115,7 +115,7 @@
       }).catch(retry);
     };
 
-    // 引导完成 → 内容区切到面板
+    // 引导完成后把内容区切到面板
     if (evt) {
       evt.listen('shell:goto-panel', function (e) {
         // 守卫托管面板 URL（Rust go_panel 从 config apiPort 动态给出, 同源直连守卫 API）
@@ -126,7 +126,7 @@
         var u = p.url;
         if (!u) { backToBootstrap(); return; }
         panelUrl = u;
-        // force=true（用户重新显示窗口）→ 强制重载取最新 UI；否则同 URL 不重载（守卫重启延时重发不刷面板）
+        // force=true（用户重新显示窗口）时强制重载取最新 UI；否则同 URL 不重载（守卫重启延时重发不刷面板）
         if (p.force || u !== frame.src) { retried = 0; frame.src = u; }
       });
       evt.listen('shell:goto-bootstrap', function () { backToBootstrap(); });
@@ -139,7 +139,7 @@
       frame.src = panelUrl + sep + 'dsh_retry=' + Date.now();
     });
 
-    // ── 内核更新消息桥（单写入者契约；docs/DESIGN-SHELL-ARCHITECTURE.md §3.2c）──
+    // 内核更新消息桥（单写入者契约；docs/DESIGN-SHELL-ARCHITECTURE.md 3.2c 节）
     // 面板由**内核**托管、运行在内容 iframe 内，没有 Tauri IPC（IPC 仅主帧）。
     // 故面板经 postMessage 请求本主帧代执行「更新内核」—— 内核包唯一写入者是壳。
     // 版本/消息类型/命令名由 Rust 的 shell_bridge_contract 下发（不在此硬编码）。
@@ -155,10 +155,9 @@
     var replyToPanel = function (src, origin, msg) {
       try { src.postMessage(msg, origin); } catch (e) {}
     };
-    // ── 内核安装进度 → 面板中继（B4b）──
-    // 面板没有 IPC，**本主帧是唯一能听到 install_* 事件的人**。不转发，面板那侧就只能停在
-    //   一句「正在更新内核…」——而壳在 npm install 上最多要花 17 分钟（预算见 src/bridge.rs）。
-    // 一次只有一个在途请求（面板按钮在收到终结消息前是禁用态），故只需记一份 pending；
+    // 内核安装进度转发给面板（B4b）。面板没有 IPC，本主帧是唯一能听到 install_* 事件的人：
+    //   不转发，面板就只能停在「正在更新内核…」，而壳在 npm install 上最多要花 17 分钟（预算见 src/bridge.rs）。
+    //   一次只有一个在途请求（面板按钮在收到终结消息前是禁用态），故只记一份 pending，
     //   换源/重启等阶段各自都会发一帧，收尾时随终结消息一起清空。
     var kernelPending = null;
     if (evt) {
@@ -177,7 +176,7 @@
     }
     if (core) {
       // 取桥契约（拿到后才加载面板，保证面板首次请求就能被识别，消除竞态）。
-      // ⚠ 可用性优先：即使契约拉取失败，也必须照常加载面板（否则白屏），只是更新桥不可用。
+      // 可用性优先：即使契约拉取失败，也必须照常加载面板（否则白屏），只是更新桥不可用。
       core.invoke('shell_bridge_contract').then(function (c) {
         BRIDGE = c || null;
       }).catch(function () {}).then(function () {

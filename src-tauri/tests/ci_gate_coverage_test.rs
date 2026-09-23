@@ -45,6 +45,9 @@
 //!   C-g  发布侧严格性不得被放宽：组装器仍对缺 .sig 早失败，且该失败挂在 require-sig 上；
 //!        parseArgs 必须能识别布尔开关；备用形态只在主形态零命中时启用
 //!   C-h  反向：C-f/C-g 的判据能识别旧形态，且 step_block 定位准确
+//!   C-i  构建工具链版本必须钉死：打包步骤引用三段号的 TAURI_CLI_VERSION，
+//!        全文件不得再有浮动 major 的 CLI 引用（同一 commit 的三平台产物不得出自不同 CLI 版本）；
+//!        产线文档 H4 行必须写同一形态（命令改了文档没跟＝把浮动版本写成事实）。
 
 use std::fs;
 use std::path::PathBuf;
@@ -253,6 +256,26 @@ fn parse_args_handles_bool_flags(src: &str) -> bool {
     body.contains("startsWith('--')") && body.contains("= true")
 }
 
+/// 打包步骤是否用**钉死的** Tauri CLI 版本：env 里的值必须是三段纯数字，
+/// 且命令必须引用该变量而不是写个浮动 major（`@2` = 每次跑各取当天最新，三平台可能不同版本）。
+fn cli_version_pinned(step: &str) -> bool {
+    let at = match step.find("TAURI_CLI_VERSION:") {
+        Some(i) => i,
+        None => return false,
+    };
+    let line = step[at..].lines().next().unwrap_or("");
+    let val = match line.split_once(':') {
+        Some((_, v)) => v.trim().trim_matches('"').trim(),
+        None => return false,
+    };
+    let parts: Vec<&str> = val.split('.').collect();
+    let exact = parts.len() == 3
+        && parts
+            .iter()
+            .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()));
+    exact && step.contains("\"@tauri-apps/cli@${TAURI_CLI_VERSION}\"")
+}
+
 /// 无私钥时是否真的关掉 updater 产物：配置内置了 pubkey，Tauri 见「有公钥无私钥」即失败
 /// （A public key has been found, but no private key），只 unset 变量并不足以让构建通过。
 fn disables_updater_artifacts_without_key(step: &str) -> bool {
@@ -459,5 +482,65 @@ fn c_e_offender_detector_is_not_vacuous() {
         b.contains("cargo build") && !b.contains("runs-on: y"),
         "C-e FAIL job_block 定位错误，C-c/C-d 会空转：{:?}",
         b
+    );
+}
+
+#[test]
+fn c_i_tauri_cli_version_is_pinned() {
+    let y = strip_yaml_comments(&ci());
+    let bundle = step_block(&y, "Build + bundle (Tauri)");
+    assert!(!bundle.is_empty(), "C-i FAIL 未找到打包步骤 —— 门禁空转");
+    assert!(
+        cli_version_pinned(&bundle),
+        "C-i FAIL 打包用的 Tauri CLI 版本没有钉死（浮动 major 会让三平台产物出自不同版本 CLI）"
+    );
+    // 全文件都不许再出现浮动形态（注释里的历史说明已被剥掉，不算命中）。
+    let floating: Vec<&str> = y
+        .lines()
+        .filter(|l| l.contains("@tauri-apps/cli@") && !l.contains("@tauri-apps/cli@${"))
+        .map(|l| l.trim())
+        .collect();
+    assert!(
+        floating.is_empty(),
+        "C-i FAIL 仍有直接引用浮动 CLI 的行：{:?}",
+        floating
+    );
+
+    // 反向：判据必须认得「写死但仍是浮动 major」与「有 env 却没被引用」两种劣化形态。
+    let floating_major = "        env:\n          TAURI_CLI_VERSION: 2\n        run: |\n          npx --yes @tauri-apps/cli@2 build\n";
+    assert!(
+        !cli_version_pinned(floating_major),
+        "C-i 反向失败：浮动 major 形态被判为已钉版"
+    );
+    let env_not_used = "        env:\n          TAURI_CLI_VERSION: 2.11.5\n        run: |\n          npx --yes @tauri-apps/cli@2 build\n";
+    assert!(
+        !cli_version_pinned(env_not_used),
+        "C-i 反向失败：只声明 env 而命令未引用，也被判为已钉版"
+    );
+    let good = "        env:\n          TAURI_CLI_VERSION: 2.11.5\n        run: |\n          npx --yes \"@tauri-apps/cli@${TAURI_CLI_VERSION}\" build\n";
+    assert!(
+        cli_version_pinned(good),
+        "C-i 反向失败：正确形态被判红（判据不可用）"
+    );
+
+    // 产线文档的 H4 行必须与 build.yml 同形态：命令换了而文档留着浮动写法，等于把旧事实继续传播。
+    let dp = manifest_dir()
+        .join("..")
+        .join("docs")
+        .join("RELEASE-STANDARD.md");
+    let doc = fs::read_to_string(&dp).unwrap_or_else(|e| panic!("C-i FAIL 读取 {:?} 失败: {}", dp, e));
+    let row_pinned = |row: &str| row.contains("@tauri-apps/cli@${TAURI_CLI_VERSION}");
+    let h4 = doc
+        .lines()
+        .find(|l| l.contains("| H4 |"))
+        .unwrap_or("（H4 行不存在）");
+    assert!(
+        row_pinned(h4),
+        "C-i FAIL 产线文档 H4 行的 CLI 写法未与 build.yml 同步：{:?}",
+        h4.trim()
+    );
+    assert!(
+        !row_pinned("| H4 | 构建 + 打包 | `npx --yes @tauri-apps/cli@2 build` | 是 |"),
+        "C-i 反向失败：浮动形态的文档行被判为已同步"
     );
 }
