@@ -198,7 +198,7 @@ ManagedRegistry.heartbeat(5000)                objects.js:289-324
 | `core_status` / `core_plan` / `core_apply` / `kernel_update_apply` | 内核版本治理（唯一写入者 = 壳）|
 | `guard_start` / `guard_ready` | 守卫启停与握手（对齐门 + healthz）|
 | `mirror_status` / `mirror_set` / `mirror_warmup` / `mirror_cached` | 镜像设置、预热与读缓存 |
-| `shell_identity` / `shell_set_phase` / `shell_panel_url` / `shell_state_root` / `shell_bridge_contract` | 壳身份、阶段、面板地址（与「此刻能不能投」同出）与自描述 |
+| `shell_identity` / `shell_set_phase` / `shell_panel_url` / `shell_bridge_contract` | 壳身份、阶段、面板地址（与「此刻能不能投」同出）与自描述 |
 | `shell_update_check` / `shell_update_apply` / `shell_restart` | 壳自更新（minisign 强制验签）|
 | `win_ctl` / `finish_boot` | 窗口动作、引导完成 |
 

@@ -138,6 +138,15 @@ fn main() {
         };
     }
     bt!("main enter");
+    // 状态根随启动落日志：schema 与三个实际路径在 shell.log 第一行就能看到
+    // （原先这是一条诊断 IPC 命令，全仓零调用方 —— 日志才是本壳的观测通道）。
+    bt!(
+        "state-root schema={} root={} supervisor={} shell={}",
+        env::STATE_ROOT_SCHEMA,
+        env::state_root().display(),
+        env::supervisor_dir().display(),
+        env::shell_dir().display()
+    );
     // 无头自检：镜像测速与选择（用户要求「镜像必须可见」的验证入口）。
     if std::env::args().any(|a| a == "--mirror-plan") {
         std::process::exit(domain::cli::cli_mirror_plan());
@@ -196,7 +205,7 @@ fn main() {
         // app.restart()：更新安装后重启进入新版本（旧进程装、新进程跑）。
         .plugin(tauri_plugin_process::init())
         .manage(Mutex::new(RunState::default()))
-        .invoke_handler(tauri::generate_handler![commands::node_status, commands::core_status, commands::core_plan, commands::core_apply, commands::kernel_update_apply, commands::shell_bridge_contract, commands::shell_state_root, commands::guard_start, commands::guard_ready, commands::start_node_install, commands::finish_boot, commands::win_ctl, commands::shell_identity, commands::shell_update_check, commands::shell_update_apply, commands::shell_restart, commands::shell_set_phase, commands::mirror_status, commands::mirror_set, commands::node_latest, commands::mirror_warmup, commands::mirror_cached, commands::shell_panel_url])
+        .invoke_handler(tauri::generate_handler![commands::node_status, commands::core_status, commands::core_plan, commands::core_apply, commands::kernel_update_apply, commands::shell_bridge_contract, commands::guard_start, commands::guard_ready, commands::start_node_install, commands::finish_boot, commands::win_ctl, commands::shell_identity, commands::shell_update_check, commands::shell_update_apply, commands::shell_restart, commands::shell_set_phase, commands::mirror_status, commands::mirror_set, commands::node_latest, commands::mirror_warmup, commands::mirror_cached, commands::shell_panel_url])
         .setup(|app| {
             bt!("setup enter");
             // 状态根迁移（前向自愈）：把旧位置 ~/.dsh/{supervisor,shell} 的内容并入产品状态根。
@@ -263,7 +272,7 @@ fn main() {
             let menu = tauri::menu::Menu::with_items(app, &[&show_m, &start, &stop, &restart, &quit])?;
 
             tauri::tray::TrayIconBuilder::with_id("dsh-supervisor-tray")
-                .icon(app.default_window_icon().expect("no default icon").clone())
+                .icon(app.default_window_icon().ok_or("no default icon")?.clone())
                 .tooltip("dsh-supervisor")
                 .menu(&menu)
                 // 左键=显示窗口 / 右键=弹出菜单（Windows/Linux 惯例）。

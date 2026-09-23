@@ -226,7 +226,7 @@ pub async fn core_status(app: tauri::AppHandle) -> serde_json::Value {
     .ok()
     .flatten();
     let (installed, version, path) = match located {
-        Some((p, v)) => (true, Some(v), Some(p.display().to_string())),
+        Some((p, v)) => (true, v, Some(p.display().to_string())),
         None => (false, None, None),
     };
     serde_json::json!({
@@ -464,18 +464,6 @@ pub fn shell_bridge_contract() -> serde_json::Value {
             "result": crate::bridge::MSG_KERNEL_UPDATE_RESULT,
             "progress": crate::bridge::MSG_KERNEL_UPDATE_PROGRESS,
         }
-    })
-}
-
-/// 产品状态根（诊断/支持用）：schema + 实际路径。**独立于 DSH 的 ~/.dsh**。
-/// 同时使 \`STATE_ROOT_SCHEMA\` 成为可观测契约（与内核 state-root.js 的 SCHEMA 握手）。
-#[tauri::command]
-pub fn shell_state_root() -> serde_json::Value {
-    serde_json::json!({
-        "schema": crate::env::STATE_ROOT_SCHEMA,
-        "root": crate::env::state_root().display().to_string(),
-        "supervisor": crate::env::supervisor_dir().display().to_string(),
-        "shell": crate::env::shell_dir().display().to_string(),
     })
 }
 

@@ -1,4 +1,4 @@
-//! 内核启动规范门禁（K-1..K-16；docs/KERNEL-LAUNCH-STANDARD.md §6）—— 2026-09-15 起累积。
+//! 内核启动规范门禁（K-1..K-17；docs/KERNEL-LAUNCH-STANDARD.md §6）—— 2026-09-15 起累积。
 //!
 //! 锁定 P0–P6 的**规范骨架**，防止回退成「按 PATH 猜位置 / 不对齐就启动 / 平台各自为政」：
 //!   K-1  core.json 位置契约存在、schema=1、原子写、字段齐全
@@ -19,6 +19,7 @@
 //!   K-14 就绪四态**真的分得开**（行为判据，用例在 `guardctl.rs` 自己的 `tests`，不在本文件）
 //!   K-15 Windows 定义链的权限边界（不请求 HIGHEST、只有权限类失败才换通道）+ 通道可观测
 //!   K-16 「端口通」不等于「在服役」：早退、导航、面板 URL 三处必须问同一个事实
+//!   K-17 注册进 `generate_handler!` 的每条命令都要有调用方（门禁不得替死代码背书）
 //!        （三态语义由 `guardctl.rs` 的行为用例钉住，本文件钉接线形态）
 //!
 //! 注意命名：`kernel_install_evidence_test.rs` 另有一套**同号不同义**的 K-1..K-8
@@ -168,7 +169,8 @@ fn k4_platforms_uniform() {
         let missing = has_all(&s, &["service_command()"]);
         assert!(missing.is_empty(), "K-4 失败：{} 未用统一稳定入口，缺 {:?}", f, missing);
     }
-    // systemd/schtasks 需要单行命令（service_exec_line）；launchd 用数组，天然不需要。
+    // systemd/schtasks 的定义体是单行命令（service_exec_line 组装）；launchd 的定义体是
+    // plist 的 ProgramArguments 数组，故 macos 侧不经 service_exec_line。
     for f in ["src/platform/linux.rs", "src/platform/windows.rs"] {
         let s = read(f);
         assert!(s.contains("service_exec_line"), "K-4 失败：{} 未用 service_exec_line 组装命令", f);
@@ -259,9 +261,104 @@ fn k8_state_root_independent_of_dsh() {
     assert!(m.contains("fn state_root_default"), "K-8 失败：trait 缺 state_root_default");
     assert!(read("src/platform/macos.rs").contains("fn state_root_default"), "K-8 失败：macOS 未覆写状态根");
     assert!(read("src/platform/windows.rs").contains("fn state_root_default"), "K-8 失败：Windows 未覆写状态根");
-    // 可观测：诊断命令已注册
-    assert!(read("src/commands/mod.rs").contains("pub fn shell_state_root"), "K-8 失败：缺 shell_state_root 命令");
-    assert!(read("src/main.rs").contains("commands::shell_state_root"), "K-8 失败：命令未注册");
+    // 可观测：状态根三径与 schema 随启动落 shell.log（第一行即可读到实际路径）。
+    // 原形态是一条诊断 IPC 命令，全仓零调用方 —— 见 K-17（门禁不得反过来保护死代码）。
+    assert!(
+        read("src/main.rs").contains("state-root schema="),
+        "K-8 失败：状态根未随启动日志给出（支持排障看不到实际路径）"
+    );
+    assert!(
+        read("src/main.rs").contains("env::STATE_ROOT_SCHEMA"),
+        "K-8 失败：启动日志未带 schema（与内核 state-root 的握手必须可观测）"
+    );
+}
+
+/// K-17：`generate_handler!` 里注册的每条命令都必须有真实调用方。
+///
+/// 缺陷：`shell_state_root` 注册后从被 invoke（引导页与面板都不用它，面板是远程 http 帧、
+/// 本就发不了 Tauri IPC），而 K-8 用字符串断言**反向钉着它的存在** —— 门禁替死代码背书，
+/// 于是这条命令再也删不掉。现把不变量本身写进门禁：注册即须有调用方。
+#[test]
+fn k_17_registered_commands_have_invokers() {
+    let names = handler_commands(&read("src/main.rs"));
+    assert!(
+        names.len() >= 10,
+        "K-17 失败：只解析到 {} 条注册命令（判据空转）",
+        names.len()
+    );
+    let boot = bootstrap_sources();
+    let bridge = read("src/bridge.rs");
+    for n in &names {
+        // 两类合法调用方：bootstrap 里的字符串字面量，或经桥契约下发给壳主帧的命令名。
+        let via_contract = bridge.contains(&format!("\"{}\"", n));
+        assert!(
+            invoked_in(&boot, n) || via_contract,
+            "K-17 失败：命令 {} 既不被 bootstrap 调用、也不经桥契约下发（注册即死 IPC 面）",
+            n
+        );
+    }
+    // 反向：判据必须能认出「没人调用」，否则本门禁只是装饰。
+    assert!(
+        !invoked_in("var x = 1;", "core_apply"),
+        "K-17 反向失败：调用方判据恒真"
+    );
+    assert!(
+        !invoked_in(&boot, "shell_state_root"),
+        "K-17 反向失败：已删的零调用命令又回到了 bootstrap"
+    );
+}
+
+/// `tauri::generate_handler![...]` 里注册的命令名。
+fn handler_commands(main: &str) -> Vec<String> {
+    let i = match main.find("generate_handler![") {
+        Some(i) => i,
+        None => return Vec::new(),
+    };
+    let rest = &main[i..];
+    let end = rest.find("])").unwrap_or(rest.len());
+    rest[..end]
+        .match_indices("commands::")
+        .map(|(k, _)| {
+            rest[k + "commands::".len()..]
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect::<String>()
+        })
+        .collect()
+}
+
+/// 引导页与面板主帧的全部前端文本（bootstrap/ 下的 html+js，js/ 子目录一并自动枚举）。
+fn bootstrap_sources() -> String {
+    let root = manifest_dir().join("bootstrap");
+    let mut files: Vec<PathBuf> = Vec::new();
+    for dir in [root.clone(), root.join("js")] {
+        if let Ok(rd) = fs::read_dir(&dir) {
+            for e in rd.flatten() {
+                let p = e.path();
+                let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if name.ends_with(".html") || name.ends_with(".js") {
+                    files.push(p);
+                }
+            }
+        }
+    }
+    assert!(
+        files.len() >= 10,
+        "K-17 失败：bootstrap 只读到 {} 个页面/脚本（判据空转）",
+        files.len()
+    );
+    files
+        .iter()
+        .map(|p| fs::read_to_string(p).unwrap_or_default())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// 该命令名是否以字符串字面量出现在前端文本里（invoke 的三种引号写法都算）。
+fn invoked_in(boot: &str, name: &str) -> bool {
+    ["\"", "'", "`"]
+        .iter()
+        .any(|q| boot.contains(&format!("{}{}{}", q, name, q)))
 }
 
 fn state_root_is_independent(src: &str) -> bool {
