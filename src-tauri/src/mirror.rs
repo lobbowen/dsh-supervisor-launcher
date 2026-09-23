@@ -365,7 +365,8 @@ pub fn probe_all(sources: &[String], path: &str) -> Vec<Probe> {
                         probe.error = Some(format!("{}", e));
                     }
                 }
-                out.lock().unwrap().push(probe);
+                // 毒锁里的 Vec 仍完好。unwrap() 会让后来的探测线程连带 panic，一次 panic 演变成整批探测丢失。
+                out.lock().unwrap_or_else(|e| e.into_inner()).push(probe);
             });
         }
     });
@@ -412,6 +413,17 @@ pub fn cached() -> Option<ProbeSnapshot> {
 /// 是否已在飞（避免重复预热）。
 static WARMING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// 离开线程体（正常返回或 panic）就把 WARMING 落下。
+///
+/// 手写 `store(false)` 只覆盖不 panic 的路径：探测链上任一处 panic 都会让标记永久停在
+/// true，此后每次预热都被第一行的 swap 挡掉 —— 表现为 registry 那一格再也不更新，且无日志。
+struct WarmingGuard;
+impl Drop for WarmingGuard {
+    fn drop(&mut self) {
+        WARMING.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// 后台预热镜像测速：立即返回，结果稍后经 `cached()` 读取。
 /// 全部网络 I/O 在独立线程完成，调用方（引导页）绝不阻塞。
 pub fn warmup_async() {
@@ -423,6 +435,7 @@ pub fn warmup_async() {
     let spawned = std::thread::Builder::new()
         .name("mirror-warmup".to_string())
         .spawn(|| {
+            let _warming = WarmingGuard;
             let m = load();
             // 两组并行探测（各自内部已并行）
             let node_p = probe_all(&m.node, "index.json");
@@ -460,10 +473,11 @@ pub fn warmup_async() {
                     crate::update::log(&format!("预热结果落盘失败（不影响本次引导）: {}", e));
                 }
             }
-            if let Ok(mut g) = warm().lock() {
-                *g = Some(snap);
+            // 与 `cached()` 同一把锁、同一种毒处理：毒锁里的值仍是完好的快照，丢掉等于白测一轮。
+            match warm().lock() {
+                Ok(mut g) => *g = Some(snap),
+                Err(e) => *e.into_inner() = Some(snap),
             }
-            WARMING.store(false, std::sync::atomic::Ordering::SeqCst);
         });
     if let Err(e) = spawned {
         WARMING.store(false, std::sync::atomic::Ordering::SeqCst);

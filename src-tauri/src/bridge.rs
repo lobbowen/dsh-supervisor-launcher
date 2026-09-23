@@ -14,8 +14,8 @@ pub const MSG_KERNEL_UPDATE_PROGRESS: &str = "dsh:kernel-update-progress";
 /// 壳主帧必须执行的 Tauri 命令名（安装内核，再重启守卫）。
 pub const CMD_KERNEL_UPDATE_APPLY: &str = "kernel_update_apply";
 
-/// 内核安装（逐源尝试）的总时间预算；与 core_apply_inner 的 deadline 共用定义，
-/// 引导页的 CORE_APPLY_BUDGET_MS 必须与此一致，面板等待上界不得小于预算 + 余量。
+/// 内核安装（逐源尝试）的总时间预算；与 core_apply_inner 的 deadline 共用定义。
+/// 下游上界由 [`KERNEL_UPDATE_MAX_WAIT_MS`] 派生：引导页兜底常量 CORE_APPLY_BUDGET_MS 必须等于它。
 pub const KERNEL_UPDATE_BUDGET_MS: u64 = 17 * 60 * 1000;
 
 /// 预算之外的收尾余量（定位内核、写 core.json、停并重拉守卫），因此类步骤不在逐源 deadline 内。

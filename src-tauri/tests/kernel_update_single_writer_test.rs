@@ -18,6 +18,8 @@
 //!   SW-6  反向：判据能识别「不校验来源 / 回复 '*'」的桥（门禁非空转）
 //!   SW-7  内核安装进度必须**多帧中继**给面板（面板无 IPC），且 kernelKind/maxWaitMs 由契约下发
 //!   SW-8  反向：判据能识别「只回一条 stage:'start' 就不管了」的旧形态（B4b 前的真实形态）
+//!   SW-9  跨语言预算单源：前端等待上界由后端 maxWaitMs 派生，兜底常量必须等于「预算 + 收尾
+//!         余量」—— 否则后端仍在收尾时前端先判超时，把成功的安装说成失败
 //!
 //! 说明：这是**静态源码断言**（与 platform_launch_contract / bootstrap_flow 同一惯例）。
 
@@ -185,4 +187,75 @@ fn sw8_relay_reverse_detects_old_form() {
         "SW-8 失败：判据认不出「只回一条 start 就不管了」的旧形态（门禁空转）"
     );
     assert!(relay_is_wired(&read("bootstrap/shell.html")).is_empty(), "SW-8 失败：当前实现被误判");
+}
+
+/// 取 `marker` 之后到 `;` 之间的常量表达式并求值（只支持十进制与 `*`，够本仓两处定义用）。
+fn const_expr_ms(src: &str, marker: &str) -> Option<u64> {
+    let at = src.find(marker)? + marker.len();
+    let rest = &src[at..];
+    let end = rest.find(';')?;
+    let mut acc: Option<u64> = None;
+    for tok in rest[..end].split('*') {
+        let digits: String = tok.chars().filter(|c| c.is_ascii_digit()).collect();
+        let v: u64 = digits.parse().ok()?;
+        acc = Some(match acc {
+            None => v,
+            Some(a) => a * v,
+        });
+    }
+    acc
+}
+
+/// 判据本体：前端兜底预算必须等于后端「预算 + 收尾余量」，且前端余量非零。
+fn bound_ok(fallback: u64, margin: u64, max_wait: u64) -> bool {
+    margin > 0 && fallback == max_wait
+}
+
+#[test]
+fn sw9_frontend_wait_budget_derives_from_backend() {
+    let br = read("src/bridge.rs");
+    let js = read("bootstrap/js/00-runtime.js");
+    let k50 = read("bootstrap/js/50-kernel.js");
+    let budget = const_expr_ms(&br, "pub const KERNEL_UPDATE_BUDGET_MS: u64 =")
+        .expect("SW-9 FAIL bridge.rs 缺 KERNEL_UPDATE_BUDGET_MS 的数字定义");
+    let grace = const_expr_ms(&br, "pub const KERNEL_UPDATE_GRACE_MS: u64 =")
+        .expect("SW-9 FAIL bridge.rs 缺 KERNEL_UPDATE_GRACE_MS 的数字定义");
+    let max_wait = budget + grace;
+    assert!(
+        br.contains(
+            "pub const KERNEL_UPDATE_MAX_WAIT_MS: u64 = KERNEL_UPDATE_BUDGET_MS + KERNEL_UPDATE_GRACE_MS;"
+        ),
+        "SW-9 FAIL MAX_WAIT 不是由预算与余量相加而来（该处又写了一份数字，两处会漂移）"
+    );
+    let fallback = const_expr_ms(&js, "NS.CORE_APPLY_BUDGET_MS =")
+        .expect("SW-9 FAIL 前端兜底预算缺失");
+    let margin = const_expr_ms(&js, "NS.CORE_APPLY_MARGIN_MS =")
+        .expect("SW-9 FAIL 前端余量缺失");
+    assert!(
+        bound_ok(fallback, margin, max_wait),
+        "SW-9 FAIL 前端上界与后端不符：兜底 {} 应等于 maxWait {}，余量 {}",
+        fallback,
+        max_wait,
+        margin
+    );
+    // 上界必须由契约派生（后端改预算时前端跟着走），调用点不得再直接用兜底常量
+    assert!(
+        js.contains("NS.bridge.maxWaitMs") && js.contains("NS.coreApplyBudgetMs"),
+        "SW-9 FAIL 前端未从契约取 maxWaitMs 派生上界"
+    );
+    assert!(
+        k50.contains("NS.coreApplyBudgetMs()"),
+        "SW-9 FAIL 内核安装调用点未走派生函数"
+    );
+    assert!(
+        !k50.contains("NS.CORE_APPLY_BUDGET_MS"),
+        "SW-9 FAIL 内核安装调用点绕过派生函数直取兜底常量"
+    );
+    // 反向：旧形态（前端 = 后端「预算」而非「预算 + 余量」）必须被同一判据拒掉
+    assert!(
+        !bound_ok(budget, margin, max_wait),
+        "SW-9 FAIL 判据恒真（旧形态 1020000 也放行）"
+    );
+    assert!(!bound_ok(max_wait, 0, max_wait), "SW-9 FAIL 零余量被放行");
+    eprintln!("SW-9 PASS frontend wait budget derives from backend");
 }

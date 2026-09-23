@@ -131,18 +131,24 @@ pub(crate) fn locate_core(app: &tauri::AppHandle) -> Option<PathBuf> {
 
 /// 定位内核并**一并返回其版本**（避免调用方再执行一次二进制取版本）。
 ///
-/// 仲裁规则（K5）：多候选中**按版本最高**选取 —— 旧内核不得遮蔽新内核。
-/// 每个候选的版本探测都经有界执行器（10 秒上限），单个坏候选不会拖死定位。
-pub(crate) fn locate_core_with_version(app: &tauri::AppHandle) -> Option<(PathBuf, String)> {
+/// 仲裁规则（K5）：多候选中**按版本最高**选取 —— 旧内核不得遮蔽新内核；探测失败的候选不参与
+/// 仲裁，整批都探不到时版本返回 `None`，而非会一路显示到面板的假版本 0.0.0。
+pub(crate) fn locate_core_with_version(app: &tauri::AppHandle) -> Option<(PathBuf, Option<String>)> {
     let cands = crate::domain::coreloc::locate_core_candidates(app.path().resource_dir().ok());
     if cands.is_empty() { return None; }
     let mut best: Option<(PathBuf, String)> = None;
     for c in &cands {
-        let v = crate::core::installed_version(c).unwrap_or_else(|| "0.0.0".into());
+        let v = match crate::core::installed_version(c) {
+            Some(v) => v,
+            None => continue,
+        };
         let better = best.as_ref().map(|(_, bv)| crate::core::semver_cmp(&v, bv) > 0).unwrap_or(true);
         if better { best = Some((c.clone(), v)); }
     }
-    best.or_else(|| cands.into_iter().next().map(|p| (p, "0.0.0".into())))
+    Some(match best {
+        Some((p, v)) => (p, Some(v)),
+        None => (cands.into_iter().next()?, None),
+    })
 }
 
 #[cfg(test)]

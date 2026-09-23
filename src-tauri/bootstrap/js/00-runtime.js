@@ -20,6 +20,8 @@ window.__BOOT_NS = window.__BOOT_NS || {};
   NS.warmTimer = null;
   NS.lastMirror = null;
   NS.shellId = null;
+  NS.bridge = null;
+  NS.coreApplyPending = false;
   NS.updPlan = null;
   NS.lastError = null;
   NS.coreVersion = null;
@@ -30,7 +32,15 @@ window.__BOOT_NS = window.__BOOT_NS || {};
   NS.ENV_PROBE_BUDGET_MS = 45000;
   NS.CORE_PLAN_BUDGET_MS = 90000;
   NS.GUARD_START_BUDGET_MS = 200000;
-  NS.CORE_APPLY_BUDGET_MS = 1020000;
+  // 内核安装的等待上界 = 后端 maxWaitMs（预算 + 收尾余量）+ 前端余量，取不到契约时退到本常量。
+  // 前端不得比后端先放弃：后端仍在装时提前判超时，会把一次其实成功的安装说成失败。
+  NS.CORE_APPLY_BUDGET_MS = 1080000;
+  NS.CORE_APPLY_MARGIN_MS = 90000;
+  NS.coreApplyBudgetMs = function () {
+    var mw = (NS.bridge && typeof NS.bridge.maxWaitMs === 'number')
+      ? NS.bridge.maxWaitMs : NS.CORE_APPLY_BUDGET_MS;
+    return mw + NS.CORE_APPLY_MARGIN_MS;
+  };
 
   function showFatal(text) {
     if (NS.fatalShown) return;

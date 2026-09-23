@@ -91,14 +91,14 @@ pub fn node_version(node: &Path) -> Option<String> {
             Ok(Some(st)) => break st,
             Ok(None) => {
                 if start.elapsed() >= NODE_PROBE_TIMEOUT {
-                    let _ = child.kill();
+                    crate::bounded::kill_tree(&mut child);
                     let _ = child.wait();
                     return None;
                 }
                 std::thread::sleep(Duration::from_millis(50));
             }
             Err(_) => {
-                let _ = child.kill();
+                crate::bounded::kill_tree(&mut child);
                 let _ = child.wait();
                 return None;
             }

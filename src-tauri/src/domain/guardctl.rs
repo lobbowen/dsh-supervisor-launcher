@@ -57,17 +57,21 @@ pub(crate) fn resolve_aligned_with(resource_dir: Option<std::path::PathBuf>) -> 
     };
     let pkg_opt = Some(pkg.as_str());
   // 1) 位置契约命中且版本一致（最快路径）。契约路径可能是旧版写入的 `.cmd` 垫片
-  //  或含 `\\?\` 前缀 —— 先规范化再判可用。
+  //  或含 `\\?\` 前缀 —— 先规范化再判可用。版本按 semver 相等判定：两侧字符串分别来自
+  //  契约与 registry 快照，文本差（build metadata 等）不该让已对齐的内核判成未对齐。
     if let Some(c) = crate::core_contract::read() {
         let bin = crate::domain::coreloc::normalize_guard(c.bin, pkg_opt);
-        if bin.is_file() && c.version == latest {
+        if bin.is_file() && crate::core::semver_cmp(&c.version, &latest) == 0 {
             return AlignOutcome::Aligned { bin, version: latest };
         }
     }
   // 2) 候选扫描：取版本 == latest 者（候选已在 coreloc 内规范化），命中即**前向自愈**写入契约。
     let cands = crate::domain::coreloc::locate_core_candidates(resource_dir);
     for c in &cands {
-        if crate::core::installed_version(c).as_deref() == Some(latest.as_str()) {
+        let same = crate::core::installed_version(c)
+            .map(|v| crate::core::semver_cmp(&v, &latest) == 0)
+            .unwrap_or(false);
+        if same {
             let prefix = crate::core::global_prefix_for(c);
             crate::core_contract::write(&crate::core_contract::InstalledCore {
                 bin: c.clone(),

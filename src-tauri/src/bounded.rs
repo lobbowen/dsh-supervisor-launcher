@@ -92,6 +92,28 @@ pub fn prepare(cmd: &mut Command) {
     }
 }
 
+/// 终止子进程，并在 Windows 上连同整棵子进程树一起终止。平台分支集中在此，调用方不得各自 cfg。
+///
+/// Windows 上 npm 类命令实为 `npm.cmd` -> cmd.exe -> node.exe 三层：只终止直接子进程等于
+/// 只杀掉 cmd.exe，孙进程仍占着端口与状态根。非 Windows 保持原语义（无 .cmd 垫片这一层）。
+pub fn kill_tree(child: &mut std::process::Child) {
+    #[cfg(windows)]
+    {
+        let mut tk = Command::new("taskkill");
+        tk.args(["/PID", &child.id().to_string(), "/T", "/F"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        prepare(&mut tk);
+        // taskkill 自身报错（进程已退出、PID 已复用）不需要上报：下面照常 wait 收尸。
+        let _ = tk.status();
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = child.kill();
+    }
+}
+
 /// 子进程运行期间的现场（只含测得到的量）：npm 不吐百分比、输出又落在临时文件里，
 /// 运行期能如实说出的只有「已等多久 + 产出行数 + 最后一行」。
 pub struct Live {
@@ -173,7 +195,7 @@ fn run_inner(
             Ok(Some(st)) => break st,
             Ok(None) => {
                 if start.elapsed() >= timeout {
-                    let _ = child.kill();
+                    kill_tree(&mut child);
                     let _ = child.wait();
                     let err = read_log(&err_path);
                     let out = read_log(&out_path);
@@ -202,7 +224,7 @@ fn run_inner(
                 std::thread::sleep(Duration::from_millis(25));
             }
             Err(e) => {
-                let _ = child.kill();
+                kill_tree(&mut child);
                 let _ = child.wait();
                 cleanup(&out_path, &err_path);
                 return Err(format!("{} 等待子进程失败: {}", cmd_line, e));

@@ -14,6 +14,9 @@ pub const NAME: &str = "macos";
 /// 守卫的 LaunchAgent 标签（**定义由本文件建立**；内核只做 enable/disable）。
 pub const GUARD_LABEL: &str = "com.dsh.supervisor";
 
+/// bootstrap 脚本：域标签交给 shell 求值，plist 路径由 `"$1"` 位参传入而非拼进脚本文本。
+const BOOTSTRAP_SCRIPT: &str = "launchctl bootstrap \"gui/$(id -u)\" \"$1\"";
+
 /// 安装命令超时（15 分钟：下载 + installer + 管理员授权）。
 const INSTALL_CMD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
@@ -210,8 +213,13 @@ impl ServiceControl for Impl {
             crate::bounded::run_lossy(Command::new("sh").args(["-c", &off]), SVC_QUICK);
         }
         // bootstrap 会因 RunAtLoad 立即启动；KeepAlive 负责崩溃重启。
-        let cmd = format!("launchctl bootstrap gui/$(id -u) \"{}\"", path.display());
-        let out = crate::bounded::run(Command::new("sh").args(["-c", &cmd]), SVC_NORMAL);
+        // plist 路径经 "$1" 传入而不是拼进脚本：用户名/路径里出现 `$`、反引号或引号时，
+        // 拼串形态会被 shell 二次解释（bootstrap 打到错误目标，且是静默的）。
+        let p = path.display().to_string();
+        let out = crate::bounded::run(
+            Command::new("sh").args(["-c", BOOTSTRAP_SCRIPT, "sh", p.as_str()]),
+            SVC_NORMAL,
+        );
         let verb = if is_update { "已更新并加载" } else { "已建立并加载" };
         match out {
             Ok(o) if o.success => Ok(format!("{} {}", verb, path.display())),
@@ -241,8 +249,8 @@ impl ServiceControl for Impl {
                 path.display()
             ));
         }
-        let boot = format!("launchctl bootstrap gui/{} \"{}\"", uid, path.display());
-        let b = crate::bounded::run(Command::new("sh").args(["-c", &boot]), SVC_NORMAL);
+        let p = path.display().to_string();
+        let b = crate::bounded::run(Command::new("sh").args(["-c", BOOTSTRAP_SCRIPT, "sh", p.as_str()]), SVC_NORMAL);
         match b {
             Ok(o) if o.success => Ok(()),
             Ok(o) => Err(format!(

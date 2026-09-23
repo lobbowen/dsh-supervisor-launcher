@@ -120,7 +120,11 @@
       evt.listen('shell:goto-panel', function (e) {
         // 守卫托管面板 URL（Rust go_panel 从 config apiPort 动态给出, 同源直连守卫 API）
         var p = (e && e.payload) || {};
-        var u = p.url || 'supervisor.html';
+        // 面板 URL 的唯一出口是 Rust 的 panel_view（与「此刻能不能投」同出一个判据）。
+        //   事件里没有 url 就是契约破了：兜一个相对路径只会把主帧导航到一个不存在的文档，
+        //   交回引导页才是如实降级（与 reloadPanelWhenReady 无判据不导航的口径一致）。
+        var u = p.url;
+        if (!u) { backToBootstrap(); return; }
         panelUrl = u;
         // force=true（用户重新显示窗口）→ 强制重载取最新 UI；否则同 URL 不重载（守卫重启延时重发不刷面板）
         if (p.force || u !== frame.src) { retried = 0; frame.src = u; }
