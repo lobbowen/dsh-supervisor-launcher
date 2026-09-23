@@ -2,7 +2,69 @@
 
 本文件记录桌面壳（`dsh-supervisor-gui`，公开仓 `lobbowen/dsh-supervisor-launcher`）的重要变更。
 
-## [未发布]
+## [1.2.7]（2026-09-23）
+
+本版收全仓审计（内核 0.1.6-BETA.6 同批）的壳侧缺陷：引导页与运行时的十五组，逐条带门禁；
+另把「安装冒烟」从文档承诺变成 CI 判据。不含内核版本要求变化。
+版本三处互锁（`Cargo.toml` = `tauri.conf.json` = `Cargo.lock`）由 `scripts/bump-shell.sh` 同步提升。
+
+### 引导页与运行时的缺陷收口（逐条带门禁）
+
+- 引导页的 DSH logo 从来没显示过：CSS 用 `mask: url("/dsh-logo.svg")`，而 `bootstrap/` 下没有这个
+  文件。webview 对取不到的 mask 资源不报错、不降级，只是让整块元素静默消失。补上
+  `src-tauri/bootstrap/dsh-logo.svg`，并加门禁 `tests/bootstrap_assets_test.rs`（A-1..A-5）：把两条
+  引导页的每条 `url()` / `src=` 解析出来，逐条要求在 `frontendDist` 根下真实存在（外链与 `data:` 不
+  参与判定），含缺资源反向样本与「实盘解析条数下限」—— 标记写法一变先红在下限，防门禁空转。
+- 内核安装的前端等待上界原先写死 1020000，而它注释自称的「后端 15 分钟 + 前端 17 分钟兜底」与
+  后端实际契约（预算 1020000 + 收尾余量 60000 = 1080000）不符：前端比后端先放弃，会把一次其实
+  成功的安装报成失败。改为派生 —— 引导早期非阻塞取 `shell_bridge_contract`，上界 =
+  `bridge.maxWaitMs + 90000`，取不到契约才退到兜底常量；兜底常量与后端等值由 SW-9 钉住。
+- 超时不再直接判死：`withTimeout` 只中止等待、不取消后端安装，安装仍可能随后落盘。现超时后转
+  `core_status` 轮询（15 秒一拍、最多 20 拍）确认实际结果 —— 升级场景比对 `latest`（装着旧版本不算
+  成功），全新安装则「装出了任何版本」即算。`core_apply` 后端本就不收 version 参数，两处 `null`
+  实参一并删。
+- `core_apply` 加在飞互斥：boot 链、`guard` 的 `KERNEL_NOT_ALIGNED` 自动对齐、重试按钮三条路都会
+  再打这条命令，而 npm 安装不是可重入操作，缺互斥就是并发写同一前缀。`_alignRetried` 闩随「重试
+  引导」置换 —— 不重置会让自动对齐在第一次失败后的整个页面生命周期里永久不再走。
+- Windows 上超时/等待出错只 `child.kill()` 直接子进程：npm 类命令实为 `npm.cmd -> cmd.exe ->
+  node.exe`，杀掉 cmd.exe 等于放跑孙进程（占着端口与状态根）。新增 `bounded::kill_tree`（Windows
+  走 `taskkill /T /F`，其余平台保持原语义，平台分支集中一处），`env.rs` 的两处 kill 一并收敛。
+- 探测代际原先只挡最终回写：被作废的旧 worker 仍继续向共享进度写 `stage/finish/set_summary`，新一
+  代面板读到的是上一轮留下的「正在做什么」与记录 —— 卡住时唯一线索被串扰成假现场。现按线程所属
+  代际拒写，门禁 `tests/probe_generation_test.rs`（G-p1..G-p4）自动枚举四个写入口、缺闸门即判红，
+  并保留旧形态反向样本（四条全判出）。
+- 三处毒锁丢写：`nodeprobe` 的活进度写入用 `if let Ok(...)`，`mirror` 的快照落盘与探测结果 push 同
+  病。毒锁里的值仍是完好结构体，丢写的后果是 UI 永久停在最后一条进度上再也得不到更新、测速白跑
+  一轮。统一为容毒读写（`live_lock()` / `into_inner()`）。
+- 预热标记 `WARMING` 由线程体末尾手写 `store(false)` 落下，只覆盖不 panic 的路径：探测链上任一处
+  panic 都会让标记永久停在 true，此后每次预热都被在飞判据挡掉 —— 表现为 registry 那一格再也不更
+  新，且无日志。改为 RAII guard，`Drop` 落下。
+- `locate_core_with_version` 用 `unwrap_or("0.0.0")` 兜底：版本探测失败被当成「版本 0.0.0」参与仲裁
+  并一路显示到面板。改为返回 `Option`，探不到的候选不参与仲裁，整批探不到则报「已装但版本未知」。
+  `resolve_aligned` 判「已对齐」原用字符串全等，而两侧文本分别来自契约与 registry 快照，文本差
+  （build metadata 等）会把已对齐的内核判成未对齐、触发无谓重装，改按 `semver_cmp == 0`。
+- `shell:goto-panel` 事件缺 `url` 时兜到相对路径 `supervisor.html`：那会把主帧导航到一个不存在的文
+  档，用户看到的是引擎错误页。改为回引导页重跑启动链（与 `reloadPanelWhenReady`「无判据不导航」同
+  一口径）。
+- npm 镜像清单原先在 `core.rs` 另存一份 `DEFAULT_ORIGINS`（6 条与 `mirror.rs` 手写重复），且第三档
+  兜底读内核 `registry.json` 的 auto 列表 —— 那一格永不到来（`mirror::load()` 绝不返回空）。删两
+  处，`registry_origins()` 只留「内核 manual 优先，其余取 `mirror::load().npm`」。门禁 B23 由「字符串
+  里出现过就算」改写为能红的判据：presets 与 `tauri.conf.json` 的 endpoints 逐项比对、`core.rs` 出现
+  任何 npm 源字面量即判失败、抽取器带反向样本。
+- `node.rs` 的下载缓冲没有字节上限：`Content-Length` 出自服务端、不可全信，一个谎报或持续产字的源
+  就能把壳进程喂到 OOM（超时前无人拦）。现设上限：声称总量 + 1MB 抖动，无总量时 512MB 硬顶。
+- macOS 的 `launchctl bootstrap` 把 plist 路径拼进 shell 脚本文本：路径含 `$`、反引号或引号时会被
+  shell 二次解释，bootstrap 静默打到错误目标。改为 `"$1"` 位参传入，两处调用点共用一份脚本。
+- `go_panel` 的重发拍数表与「最后一拍」判据分写两处（数组字面量 + 硬编码下标）：只改延时表而忘改
+  判据，回引导页那一拍会静默失效。现同源（`PANEL_PUSH_DELAYS.len()`）。
+- 死代码与静默 panic 两处：`40-shell-update.js` 判的 `r.cannotSelfUpdate` Rust 侧从不下发（唯一真值
+  是 `shell_identity.selfUpdateCapable`），删；`main.rs` 托盘图标 `expect("no default icon")` 改为向
+  setup 传播错误。零调用方的诊断 IPC `shell_state_root` 删除，其信息改由 `shell.log` 启动首行落出
+  （schema + 三个实际路径）—— 本壳的观测通道是日志；门禁 K-8 改钉这条日志行，K-17 新增「注册进
+  `generate_handler!` 的命令必须有调用方」（含缺失调用方的反向样本）。
+- 已知未验证：真机 Windows 上「壳自更新之后首次进面板」那条报障路径仍待真人复测。本版把它的判据
+  （URL 与「能不能投」同源、事件缺 url 就不导航）与装机/覆盖升级（H10 的 A=1.2.6 -> B=1.2.7）都收
+  进了 CI，但「装好的那份字节在真人机器上把面板投出来了」这一句只有真机能签。
 
 ### 安装冒烟与发布通道冒烟进产线（补齐 1.2.3 以来缺失的那一层）
 
