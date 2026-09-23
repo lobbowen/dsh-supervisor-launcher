@@ -41,9 +41,6 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "resources": [
-      "../src-tauri/icons"
-    ],
     "createUpdaterArtifacts": true
   },
   "plugins": {

@@ -308,6 +308,10 @@ jobs:
           # 未配置 secret 时为空 → 仅构建不产 .sig（开发/验证场景不阻断）
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # CLI 版本钉死：`@tauri-apps/cli@2` 让三条腿各取「当天的最新 2.x」——
+          #   同一 commit 的三平台产物可能出自不同 CLI 版本，且换 CLI 版本不需要任何人改代码。
+          #   Rust 侧有 Cargo.lock 钉死，JS 侧此前没有等价的锁。升版本只改这一行。
+          TAURI_CLI_VERSION: 2.11.5
         run: |
           UPDATER_OFF=""
           if [ -z "${TAURI_SIGNING_PRIVATE_KEY}" ]; then
@@ -325,7 +329,7 @@ jobs:
             printf '%s' '{"bundle":{"createUpdaterArtifacts":false}}' > "${RUNNER_TEMP}/updater-off.json"
             UPDATER_OFF="--config ${RUNNER_TEMP}/updater-off.json"
           fi
-          npx --yes @tauri-apps/cli@2 build --bundles "${{ matrix.bundles }}" ${UPDATER_OFF}
+          npx --yes "@tauri-apps/cli@${TAURI_CLI_VERSION}" build --bundles "${{ matrix.bundles }}" ${UPDATER_OFF}
 
       # ── glibc 基座门禁（Linux only）──
       # 防止「在新基座构建 → 只能装新发行版」的缺陷回归（F1 实测教训）。

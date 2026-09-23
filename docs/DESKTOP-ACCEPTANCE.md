@@ -10,7 +10,7 @@
 
 **验收对象只有 CI 的产物**（§5）。本清单**不给任何本机产包/构建/测试命令**：
 
-- `npx @tauri-apps/cli@2 build`、`cargo build`、`cargo test` 在本机跑一次就违反 `RELEASE-STANDARD.md` §0
+- `npx @tauri-apps/cli build`、`cargo build`、`cargo test` 在本机跑一次就违反 `RELEASE-STANDARD.md` §0
   （构建与测试都由 CI 裁决；本地不得产生任何发布产物）；
 - 本机允许的上限是**纯静态**检查：`bash -n`、`node --check`、`cargo fmt --check`、读文件；
 - 桌面手工项（本清单 §2–§4）用的必须是 **CI artifact 里的安装程序**，不是 `target/debug/` 下的裸二进制 ——
@@ -60,7 +60,7 @@
 | `macos-15-intel` | `darwin-x64` | `app` + `dmg` |
 | `windows-latest` | `win-x64` | `nsis` + `msi` |
 
-命令与 bundles 参数由 CI 矩阵注入（`npx --yes @tauri-apps/cli@2 build --bundles "<matrix.bundles>"`），
+命令与 bundles 参数由 CI 矩阵注入（`npx --yes "@tauri-apps/cli@${TAURI_CLI_VERSION}" build --bundles "<matrix.bundles>"`），
 本清单不重复、也不得据此在本机执行。
 
 Node 安装矩阵（壳内实现，`platform/{linux,macos,windows}.rs` 的 `install_node`）：

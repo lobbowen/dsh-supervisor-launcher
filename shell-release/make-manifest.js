@@ -8,12 +8,23 @@
 const fs = require('node:fs');
 const path = require('node:path');
 
+// 标志缺取值时不能静默收下 undefined：`--entries` 落在末尾会把它塞进 entries，一路传到
+//   fs.existsSync 才抛 ERR_INVALID_ARG_TYPE，崩在离错误很远的地方、看不出是命令行写错。
+function flagValue(argv, i, name) {
+  const v = argv[i + 1];
+  if (v === undefined || v.startsWith('--')) {
+    console.error('用法错误：' + name + ' 缺少取值');
+    process.exit(2);
+  }
+  return v;
+}
+
 function parseArgs(argv) {
   const o = { entries: [] };
   for (let i = 2; i < argv.length; i += 1) {
     const a = argv[i];
-    if (a === '--entries') { o.entries.push(argv[i + 1]); i += 1; }
-    else if (a.startsWith('--')) { o[a.slice(2)] = argv[i + 1]; i += 1; }
+    if (a === '--entries') { o.entries.push(flagValue(argv, i, a)); i += 1; }
+    else if (a.startsWith('--')) { o[a.slice(2)] = flagValue(argv, i, a); i += 1; }
   }
   return o;
 }

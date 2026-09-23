@@ -133,18 +133,71 @@ function maskJs(src) {
   return out.join('');
 }
 
-/** HTML：只认 <!-- --> 块。 */
-function maskHtml(src) {
-  const out = new Array(src.length).fill(' ');
+/** CSS：只抽取块注释体（字符串字面量里的起始星斜杠不算），其余置空格。 */
+function maskCss(src) {
+  const s = String(src);
+  const out = new Array(s.length).fill(' ');
+  const keep = (from, to) => { for (let k = from; k < to; k++) out[k] = s[k]; };
   let i = 0;
-  while (i < src.length) {
-    if (src.startsWith('<!--', i)) {
-      const stop = src.indexOf('-->', i);
-      const end = stop < 0 ? src.length : stop + 3;
-      for (let k = i; k < end; k++) out[k] = src[k] === '\n' ? '\n' : (src[k] === ' ' ? ' ' : src[k]);
+  while (i < s.length) {
+    const c = s[i];
+    if (c === '"' || c === "'") {
+      i++;
+      while (i < s.length && s[i] !== c) { if (s[i] === '\\') i++; i++; }
+      i++; continue;
+    }
+    if (c === '/' && s[i + 1] === '*') {
+      const close = s.indexOf('*/', i + 2);
+      const end = close < 0 ? s.length : close + 2;
+      keep(i, end);
       i = end; continue;
     }
-    if (src[i] === '\n') out[i] = '\n';
+    if (c === '\n') out[i] = '\n';
+    i++;
+  }
+  return out.join('');
+}
+
+/** HTML：`<!-- -->` 块 **以及** `<script>`/`<style>` 内联体里的 JS/CSS 注释都要抽取。
+ *  只认 `<!-- -->` 时，内联脚本中的 `//` 注释被当成正文丢掉 —— 引导页两个 HTML 的
+ *  注释几乎全在 `<script>` 内，等于 CS-1/CS-2 对它们完全不生效。 */
+function maskHtml(src) {
+  const s = String(src);
+  const lower = s.toLowerCase();
+  const out = new Array(s.length).fill(' ');
+  // 掩码文本与原文等长（换行必须留在原位，否则行号错位）；被置空的位置保持空格。
+  const keep = (from, text) => { for (let k = 0; k < text.length; k++) out[from + k] = text[k]; };
+  let i = 0;
+  while (i < s.length) {
+    if (s.startsWith('<!--', i)) {
+      const stop = s.indexOf('-->', i);
+      const end = stop < 0 ? s.length : stop + 3;
+      keep(i, s.slice(i, end));
+      i = end; continue;
+    }
+    if (lower.startsWith('<script', i) && /^[ >/]/.test(s[i + 7] || 'x')) {
+      const tagEnd = s.indexOf('>', i);
+      const bodyStart = tagEnd < 0 ? s.length : tagEnd + 1;
+      const close = lower.indexOf('</script', bodyStart);
+      const bodyEnd = close < 0 ? s.length : close;
+      const typeAttr = ((s.slice(i, tagEnd < 0 ? i : tagEnd).match(/\btype\s*=\s*["']?\s*([^"'\s;>]+)/i) || [null, 'text/javascript'])[1] || '').toLowerCase();
+      // 只有 JS 系内联体按 JS 词法抽取；importmap/JSON 之类的 type 不是代码。
+      if ((/javascript$/.test(typeAttr) || typeAttr === 'module') && bodyStart < bodyEnd) {
+        keep(bodyStart, maskJs(s.slice(bodyStart, bodyEnd)));
+      }
+      i = close < 0 ? s.length : bodyEnd + 9;
+      continue;
+    }
+    if (lower.startsWith('<style', i) && /^[ >/]/.test(s[i + 6] || 'x')) {
+      const tagEnd = s.indexOf('>', i);
+      const bodyStart = tagEnd < 0 ? s.length : tagEnd + 1;
+      const close = lower.indexOf('</style', bodyStart);
+      const bodyEnd = close < 0 ? s.length : close;
+      if (bodyStart < bodyEnd) keep(bodyStart, maskCss(s.slice(bodyStart, bodyEnd)));
+      i = close < 0 ? s.length : bodyEnd + 8;
+      continue;
+    }
+    if (s[i] === '\n') out[i] = '\n';
     i++;
   }
   return out.join('');
@@ -154,7 +207,7 @@ function maskHtml(src) {
 function isCommentLead(rel, line) {
   if (/\.rs$/.test(rel)) return /^[ \t]*(?:\/\/|\/\*)/.test(line);
   if (/\.(?:js|cjs|mjs|ts|tsx)$/.test(rel)) return /^[ \t]*(?:\/\/|\/\*)/.test(line);
-  if (/\.html$/.test(rel)) return /^[ \t]*<!--/.test(line);
+  if (/\.html$/.test(rel)) return /^[ \t]*(?:<!--|\/\/|\/\*)/.test(line);
   if (/\.(?:sh|ps1|py)$/.test(rel)) return /^[ \t]*#(?!!)/.test(line);
   return false;
 }
@@ -234,6 +287,18 @@ function selfcheck() {
   const sh = '#!/bin/sh\n# 整行注释 -> 违规\ntrue # 行尾注释不覆盖\n';
   const sm = maskSh(sh);
   ck('CS-3 shell 整行注释被抓到、shebang 不报', sm.split('\n')[1].includes('->') && !sm.split('\n')[0].includes('!'), '掩码结果不符');
+  // HTML 的内联脚本注释：曾只认 `<!-- -->`，整个 <script> 体的注释都不进覆盖面。
+  const html = '<!doctype html>\n<script>\n// 内联注释 -> 只存在于注释里\nconst t = "<!-- 正文里的伪标记 -->";\n</script>\n<!-- 块注释 -->\n';
+  const hm = maskFor('p.html', html);
+  ck('CS-3 HTML 内联脚本注释在覆盖面内', hm.includes('内联注释 ->') && hm.includes('块注释'), '内联注释未被抽取');
+  ck('CS-3 HTML 内联脚本正文不误报为注释', !hm.includes('const t =') && !hm.includes('伪标记'), '正文/字符串被当成了注释');
+  ck('CS-3 HTML 掩码与原文等长（行号不错位）', hm.length === html.length, hm.length + ' vs ' + html.length);
+  // <style> 内联体的 CSS 注释：只抽 JS 时，引导页样式段的块注释仍不在覆盖面内。
+  const styled = '<!doctype html>\n<style>\n/* 样式注释 -> 违规 */\n.a { content: "/* 字符串里的伪注释 */"; }\n</style>\n';
+  const stm = maskFor('q.html', styled);
+  ck('CS-3 HTML 内联样式注释在覆盖面内', stm.includes('样式注释 ->'), 'CSS 块注释未被抽取');
+  ck('CS-3 HTML 内联样式正文与字符串不误报', !stm.includes('.a {') && !stm.includes('字符串里的伪注释'), 'CSS 声明或字符串被当成注释');
+  ck('CS-3 HTML 样式掩码与原文等长（行号不错位）', stm.length === styled.length, stm.length + ' vs ' + styled.length);
   return fails;
 }
 

@@ -43,13 +43,22 @@ fn read(rel: &str) -> String {
 
 #[test]
 fn k1_failure_reports_command_prefix_and_registry() {
+    // install_version 只做版本校验后转交；cmd/prefix/registry 三项证据由 install_spec 组织。
+    //   旧判据从 install_version 一路切到**文件末尾**：文件里任何位置出现这些串都算通过，
+    //   锚点形同虚设（切片到 EOF = 判据落在整个文件上）。故逐函数切定，并反向证明切片不越界。
     let core = read("src-tauri/src/core.rs");
-    let i = core.find("pub fn install_version").expect("K-1 FAIL no install_version");
-    let seg = &core[i..];
+    let vi = core.find("pub fn install_version").expect("K-1 FAIL no install_version");
+    let sj = vi + core[vi..].find("fn install_spec(").expect("K-1 FAIL install_spec 缺失");
+    let lj = sj + core[sj..].find("pub fn install_local(").expect("K-1 FAIL install_local 缺失");
+    let entry = &core[vi..sj];
+    let seg = &core[sj..lj];
+    assert!(entry.contains("install_spec("), "K-1 FAIL install_version 未转交 install_spec");
     assert!(seg.contains("cmd: ") && seg.contains("install -g --no-audit --no-fund"), "K-1 FAIL no cmd");
     assert!(seg.contains("--prefix {}"), "K-1 FAIL no prefix");
     assert!(seg.contains("[registry {}]"), "K-1 FAIL no registry");
-    eprintln!("K-1 PASS evidence has cmd/prefix/registry");
+    // 反空转：切片内不得出现后续函数签名（出现即说明又切到了 EOF，断言会恒真）。
+    assert!(!seg.contains("pub fn build_plan") && !seg.contains("fn fresh_cache_dir"), "K-1 FAIL 切片越出 install_spec");
+    eprintln!("K-1 PASS evidence has cmd/prefix/registry (anchored on install_spec body)");
 }
 
 #[test]
