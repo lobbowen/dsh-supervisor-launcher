@@ -18,18 +18,6 @@
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
-/// 内建默认镜像（与内核 config.registries 同集合；registry.json 缺失时的兜底）。
-// 与 mirror.rs 的 NPM_PRESETS / 内核 config.registries 保持同一集合。
-// 这只是在 mirror.rs 配置损坏时的最后兜底；正常路径由 mirror::load() 提供。
-const DEFAULT_ORIGINS: [&str; 6] = [
-    "https://registry.npmmirror.com",
-    "https://registry.npmjs.org",
-    "https://repo.huaweicloud.com/repository/npm/",
-    "https://mirrors.cloud.tencent.com/npm",
-    "https://npmreg.proxy.ustclug.org",
-    "https://r.cnpmjs.org",
-];
-
 /// 平台 -> npm 子包名（唯一真源；错误提示/安装/查询共用，杜绝散落硬编码）。
 pub fn package_name() -> Result<String, String> {
     // 平台标签是**平台事实**，只在 platform 层解析（门禁 G1）；
@@ -126,13 +114,13 @@ pub fn semver_cmp(a: &str, b: &str) -> i32 {
     0
 }
 
-/// 镜像候选集合：壳自持配置优先，其次内核 registry.json，最后内建默认。
-/// 装机时没有内核（registry.json 尚不存在），壳必须自带镜像能力；
-/// 内核已进入 manual 模式（用户手动锁定）时，尊重内核的选择。
+/// 镜像候选集合：内核 manual 模式最优先，其余一律取壳自持配置（mirror.rs 预设或其落盘覆盖）。
+///
+/// 不读内核 registry.json 的 auto origins：`mirror::load()` 绝不返回空列表，那一格永不到来；
+/// 跨仓同源的方向是壳写给内核（`mirror::export_to_kernel` 下发选中的源）。
 pub fn registry_origins() -> Vec<String> {
     let path = crate::env::supervisor_dir().join("registry.json");
     let mut kernel_manual: Option<String> = None;
-    let mut kernel_list: Option<Vec<String>> = None;
     if let Ok(s) = std::fs::read_to_string(&path) {
         if let Ok(v) = serde_json::from_str::<Value>(&s) {
             let mode = v.get("mode").and_then(|x| x.as_str()).unwrap_or("auto");
@@ -141,28 +129,14 @@ pub fn registry_origins() -> Vec<String> {
                     if !m.is_empty() { kernel_manual = Some(m.to_string()); }
                 }
             }
-            if let Some(arr) = v.get("origins").and_then(|x| x.as_array()) {
-                let list: Vec<String> = arr.iter().filter_map(|x| x.as_str())
-                    .map(|s| s.to_string()).filter(|s| !s.is_empty()).collect();
-                if !list.is_empty() { kernel_list = Some(list); }
-            }
         }
     }
     // 1) 内核手动模式：最高优先（用户显式选择）
     if let Some(m) = kernel_manual {
         return vec![m];
     }
-    // 2) 壳自持配置（引导阶段已测速选择）
-    let m = crate::mirror::load();
-    if !m.npm.is_empty() {
-        return m.npm;
-    }
-    // 3) 内核 registry.json 的 auto 列表
-    if let Some(l) = kernel_list {
-        return l;
-    }
-    // 4) 内建默认
-    DEFAULT_ORIGINS.iter().map(|s| s.to_string()).collect()
+    // 2) 壳自持配置（引导阶段已测速选择；缺失或损坏时它就是内建预设）
+    crate::mirror::load().npm
 }
 
 /// 包名 URL 编码：scope 的 / 编码为 %2F（npm registry 两种写法均可，编码更稳）。

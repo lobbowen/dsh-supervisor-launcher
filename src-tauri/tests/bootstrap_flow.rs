@@ -569,27 +569,84 @@ fn b22_mirror_presets_are_verified() {
     eprintln!("B22 PASS mirror presets are verified");
 }
 
-/// B23：**壳侧**预设集合必须自洽（mirror.rs 主路径与 core.rs 兜底路径一致）。
+/// 取 `marker` 之后第一个「元素带引号的数组」里的全部字符串。
 ///
-/// 注（2026-09-11 双仓隔离收尾）：原断言还跨仓读取**内核** `src/platform/config.js`，
-/// 壳仓独立后该路径不存在。内核侧集合由其自身 `test/package-root-test.js`（P2 系列）保证；
-/// 本测试只负责**壳仓内部**一致性（两处不一致会导致主路径与兜底路径选出不同源）。
+/// Rust 的 `pub const X: [&str; 2] = [...]` 有两个左方括号，第一个的配对里没有引号，
+/// 故必须跳过它 —— 直接取第一个 `[` 会把类型标注当数组体，判据恒不命中（假绿）。
+fn quoted_array(src: &str, marker: &str) -> Vec<String> {
+    let at = match src.find(marker) {
+        Some(i) => i,
+        None => return Vec::new(),
+    };
+    let tail = &src[at..];
+    let mut from = 0usize;
+    while let Some(o) = tail[from..].find('[') {
+        let oi = from + o;
+        match tail[oi + 1..].find(']') {
+            Some(c) => {
+                let body = &tail[oi + 1..oi + 1 + c];
+                if body.contains('"') {
+                    return quoted_in(body);
+                }
+                from = oi + 1 + c;
+            }
+            None => break,
+        }
+    }
+    Vec::new()
+}
+
+fn quoted_in(body: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = body;
+    while let Some(q) = rest.find('"') {
+        rest = &rest[q + 1..];
+        match rest.find('"') {
+            Some(c) => {
+                out.push(rest[..c].to_string());
+                rest = &rest[c + 1..];
+            }
+            None => break,
+        }
+    }
+    out
+}
+
+/// B23：**壳侧**镜像源清单单源（mirror.rs 是唯一持有者）+ 壳更新端点两处一致。
+///
+/// 原形态是 core.rs 自带一份 6 条 DEFAULT_ORIGINS 当兜底，而 `mirror::load()` 绝不返回空
+/// 列表，那条分支永不到来 —— 抄第二份的实际代价不是重复而是漂移（改一处忘另一处）。
+/// 现反向钉住「core.rs 不得再出现 npm 源字面量」。
+/// 端点侧：构建期读 tauri.conf.json、运行期由 SHELL_PRESETS 覆盖，两份不一致时实际请求的
+/// 顺序与清单页所示不是一回事，故逐条比对而非只数条数。
 #[test]
 fn b23_shell_preset_sets_are_consistent() {
     let core = fs::read_to_string(manifest_dir().join("src").join("core.rs")).expect("core.rs");
-    assert!(
-        core.contains("const DEFAULT_ORIGINS: [&str; 6]"),
-        "B23 FAIL 壳 core.rs 的 DEFAULT_ORIGINS 未同步到 6 个"
-    );
     let m = fs::read_to_string(manifest_dir().join("src").join("mirror.rs")).expect("mirror.rs");
     assert!(
         m.contains("pub const NPM_PRESETS: [&str; 6]"),
         "B23 FAIL 壳 mirror.rs 的 NPM_PRESETS 未同步到 6 个"
     );
-    for needle in ["npmreg.proxy.ustclug.org", "r.cnpmjs.org"] {
-        assert!(core.contains(needle), "B23 FAIL core.rs DEFAULT_ORIGINS 缺 {}", needle);
-        assert!(m.contains(needle), "B23 FAIL mirror.rs NPM_PRESETS 缺 {}", needle);
+    assert!(
+        core.contains("crate::mirror::load().npm"),
+        "B23 FAIL core.rs 未取 mirror.rs 的候选集合（兜底又自立一份）"
+    );
+    for dup in ["registry.npmmirror.com", "registry.npmjs.org", "cnpmjs.org"] {
+        assert!(!core.contains(dup), "B23 FAIL core.rs 里又出现 npm 源字面量 {}", dup);
     }
+    // 抽取器自身的反向样本：真实形态（Rust 带类型标注）必须命中，缺引号时必须为空
+    let fake = "pub const X: [&str; 2] = [\"a\", \"b\"];";
+    assert_eq!(quoted_array(fake, "pub const X"), vec!["a".to_string(), "b".to_string()]);
+    assert!(quoted_array("pub const X: [&str; 2] = [];", "pub const X").is_empty());
+    let conf = fs::read_to_string(manifest_dir().join("tauri.conf.json")).expect("tauri.conf.json");
+    let presets = quoted_array(&m, "pub const SHELL_PRESETS");
+    let endpoints = quoted_array(&conf, "\"endpoints\"");
+    assert_eq!(presets.len(), 2, "B23 FAIL 未从 SHELL_PRESETS 抽到端点（抽取器失配）");
+    assert_eq!(endpoints.len(), 2, "B23 FAIL 未从 tauri.conf.json 抽到 endpoints（抽取器失配）");
+    assert_eq!(
+        presets, endpoints,
+        "B23 FAIL SHELL_PRESETS 与 tauri.conf.json endpoints 不一致"
+    );
     eprintln!("B23 PASS shell preset sets consistent");
 }
 
