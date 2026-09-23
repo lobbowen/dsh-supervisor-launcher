@@ -3,14 +3,17 @@
 
 use tauri::{Emitter, Manager};
 
+/// 面板导航的重发拍数与间隔。拍数表与「最后一拍」判据必须同源，故判据取 len()。
+const PANEL_PUSH_DELAYS: [u64; 3] = [400, 1200, 2500];
+
 pub(crate) fn go_panel(app: &tauri::AppHandle, force: bool) {
   // 壳框架(shell.html)的 evt listener 在首帧注册；setup 线程的 emit 可能早于注册被丢弃，
   // 故延时重发数次覆盖竞态（listener 就绪后任一次生效即切面板）。
   // force=true（用户重新显示窗口）-> 即使 URL 相同也强制重载，保证拿最新 UI。
-    for (i, delay_ms) in [400u64, 1200, 2500].iter().enumerate() {
+    for (i, delay_ms) in PANEL_PUSH_DELAYS.iter().copied().enumerate() {
         let h = app.clone();
         std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(*delay_ms));
+            std::thread::sleep(std::time::Duration::from_millis(delay_ms));
             // 每一拍都重新判据并现取 URL（守卫可能已顺延端口），不是重发同一个地址；最后一拍仍不在
             //   服役就回引导页重跑启动链。投未判据的地址只会把引擎错误页留给用户。
             // 判据与 URL 必须同出 `panel_view` 一个答案：主帧那条导航路径不经本函数，在此单独判一次
@@ -18,7 +21,7 @@ pub(crate) fn go_panel(app: &tauri::AppHandle, force: bool) {
             let (url, serving) = crate::domain::guardctl::panel_view();
             if serving {
                 let _ = h.emit("shell:goto-panel", serde_json::json!({ "url": url, "seq": i, "force": force }));
-            } else if i + 1 == 3 {
+            } else if i + 1 == PANEL_PUSH_DELAYS.len() {
                 let _ = h.emit("shell:goto-bootstrap", serde_json::json!({}));
             }
         });

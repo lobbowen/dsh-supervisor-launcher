@@ -36,6 +36,9 @@ pub(crate) fn http_get_bytes_progress(
         .filter(|t| *t > 0);
   // 预分配只是省扩容，因此对声称的大小设上限（Content-Length 由服务端给，不可全信）。
     let mut buf = Vec::with_capacity(total.unwrap_or(0).min(64 * 1024 * 1024) as usize);
+  // 字节上限：声称的总量 + 1MB 抖动，无总量时给 512MB 硬顶（本平台最大归档约 90MB）。
+  // 没有它，一个谎报或持续产字的源就能把壳进程喂到 OOM —— 读满为止，超时前无人拦。
+    let cap = total.map(|t| t.saturating_add(1024 * 1024)).unwrap_or(512 * 1024 * 1024);
     let mut reader = resp.into_reader();
     let mut chunk = [0u8; 64 * 1024];
   // 每 64KB 一次回调会打出上百条事件；按「总量的 1%」或「512KB（无总量时）」节流。
@@ -47,6 +50,12 @@ pub(crate) fn http_get_bytes_progress(
             break;
         }
         buf.extend_from_slice(&chunk[..n]);
+        if buf.len() as u64 > cap {
+            return Err(format!(
+                "下载中断 {}：响应体已超过上限 {} 字节（声称总量 {:?}）",
+                url, cap, total
+            ));
+        }
         if let Some(cb) = on_bytes {
             let got = buf.len() as u64;
             if got >= next_report {
