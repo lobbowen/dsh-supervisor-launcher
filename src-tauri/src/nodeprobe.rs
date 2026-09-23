@@ -37,53 +37,67 @@ fn live() -> &'static Mutex<Live> {
     L.get_or_init(|| Mutex::new(Live { current: None, done: Vec::new(), summary: String::new() }))
 }
 
+/// 取活进度锁。毒锁里的 `Live` 仍是完好结构体：读者本就容毒读，写方若因毒丢写，
+/// UI 会永久停在最后一条 `current` 上再也得不到更新 —— 而那条恰恰是「卡住时唯一线索」。
+fn live_lock() -> std::sync::MutexGuard<'static, Live> {
+    live().lock().unwrap_or_else(|e| e.into_inner())
+}
+
+thread_local! {
+    /// 本线程所属探测代际；`None` = 不是 worker 线程（命令线程与测试直调），其写入不受代际约束。
+    static WORKER_GEN: std::cell::Cell<Option<u64>> = std::cell::Cell::new(None);
+}
+
+/// 已被作废的 worker 是否还在写共享进度。
+///
+/// 代际校验原先只挡最终回写，于是被作废的旧 worker 在 `detect()` 里继续 stage/finish，
+/// 新一代面板读到的是上一轮留下的「正在做什么」与记录 —— 卡住线索被串扰成假现场。
+fn stale_writer() -> bool {
+    WORKER_GEN.with(|g| {
+        g.get().map_or(false, |gen| gen != GENERATION.load(std::sync::atomic::Ordering::SeqCst))
+    })
+}
+
 fn live_reset() {
-    if let Ok(mut l) = live().lock() {
-        l.current = None;
-        l.done.clear();
-    }
+    if stale_writer() { return; }
+    let mut l = live_lock();
+    l.current = None;
+    l.done.clear();
 }
 
 /// 标记「即将做一件可能阻塞的事」。**调用它必须在任何 I/O 之前**（规则一）。
 fn stage(desc: &str) {
-    if let Ok(mut l) = live().lock() {
-        l.current = Some((desc.to_string(), Instant::now()));
-    }
+    if stale_writer() { return; }
+    live_lock().current = Some((desc.to_string(), Instant::now()));
 }
 
 fn finish(entry: Record) {
-    if let Ok(mut l) = live().lock() {
-        l.current = None;
-        l.done.push(entry);
-    }
+    if stale_writer() { return; }
+    let mut l = live_lock();
+    l.current = None;
+    l.done.push(entry);
 }
 
 fn set_summary(s: String) {
-    if let Ok(mut l) = live().lock() {
-        l.summary = s;
-    }
+    if stale_writer() { return; }
+    let mut l = live_lock();
+    l.summary = s;
 }
 
 fn snapshot() -> Vec<Record> {
-    match live().lock() {
-        Ok(l) => l.done.clone(),
-        Err(e) => e.into_inner().done.clone(),
-    }
+    live_lock().done.clone()
 }
 
 /// 当前正在做哪一步、已耗时多久。**卡住时的唯一线索。**
 pub fn current_stuck() -> Option<(String, u128)> {
-    let l = live().lock().ok()?;
+    let l = live_lock();
     let (s, t) = l.current.as_ref()?;
     Some((s.clone(), t.elapsed().as_millis()))
 }
 
 /// 候选摘要（**只读缓存，不做任何 I/O**）。由探测线程在枚举完成后写入。
 pub fn candidate_summary() -> String {
-    match live().lock() {
-        Ok(l) => l.summary.clone(),
-        Err(e) => e.into_inner().summary.clone(),
-    }
+    live_lock().summary.clone()
 }
 
 /// 在飞探测的实时状态（与 Outcome 分离：即使探测永不返回，也能读到进展）。
@@ -320,6 +334,7 @@ fn spawn_worker(tx: Sender<Outcome>) {
     let _ = std::thread::Builder::new()
         .name("node-probe".to_string())
         .spawn(move || {
+            WORKER_GEN.with(|g| g.set(Some(gen)));
             let started = Instant::now();
             // 最后一道保险：worker 内 panic 也必须产出结论，否则线程静默死亡、命令只能一直报 probing。
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(detect));
