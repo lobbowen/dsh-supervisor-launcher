@@ -247,11 +247,14 @@ fn m_b_contract_carries_evidence_only() {
         "schema": 2, "writtenBy": "shell@1.2.8", "mode": "auto",
         "manualOrigin": null, "selected": { "origin": "https://x/" }, "origins": ["https://y/"],
     });
-    let want: Vec<String> = CHOICE_KEYS.iter().map(|k| k.to_string()).collect();
+    // 两侧都排序再比：serde_json 按字典序输出键，拿声明序去比等于把断言写成永远差一个顺序。
+    let mut got = choice_leaks(&v2.to_string());
+    got.sort();
+    let mut want: Vec<String> = CHOICE_KEYS.iter().map(|k| k.to_string()).collect();
+    want.sort();
     assert_eq!(
-        choice_leaks(&v2.to_string()),
-        want,
-        "M-b FAIL 泄漏判据认不出 v2 旧形状 —— 门禁空转"
+        got, want,
+        "M-b FAIL 泄漏判据认不出 v2 旧形状（四个选择键必须被同一判据全部抓到）—— 门禁空转"
     );
 }
 
