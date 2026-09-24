@@ -19,7 +19,8 @@
   `registry-choice.json` 一行）；§18.1/§18.2 改为现行形状；§27.2 的 `selected` 表述改为
   「已随 schema 3 废除，内核按三条条件采用证据」；§29 顶部加**提案原貌**横幅（`M3-a` 写的
   `selected`、`_selectedFromContract()` 都已不存在，别再照它找代码）；§34.1 的 AFTER 图重画成
-  证据/选择两条线。
+  证据/选择两条线；§28 补进 §6 的「提案原貌」指针，§28.2 的内核侧改写为已落地形态
+  （`registry.js::probeRegistry` 按 `policies.js::resolveProbe` 给出的契约规格探测）。
 - `DESIGN-SHELL-ARCHITECTURE.md` §3.2：`CONTRACT_SCHEMA=3`、补内核选择文档的只读关系，不变量 C1 改成
   三份文件各一个写者，C4 的契约内容补 `measurements`。
 - `DEVELOPMENT-TRACK.md` §2：两仓文件契约清单补 `registry-choice.json` 与 `update-journal.json`。
