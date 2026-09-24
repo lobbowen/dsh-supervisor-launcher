@@ -205,10 +205,9 @@ pub(crate) fn run_install(app: &tauri::AppHandle) -> Result<crate::runtime_contr
     let choice = crate::node::latest_lts().map_err(InstallFailure::node)?;
     let version = choice.version.clone();
     let file = choice.file.clone();
-  // 记录镜像选择（含延迟诊断），便于用户与排障
+  // 只记选用源：本轮实测延迟已随 stage 上屏，落盘再存一份时间戳就成了第二份「何时测的」事实
     crate::mirror::save(&crate::mirror::Mirrors {
         selected_node: Some(choice.source.clone()),
-        checked_at: Some(crate::mirror::now_secs()),
         ..crate::mirror::load()
     })
     .ok();

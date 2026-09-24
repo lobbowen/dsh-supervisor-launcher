@@ -5,7 +5,8 @@
 
 // 跨平台规范：包名按 os/arch 映射（@dsh-sup/dsh-core-<os>-<arch>）；
 // npm 可执行名由 platform 层给出（Windows 为 npm.cmd）；
-// 镜像顺序：内核 registry.json（manual 用 manualOrigin，否则 origins），缺失用内建默认。
+// 镜像顺序：内核选择文档 registry-choice.json（manual 用 manualOrigin，否则其候选），
+// 该文档缺失时退回壳自持目录。
 
 // 安装前缀从已定位内核的真实路径反推，绝不用 npm prefix -g：
 // nvm/自定义 prefix 下两者可能与内核实际位置不一致，
@@ -114,28 +115,50 @@ pub fn semver_cmp(a: &str, b: &str) -> i32 {
     0
 }
 
-/// 镜像候选集合：内核 manual 模式最优先，其余一律取壳自持配置（mirror.rs 预设或其落盘覆盖）。
-///
-/// 不读内核 registry.json 的 auto origins：`mirror::load()` 绝不返回空列表，那一格永不到来；
-/// 跨仓同源的方向是壳写给内核（`mirror::export_to_kernel` 下发选中的源）。
+/// 内核自持的镜像选择文档（`<产品状态根>/supervisor/registry-choice.json`，只有内核写）。
+/// 壳读它只为一件事：用户在内核面板固定过源时，壳的安装/更新必须打在同一个源上。
+struct KernelChoice {
+    manual: Option<String>,
+    origins: Vec<String>,
+}
+
+fn kernel_choice() -> Option<KernelChoice> {
+    let s = std::fs::read_to_string(crate::env::supervisor_dir().join("registry-choice.json")).ok()?;
+    let v = serde_json::from_str::<Value>(&s).ok()?;
+    let manual = if v.get("mode").and_then(|x| x.as_str()) == Some("manual") {
+        v.get("manualOrigin")
+            .and_then(|x| x.as_str())
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+    } else {
+        None
+    };
+    let origins = v
+        .get("origins")
+        .and_then(|x| x.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str())
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    Some(KernelChoice { manual, origins })
+}
+
+/// 镜像候选集合，优先序与内核 policies.effectiveOrigins 一致：
+/// 内核手动固定的源 > 内核里用户维护的候选 > 壳自持目录（mirror.rs 预设或其落盘覆盖）。
+/// 不读壳投出的契约候选：那份是壳自己写的，绕一圈回来等于把壳的目录当成用户意图。
 pub fn registry_origins() -> Vec<String> {
-    let path = crate::env::supervisor_dir().join("registry.json");
-    let mut kernel_manual: Option<String> = None;
-    if let Ok(s) = std::fs::read_to_string(&path) {
-        if let Ok(v) = serde_json::from_str::<Value>(&s) {
-            let mode = v.get("mode").and_then(|x| x.as_str()).unwrap_or("auto");
-            if mode == "manual" {
-                if let Some(m) = v.get("manualOrigin").and_then(|x| x.as_str()) {
-                    if !m.is_empty() { kernel_manual = Some(m.to_string()); }
-                }
-            }
+    if let Some(c) = kernel_choice() {
+        if let Some(m) = c.manual {
+            return vec![m];
+        }
+        if !c.origins.is_empty() {
+            return c.origins;
         }
     }
-    // 1) 内核手动模式：最高优先（用户显式选择）
-    if let Some(m) = kernel_manual {
-        return vec![m];
-    }
-    // 2) 壳自持配置（引导阶段已测速选择；缺失或损坏时它就是内建预设）
     crate::mirror::load().npm
 }
 
@@ -492,10 +515,13 @@ pub fn dist_from(pkg: &str, version: &str, origin: &str) -> Result<DistInfo, Str
     let tarball = dist
         .get("tarball")
         .and_then(|x| x.as_str())
-        .filter(|s| s.starts_with("http://") || s.starts_with("https://"))
-        .ok_or_else(|| format!("{} 的 dist.tarball 缺失或不是 URL", origin))?;
+        .ok_or_else(|| format!("{} 上没有 {}@{} 的 dist.tarball", origin, pkg, version))?;
+    // 判据在 mirror::asset_url（形态 + 主机维度）：这个主机是 registry 替我们选的，
+    // 与跨主机跳转同一性质，所以它必须自己过私网闸，而不是「看着像 http 就行」。
+    let target = crate::mirror::asset_url(tarball)
+        .map_err(|e| format!("{} 的 dist.tarball 非法：{}（{}）", origin, e, tarball))?;
     Ok(DistInfo {
-        tarball: tarball.to_string(),
+        tarball: target,
         size: dist.get("size").and_then(|x| x.as_u64()).filter(|t| *t > 0),
         sha512: parse_integrity(dist.get("integrity")),
     })
