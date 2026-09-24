@@ -165,7 +165,7 @@ ManagedRegistry.heartbeat(5000)                objects.js:289-324
 
 > **缺口 ①② 的现状**：已由 schema 3 收口 —— 契约携带 catalog/probe/measurements 全集、启动即无条件导出
 > （探测失败也写），并把**选择**（`mode`/`manualOrigin`/`origins`）整块搬到内核自持的
-> `registry-choice.json`。上一行的本表快照与 §27/§29/§34 里描述 schema 2 形状的段落都是**当时的提案**，
+> `registry-choice.json`。上一行的本表快照与 §27/§28/§29/§34 里描述 schema 2 形状的段落都是**当时的提案**，
 > 现行形状以 `DESIGN-BOUNDARY.md` §4.1 与本表为准。缺口 ③ 不在本议题内。
 
 ---
@@ -789,6 +789,13 @@ async _probeRegistry(origin) {
   } catch { return { ok: false, latencyMs: Date.now() - start, probe: spec.kind || "ping" }; }
 }
 ```
+
+**内核侧（M2-b）已落地形态**（提案里的 `_probeRegistry` 从未以这个名字存在，`dist/index.js` 是重构前的
+旧路径，现仓内已无此文件）：探测在 `src/platform/distribution/registry.js::probeRegistry`，目标 URL 由
+`src/platform/distribution/policies.js::resolveProbe` 按契约 `probe` 规格产出（只有
+`kind === 'package-metadata'` 才展开 `{platform}`，规格缺失才退 `/-/ping`）；传输走
+`src/platform/distribution/registry-ref.js::fetchRegistry`，与取包元数据同一条路，所以「探测可达」与
+「取到字节」不可能再给出不同答案。
 
 ### 28.3 验收断言
 
