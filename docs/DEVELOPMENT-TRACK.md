@@ -41,7 +41,9 @@ DSH 与 AI 运行时**都在** `/tmp` 用 `dsh-*` / `dsh-spill-*` / `dsh-subproc
 
 ## 2. 边界（两仓纪律）
 
-- **两仓不得共享代码**，只经文件契约：`registry.json` / `identity.json` / `runtime.json` / `core.json`；
+- **两仓不得共享代码**，只经文件契约：`registry.json`（壳写证据）/ `registry-choice.json`（内核写选择）/
+  `identity.json` / `runtime.json` / `core.json` / `update-journal.json`；每份文件**只有一个写入方**，
+  镜像源的证据与选择因此分在两份文件里（形状与采用条件见 `DESIGN-BOUNDARY.md` §4.1）；
 - 壳**不持有 DSH 令牌**（见 `DESIGN-BOUNDARY.md`）；令牌全在内核；
 - 壳改动必须过 `cargo test --bins --tests`（含各结构门禁）—— 由 CI 的「门禁测试」步骤执行，
   不在本机跑（见 §1 铁律 R-1 的禁止列与 `RELEASE-STANDARD.md` §0）。
