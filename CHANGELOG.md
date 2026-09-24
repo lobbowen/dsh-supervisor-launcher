@@ -2,6 +2,39 @@
 
 本文件记录桌面壳（`dsh-supervisor-gui`，公开仓 `lobbowen/dsh-supervisor-launcher`）的重要变更。
 
+## [未发布]
+
+### 镜像契约 schema3 与两文件所有权拆分（P0-C，跨仓与内核同批；**内核先发 0.1.6-BETA.10，壳再发本版**）
+
+契约 `registry.json` 过去既住壳的目录又住内核的选择，两个写者只能互相让步：内核每次保存要「读回原文、
+只覆盖自己那三键」，而壳一旦读到 `mode=manual` 就**不再重写整份契约**。后果是用户在面板固定过一次源之后，
+镜像目录与探测规格永久停在那一刻 —— 新镜像上线、目录里某个源死掉，内核都再也拿不到。本批按「谁写哪份」拆开：
+`registry.json` 壳有、内核只读；选择（mode / manualOrigin / 候选）搬到内核自持的 `registry-choice.json`。
+
+- `contract_doc` 的写面只剩证据（schema / writtenBy / writtenAt / catalog / probe / measurements）。
+  壳只要还写一次选择字段，就等于覆盖用户在内核面板固定的那个源，所以 `CONTRACT_SCHEMA` 升 3 并让
+  `export_to_kernel` 成为契约的唯一出口。
+- 新增逐源实测 `Measurement` / `npm_measurements` 与 `record_npm_measurements`：面板点一次「重新探测」
+  就落盘并重投契约。只在面板上显示是不够的 —— 内核选源时读的是文件，那样会出现「面板一个源、下载另一个源」。
+  实测与目录同源：`mirror_set` 改 npm 候选即清空 `npm_measurements`（上一轮说的是另一批地址）。
+- 壳改为**读**内核的选择文档（`core.rs` 的 `kernel_choice` / `registry_origins`），优先序与内核
+  `policies.effectiveOrigins` 一致：内核手动源 > 内核里用户维护的候选 > 壳自持目录。不回读壳自己投出的
+  契约候选 —— 绕一圈回来等于把壳的目录当成用户意图。
+- 形态尺的两端各管一处：`registry_base`（写入口：形态 + 私网主机闸，拒 query/fragment）用于 `mirror_set`；
+  `asset_url`（产物地址：**允许**签名 query，但**必须**过主机闸）用于 `core.rs` 取 tarball。此前那里只判
+  `starts_with("http")` —— registry 替我们选一个 `http://127.0.0.1:4873/…` 就照拿，与内核侧的跳转复验不对齐。
+- 删掉 `Mirrors.checked_at` 与 `selected_npm`：一个是 Node 探测的时间戳、一个是 npm 的选择结果，
+  挤在同一个字段里导致 `export_to_kernel` 拿 Node 的延迟去描述 npm 的选择。Node 的选用源仍记（`selected_node`），
+  时间戳不再落盘 —— 本轮实测延迟已随进度上屏，再存一份就是第二份「何时测的」事实。
+- 私网主机 golden vectors 与内核 `test/npm-resolution-test.js` 的 C-m 同表（形态表 + 私网表 + 跳转/产物地址表）。
+  同表立刻暴露两处真实分叉：127/8 与 0/8 —— Rust 的 `is_loopback`/`is_unspecified` 各认半段，内核原来只认
+  `127.0.0.1`。两侧一并改成整段判定。
+- 门禁改造：M-a / M-b / M-b2 / M-d / M-e 由「数条数、读含注释原文、切到文件末尾」改为剥注释 + 大括号配平取
+  函数体 + 判据抽成共享函数；每条判据都配一个**旧形态样本走同一个函数**的反向断言，否则「门禁空转」直接红。
+  B18 的尾部判据改锚到 mirror.rs 代码（含 `manualOrigin` / `"mode"` 即红，契约 schema 必须声明为 3）。
+- 未在本批处理：`probe_all` 仍走 ureq 默认跟随跳转（内核侧已是逐跳复验的有界传输，对齐列为 S4）；
+  `docs/` 里 schema2 / `selected` 的所有权表述仍在描述旧契约（P0-D 跨仓文档同步）。
+
 ## [1.2.8]（2026-09-24）
 
 本版收全仓审计的壳侧第三组（PR #34）：**门禁判据空转**与产线小项。不含内核版本要求变化，产品运行时代码

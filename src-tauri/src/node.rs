@@ -140,18 +140,14 @@ pub fn latest_lts() -> Result<LtsChoice, String> {
     }
     match best {
         Some((version, file, latency_ms, source)) => {
-  // 落盘缓存：记录选中的源与探测时间（TTL 内后续调用可直接复用；
-  // 同时让镜像选择**可观测**——用户与排障都能看到当前用的是哪个源）。
+  // 落盘缓存：记录选中的 Node 源（镜像选择**可观测** —— 用户与排障都能看到当前用的是哪个源）。
             let mut m = crate::mirror::load();
             m.selected_node = Some(source.clone());
-            m.checked_at = Some(crate::mirror::now_secs());
             if let Err(e) = crate::mirror::save(&m) {
                 crate::update::log(&format!("镜像配置写入失败（不影响本次安装）: {}", e));
             }
-  // 同步导出契约给内核（内核已存在则继承同一偏好；不存在也无害，首次安装后会读到这份文件）。
-  // 这里选中的是 Node 发行源（source/latency_ms 都属 node_p 探测），而契约里的 selected 描述的是 npm registry
-  // 选择（origin 取自 m.selected_npm，由 warmup_async 落盘）。故 latency 传 None，让 export 用随 selected_npm
-  // 一起落盘的同源延迟 —— 拿 Node 的延迟去描述 npm 的选择是两件事，npm 尚无选择时 selected 本就是 null。
+  // 同步导出契约给内核（内核消费同一份目录；本机没装内核时写下也无害，装完就会读到）。
+  // 这里选中的是 Node 发行源，与契约的 npm 逐源实测无关，所以不碰 measurements。
             if let Err(e) = crate::mirror::export_to_kernel(&m) {
                 crate::update::log(&format!("导出内核镜像偏好失败（不影响本次安装）: {}", e));
             }

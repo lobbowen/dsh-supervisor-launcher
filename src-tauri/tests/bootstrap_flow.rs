@@ -473,7 +473,24 @@ fn b18_shell_owns_mirror_adaptation() {
     assert!(m.contains("pub fn warmup_async"), "B18 FAIL 缺后台预热（前端不应阻塞等测速）");
     assert!(m.contains("pub fn cached"), "B18 FAIL 缺纯读缓存读取口（轮询会变成网络请求）");
     assert!(!m.contains("CACHE_TTL_SECS"), "B18 FAIL CACHE_TTL_SECS 已确认是死代码，不应回潮");
-    assert!(m.contains("manual"), "B18 FAIL 未保护内核 manual 选择不被覆盖");
+    // schema3 的所有权切分：契约里一个字的选择都不写（选择归内核自持的 registry-choice.json）。
+    // 前身是 `assert!(m.contains("manual"))` —— schema3 下语义已反，
+    // 而且它此刻只是撞在我写的说明文字上（注释当证据 = 门禁空转），故整条换掉。
+    // 判据只看剥掉整行注释后的代码，与 mirror_env_wiring_test 的 M-b 各测一侧：
+    // M-b 钉「契约文档的形状」，这里钉「镜像模块根本不携带选择语义」。
+    let code: String = m
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !code.contains("manualOrigin") && !code.contains("\"mode\""),
+        "B18 FAIL mirror.rs 的代码里又出现选择字段 —— 壳写一次就等于覆盖用户在内核面板固定的源"
+    );
+    assert!(
+        code.contains("CONTRACT_SCHEMA: u64 = 3"),
+        "B18 FAIL 契约 schema 未声明为 3（内核按形状分支读，版本对不上等于没有证据）"
+    );
     eprintln!("B18 PASS shell owns mirror adaptation");
 }
 

@@ -1,6 +1,7 @@
-//! 镜像源适配（壳自持）：装机时机器上没有内核，壳必须先于内核完成镜像选择，内核消费壳投放的 registry.json。
+//! 镜像源适配（壳自持）：装机时机器上没有内核，壳必须先于内核跑完镜像探测，内核消费壳投放的 registry.json。
 //! 不变量：并行探测全部候选（串行会被最慢源拖死）；Node 版本取全部可达源中的最高版本（镜像同步滞后，首个成功即采用会装到旧版）；
-//! 选最快且确实提供该版本的源下载，结果缓存到 ~/.dsh/shell/mirrors.json 并导出内核。
+//! 选最快且确实提供该版本的源下载，逐源实测结论缓存到 ~/.dsh/shell/mirrors.json 并导出内核。
+//! 壳对内核只交证据（目录 + 探测规格 + 逐源实测），从不交选择：固定哪个源写在内核自持的 registry-choice.json。
 
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -124,6 +125,46 @@ pub fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
+/// 一个 npm 源的最近一次实测结论。为什么逐源存而不是只存「选中的那个」：内核采用壳的证据的
+/// 前提是证据覆盖它当前的**全部**候选，缺一源就得自己重测一轮 —— 只交一个结论等于不交。
+#[derive(Clone)]
+pub struct Measurement {
+    pub origin: String,
+    pub ok: bool,
+    pub latency_ms: Option<u64>,
+    pub error: Option<String>,
+    pub checked_at: u64,
+}
+
+impl Measurement {
+    fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "origin": self.origin,
+            "ok": self.ok,
+            "latencyMs": self.latency_ms,
+            "error": self.error,
+            "checkedAt": self.checked_at,
+        })
+    }
+}
+
+/// 从落盘/契约形态读一条实测结论；缺 origin 或 checkedAt 的一律丢（没有时间的结论无法判新鲜）。
+fn measurement_from(v: &serde_json::Value) -> Option<Measurement> {
+    let origin = v
+        .get("origin")
+        .and_then(|x| x.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())?;
+    let checked_at = v.get("checkedAt").and_then(|x| x.as_u64()).filter(|t| *t > 0)?;
+    Some(Measurement {
+        origin,
+        ok: v.get("ok").and_then(|x| x.as_bool()).unwrap_or(false),
+        latency_ms: v.get("latencyMs").and_then(|x| x.as_u64()),
+        error: v.get("error").and_then(|x| x.as_str()).map(|s| s.to_string()),
+        checked_at,
+    })
+}
+
 /// 壳自持镜像配置（~/.dsh/shell/mirrors.json）。
 #[derive(Clone)]
 pub struct Mirrors {
@@ -131,11 +172,8 @@ pub struct Mirrors {
     pub npm: Vec<String>,
     pub shell: Vec<String>,
     pub selected_node: Option<String>,
-    pub selected_npm: Option<String>,
-    /// 选中 npm 源在**实测时**的延迟（ms）。随 selected_npm 一起落盘 ——
-    /// 使「选择」与「延迟」同源，避免导出时被调用方传入别的延迟（如 Node 侧）。
-    pub selected_npm_latency_ms: Option<u64>,
-    pub checked_at: Option<u64>,
+    /// 最近一轮 npm 逐源实测（与 npm 目录同源：目录一改即清空）。
+    pub npm_measurements: Vec<Measurement>,
 }
 
 impl Default for Mirrors {
@@ -145,9 +183,7 @@ impl Default for Mirrors {
             npm: NPM_PRESETS.iter().map(|s| s.to_string()).collect(),
             shell: SHELL_PRESETS.iter().map(|s| s.to_string()).collect(),
             selected_node: None,
-            selected_npm: None,
-            selected_npm_latency_ms: None,
-            checked_at: None,
+            npm_measurements: Vec::new(),
         }
     }
 }
@@ -188,11 +224,11 @@ pub fn load() -> Mirrors {
             if let Some(s2) = v.get("selectedNode").and_then(|x| x.as_str()) {
                 m.selected_node = Some(s2.to_string());
             }
-            if let Some(s2) = v.get("selectedNpm").and_then(|x| x.as_str()) {
-                m.selected_npm = Some(s2.to_string());
-            }
-            m.selected_npm_latency_ms = v.get("selectedNpmLatencyMs").and_then(|x| x.as_u64());
-            m.checked_at = v.get("checkedAt").and_then(|x| x.as_u64());
+            m.npm_measurements = v
+                .get("npmMeasurements")
+                .and_then(|x| x.as_array())
+                .map(|a| a.iter().filter_map(measurement_from).collect())
+                .unwrap_or_default();
         }
     }
     m
@@ -209,9 +245,7 @@ pub fn save(m: &Mirrors) -> Result<(), String> {
         "npm": m.npm,
         "shell": m.shell,
         "selectedNode": m.selected_node,
-        "selectedNpm": m.selected_npm,
-        "selectedNpmLatencyMs": m.selected_npm_latency_ms,
-        "checkedAt": m.checked_at,
+        "npmMeasurements": m.npm_measurements.iter().map(|x| x.json()).collect::<Vec<_>>(),
     });
     let body = serde_json::to_string_pretty(&v).unwrap_or_default();
     let tmp = path.with_extension("json.tmp");
@@ -220,58 +254,20 @@ pub fn save(m: &Mirrors) -> Result<(), String> {
     Ok(())
 }
 
-/// 契约 schema 版本（内核据此判断格式是否兼容）：v2 在 mode/origins/manualOrigin 之外
-/// 增加 catalog（全集）/ selected（选择结果）/ probe（探测规格）- 内核照 probe 规格执行即可与壳得到同一答案。
-pub const CONTRACT_SCHEMA: u64 = 2;
+/// 契约 schema 版本（内核据此判断格式是否兼容）。v3 按「谁写哪份」拆开：壳只交 catalog（镜像目录）
+/// / probe（探测规格）/ measurements（逐源实测），mode 与 manualOrigin 一类的**选择**字段搬到内核
+/// 自持的 registry-choice.json。内核照 probe 规格执行即可与壳得到同一答案。
+pub const CONTRACT_SCHEMA: u64 = 3;
 
-/// 导出镜像契约给内核（`<产品状态根>/supervisor/registry.json`）。
-/// 所有权在壳：装壳那一刻机器上没有内核，壳必须先于内核完成镜像选择，内核只消费产物。
-/// 写全集 catalog + selected + probe（而非仅 origins）；由 main.rs setup 在启动时无条件导出；内核已写 manual 时不覆盖。
-pub fn export_to_kernel(m: &Mirrors) -> Result<(), String> {
-    export_to_kernel_with(m, None)
-}
-
-/// 同 [`export_to_kernel`]，但可携带选中源的实测延迟（`selected.latencyMs`）。
-pub fn export_to_kernel_with(m: &Mirrors, latency_ms: Option<u128>) -> Result<(), String> {
-    if m.npm.is_empty() {
-        return Ok(());
-    }
-    let path = crate::env::supervisor_dir().join("registry.json");
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| format!("创建内核状态目录失败: {}", e))?;
-    }
-    // 用户在内核面板手动固定过源，不覆盖（尊重显式意图）。
-    if let Ok(s) = std::fs::read_to_string(&path) {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
-            if v.get("mode").and_then(|x| x.as_str()) == Some("manual") {
-                return Ok(());
-            }
-        }
-    }
-    // 不变量：selected 的延迟必须与**所选 npm 源同源**。
-    // 优先用随 selected_npm 一起落盘的实测延迟；调用方传入仅作兜底。
-    let eff_latency_ms: Option<u128> = m
-        .selected_npm_latency_ms
-        .map(|v| v as u128)
-        .or(latency_ms);
-    let selected = m.selected_npm.as_ref().map(|origin| {
-        serde_json::json!({
-            "origin": origin,
-            "latencyMs": eff_latency_ms,
-            "checkedAt": m.checked_at,
-        })
-    });
-    let v = serde_json::json!({
+/// 契约文档本体（纯）。独立成函数是为了让单测钉得住形状：写盘那条路径要产品状态根，测不到。
+/// 不变量：键集合恰为 schema/writtenBy/writtenAt/catalog/probe/measurements —— 出现任何
+/// mode/manualOrigin/selected 一类的**选择**字段即为回归（那份所有权在内核）。
+fn contract_doc(m: &Mirrors) -> serde_json::Value {
+    serde_json::json!({
         "schema": CONTRACT_SCHEMA,
         "writtenBy": format!("shell@{}", env!("CARGO_PKG_VERSION")),
         "writtenAt": now_secs(),
-        "mode": "auto",
-        // 既有字段：保持向后兼容（旧内核只读这三项也能工作）
-        "origins": m.npm,
-        "manualOrigin": m.selected_npm.clone().unwrap_or_else(|| m.npm.first().cloned().unwrap_or_default()),
-        // v2 字段：全集 + 选择结果 + 探测规格
         "catalog": m.npm,
-        "selected": selected,
         "probe": {
             "kind": "package-metadata",
             "pathTemplate": npm_probe_path(),
@@ -279,12 +275,59 @@ pub fn export_to_kernel_with(m: &Mirrors, latency_ms: Option<u128>) -> Result<()
             //   介于两者之间的源会一侧判可达、另一侧判不可达，选源再次分叉。
             "timeoutMs": PROBE_TIMEOUT.as_millis() as u64,
         },
-    });
-    let body = serde_json::to_string_pretty(&v).unwrap_or_default();
+        "measurements": m.npm_measurements.iter().map(|x| x.json()).collect::<Vec<_>>(),
+    })
+}
+
+/// 导出镜像契约给内核（`<产品状态根>/supervisor/registry.json`）。
+/// 所有权在壳、方向单向（壳写内核读）：装壳那一刻机器上没有内核，壳必须先于内核跑完探测；
+/// 由 main.rs setup 在启动时无条件导出。契约里一个字的选择都不写，所以内核固定过哪个源
+/// 也不会让这份目录停止更新。
+pub fn export_to_kernel(m: &Mirrors) -> Result<(), String> {
+    if m.npm.is_empty() {
+        return Ok(());
+    }
+    let path = crate::env::supervisor_dir().join("registry.json");
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| format!("创建内核状态目录失败: {}", e))?;
+    }
+    let body = serde_json::to_string_pretty(&contract_doc(m)).unwrap_or_default();
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, body + "\n").map_err(|e| format!("写入内核 registry.json 失败: {}", e))?;
     std::fs::rename(&tmp, &path).map_err(|e| format!("提交内核 registry.json 失败: {}", e))?;
     Ok(())
+}
+
+/// 把一轮 npm 逐源探测落成契约证据、并重投契约。预热与面板手动重测两条路径共用此出口，
+/// 否则「用户在引导页点了重新测速」这条路径的结果只留在内存，内核仍按旧证据选源。
+/// 全部不可达时**清空**证据：留着旧结论会在其新鲜窗口内压住内核自测，网络恢复后面板仍显示
+/// 一批死源；而证据缺失时内核会自己测一轮，答案更新得更勤。目录照投，只是不附结论。
+pub fn record_npm_measurements(probes: &[Probe]) {
+    if probes.is_empty() {
+        return;
+    }
+    let mut m = load();
+    m.npm_measurements = if probes.iter().any(|p| p.ok) {
+        let at = now_secs();
+        probes
+            .iter()
+            .map(|p| Measurement {
+                origin: p.source.clone(),
+                ok: p.ok,
+                latency_ms: Some(p.latency_ms as u64),
+                error: p.error.clone(),
+                checked_at: at,
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    if let Err(e) = save(&m) {
+        crate::update::log(&format!("逐源测速结果落盘失败（不影响本次引导）: {}", e));
+    }
+    if let Err(e) = export_to_kernel(&m) {
+        crate::update::log(&format!("重投镜像契约失败（下次启动或改目录时再投）: {}", e));
+    }
 }
 
 /// 壳启动时无条件导出契约：探测失败时也必须写，否则内核完全拿不到源。
@@ -379,6 +422,90 @@ pub fn probe_all(sources: &[String], path: &str) -> Vec<Probe> {
     v
 }
 
+// 形态尺：什么才算「一个镜像源」、什么才算「一个可下载的产物地址」。与内核
+// distribution/registry-ref.js 的 parseRegistryBase 逐条对齐；两仓语言不同、只能各有一份实现，
+// 所以答案由双侧同表 golden vectors 钉死（Rust 单测 + 内核 test/npm-resolution-test.js）。
+
+/// 归一：去首尾空白 + 剥尾斜杠（`https://host/` 与 `https://host` 是同一个源）。
+pub fn normalize_base(raw: &str) -> String {
+    raw.trim().trim_end_matches('/').to_string()
+}
+
+/// 主机是不是回环/私网/链路本地/保留段字面量（内核 shared/ip.js 的 isPrivateHostLiteral 同尺）。
+/// 只判字面量：DNS 记录指到内网不在射程内。IPv6 字面量整族拒绝 —— 壳没有任何正当用途要访问它。
+fn private_host_literal(host: &str) -> bool {
+    use std::net::IpAddr;
+    let h = host.trim_start_matches('[').trim_end_matches(']').to_lowercase();
+    if h.is_empty() || h.contains(':') || !h.contains('.') {
+        return true;
+    }
+    if h == "localhost" || h.ends_with(".localhost") || h.ends_with(".local")
+        || h.ends_with(".internal") || h.ends_with(".home.arpa")
+    {
+        return true;
+    }
+    match h.parse::<IpAddr>() {
+        Ok(IpAddr::V6(_)) => true,
+        Ok(IpAddr::V4(v4)) => {
+            let o = v4.octets();
+            v4.is_loopback() || v4.is_private() || v4.is_link_local()
+                || o[0] == 0 || o[0] >= 224 || (o[0] == 100 && (64..=127).contains(&o[1]))
+        }
+        Err(_) => false,
+    }
+}
+
+/// 一条 http(s) 地址的共同形态：可解析、协议白名单、无凭证、有主机名。拒绝理由即文案。
+fn checked_http_url(raw: &str, noun: &str) -> Result<tauri::Url, String> {
+    let s = raw.trim();
+    if s.is_empty() {
+        return Err(format!("{}为空", noun));
+    }
+    if s.chars().any(|c| c.is_whitespace()) {
+        return Err(format!("{}不得含空白字符", noun));
+    }
+    let u = tauri::Url::parse(s).map_err(|_| format!("{}无法解析: {}", noun, s))?;
+    if u.scheme() != "http" && u.scheme() != "https" {
+        return Err(format!("{}必须是 http(s) 协议: {}", noun, s));
+    }
+    if !u.username().is_empty() || u.password().is_some() {
+        return Err(format!("{}不得携带用户名或密码: {}", noun, s));
+    }
+    if u.host_str().unwrap_or("").is_empty() {
+        return Err(format!("{}缺少主机名: {}", noun, s));
+    }
+    Ok(u)
+}
+
+/// 配置形态的镜像基址（面板可填、可进契约 catalog 的那种）。允许带 path —— 华为云/腾讯云 npm
+/// 就是这个形态；但凭证、查询串、片段一律拒：它们会把「同一个源」变成两个身份不同的地址。
+/// @returns 归一后的基址
+pub fn registry_base(raw: &str) -> Result<String, String> {
+    let base = normalize_base(raw);
+    let u = checked_http_url(&base, "镜像源")?;
+    if u.query().is_some() {
+        return Err(format!("镜像源不得携带查询串: {}", base));
+    }
+    if u.fragment().is_some() {
+        return Err(format!("镜像源不得携带片段: {}", base));
+    }
+    Ok(base)
+}
+
+/// 由远端元数据给出的下载目标（npm `dist.tarball`）。与配置基址差两点：查询串**必须允许**
+/// （签名 CDN 的凭据参数就在 query 里，砍掉等于装不上这类镜像），主机**必须过私网闸**
+/// —— 这个主机不是操作者选的而是 registry 选的，等价于一次跨主机跳转。
+pub fn asset_url(raw: &str) -> Result<String, String> {
+    let u = checked_http_url(raw, "下载地址")?;
+    if u.fragment().is_some() {
+        return Err(format!("下载地址不得携带片段: {}", u.as_str()));
+    }
+    if private_host_literal(u.host_str().unwrap_or("")) {
+        return Err(format!("下载地址主机不得为回环/私网/链路本地字面量: {}", u.host_str().unwrap_or("")));
+    }
+    Ok(u.as_str().to_string())
+}
+
 // 镜像是壳全部网络动作的基础设施，不是「下载 Node 的辅助」：引导开始即后台预热（不阻塞任何步骤），
 // 结果任何时刻经 cached() 可读（无网络 I/O）并写透诊断串。旧引导只在缺 Node/版本过低才调 probeMirrorThen，
 // Node 达标的主力用户永远看不到镜像结果，现与「是否需要下载 Node」解耦。
@@ -460,19 +587,9 @@ pub fn warmup_async() {
                 npm_probes: mp,
                 at: now_secs(),
             };
-            // 必须把选中的 npm 源与延迟落盘（并刷新 checked_at）：只放内存快照的话，
-            //   registry.json 的 selected 永远是 null，内核「优先采用壳投放的 selected」分支
-            //   永不执行，跨仓「同源」承诺失效。只在探测确实得到结果时写，
-            //   避免把「全不可达」写成一次有效选择。
-            let mut m = m;
-            if let (Some(best), Some(ms)) = (snap.npm_best.clone(), snap.npm_latency_ms) {
-                m.selected_npm = Some(best);
-                m.selected_npm_latency_ms = Some(ms as u64);
-                m.checked_at = Some(now_secs());
-                if let Err(e) = save(&m) {
-                    crate::update::log(&format!("预热结果落盘失败（不影响本次引导）: {}", e));
-                }
-            }
+            // 结果必须落盘并重投契约（规则只在一处，见 record_npm_measurements）：只放内存快照的话，
+            //   内核拿到的永远是「壳没测过」，它会自己再跑一轮同样的探测。
+            record_npm_measurements(&npm_p);
             // 与 `cached()` 同一把锁、同一种毒处理：毒锁里的值仍是完好的快照，丢掉等于白测一轮。
             match warm().lock() {
                 Ok(mut g) => *g = Some(snap),
@@ -487,7 +604,7 @@ pub fn warmup_async() {
 
 #[cfg(test)]
 mod tests {
-    use super::artifact_candidates;
+    use super::*;
 
     fn url(s: &str) -> tauri::Url {
         tauri::Url::parse(s).expect("测试内的 URL 必须是合法的")
@@ -543,5 +660,149 @@ mod tests {
         let npm = url("https://unpkg.com/@dsh-sup/shell-linux-x64@1.2.0/artifact/dsh-supervisor_1.2.0_amd64.deb");
         let nover = strs(&artifact_candidates(&npm, ""));
         assert_eq!(nover.len(), 2, "无版本号时只保留 npm 同路径候选: {:?}", nover);
+    }
+
+    /// 形态尺 golden vectors，与内核 test/npm-resolution-test.js 的 C-m 同表：两仓语言不同、
+    /// 只能各有一份实现，所以靠同一张表钉住同一个答案（表若分叉，先红在这里）。
+    #[test]
+    fn registry_base_golden_vectors() {
+        let accepted: [(&str, &str); 7] = [
+            ("https://registry.npmmirror.com", "https://registry.npmmirror.com"),
+            ("  https://registry.npmmirror.com/  ", "https://registry.npmmirror.com"),
+            ("https://repo.huaweicloud.com/repository/npm/", "https://repo.huaweicloud.com/repository/npm"),
+            ("https://mirrors.cloud.tencent.com/npm", "https://mirrors.cloud.tencent.com/npm"),
+            ("https://x.example/a//", "https://x.example/a"),
+            ("http://192.168.1.10:4873", "http://192.168.1.10:4873"),
+            ("http://localhost:4873", "http://localhost:4873"),
+        ];
+        for (raw, want) in accepted {
+            assert_eq!(registry_base(raw).ok().as_deref(), Some(want), "合法基址被判死: {}", raw);
+        }
+        let rejected: [&str; 8] = [
+            "",
+            "   ",
+            "not-a-url",
+            "ftp://mirror.example/pub",
+            "https://user:pass@registry.example.com",
+            "https://registry.example.com?token=1",
+            "https://registry.example.com/doc/#frag",
+            "https://registry.example.com /npm",
+        ];
+        for raw in rejected {
+            assert!(registry_base(raw).is_err(), "非法基址被放过: {:?}", raw);
+        }
+        // 主机维度不在配置这把尺里：家庭局域网里的 Verdaccio 也是一个正当的镜像目录条目。
+        assert!(registry_base("http://192.168.1.10:4873").is_ok());
+    }
+
+    /// 私网主机字面量表，与内核 `shared/ip.js::isPrivateHostLiteral` 及本文件形态尺同表
+    /// （内核 test/npm-resolution-test.js 的 C-m 是另一半）。两仓语言不同，判据只能各写一遍，
+    /// 所以整段边界由这张表钉：127/8 与 0/8 曾被两侧各判一半（壳认整段、内核只认 127.0.0.1）。
+    #[test]
+    fn private_host_literal_golden_vectors() {
+        let private: [&str; 16] = [
+            "127.0.0.1", "127.0.0.2", "10.1.2.3", "172.16.0.1", "192.168.1.10",
+            "169.254.169.254", "100.64.1.2", "100.127.0.1", "0.0.0.0", "0.1.2.3",
+            "224.0.0.1", "239.1.2.3", "localhost", "verdaccio.internal", "nas.local", "intranet.home.arpa",
+        ];
+        for h in private {
+            assert!(private_host_literal(h), "该主机必须判为非公网: {}", h);
+        }
+        let public: [&str; 7] = [
+            "registry.npmmirror.com", "cdn.jsdelivr.net", "1.1.1.1", "8.8.8.8",
+            "172.32.0.1", "100.128.0.1", "169.253.1.1",
+        ];
+        for h in public {
+            assert!(!private_host_literal(h), "公网主机被误判为私网: {}", h);
+        }
+        // IPv6 整族（含带方括号的 URL hostname 形态）与单标签短名一律非公网信任集。
+        for h in ["::1", "fe80::1", "[::1]", "[fd00::1]", "intranet", ""] {
+            assert!(private_host_literal(h), "该主机必须判为非公网: {:?}", h);
+        }
+        // 大小写不敏感：URL 解析后主机已小写，但调用方也可能直接传配置原文。
+        assert!(private_host_literal("LocalHost"));
+    }
+
+    /// 产物地址（registry 给的 `dist.tarball`）与配置基址差在两个方向上：查询串必须放过
+    /// （签名 CDN 的凭据参数就在 query 里），主机必须公网可达（那个主机是 registry 选的，不是操作者选的）。
+    #[test]
+    fn asset_url_allows_signed_query_but_not_private_hosts() {
+        assert_eq!(
+            asset_url("https://cdn.example.com/a/b.tgz?sig=1&x=2").ok().as_deref(),
+            Some("https://cdn.example.com/a/b.tgz?sig=1&x=2")
+        );
+        assert!(asset_url("https://registry.npmjs.org/@dsh-sup%2Fdsh-core-linux-x64/-/dsh-core-linux-x64-0.1.6.tgz").is_ok());
+        let rejected: [&str; 9] = [
+            "http://169.254.169.254/latest/meta-data/pkg.tgz",
+            "http://127.0.0.1:4873/pkg.tgz",
+            "http://[::1]:8080/pkg.tgz",
+            "http://localhost:4873/pkg.tgz",
+            "http://100.64.1.2/pkg.tgz",
+            "http://verdaccio.internal/pkg.tgz",
+            "file:///etc/passwd",
+            "https://u:p@host.example.com/a.tgz",
+            "https://host.example.com/a.tgz#sha512-x",
+        ];
+        for raw in rejected {
+            assert!(asset_url(raw).is_err(), "该产物地址必须被拒: {}", raw);
+        }
+    }
+
+    /// 契约形状：键集合**等值**而非「含 catalog」—— 回潮一个 mode/selected 会红在这里，
+    /// 而只数条数的话它照样绿。
+    #[test]
+    fn contract_doc_is_evidence_only() {
+        let m = Mirrors {
+            npm: vec!["https://registry.npmmirror.com".to_string()],
+            npm_measurements: vec![Measurement {
+                origin: "https://registry.npmmirror.com".to_string(),
+                ok: true,
+                latency_ms: Some(42),
+                error: None,
+                checked_at: 1_700_000_000,
+            }],
+            ..Default::default()
+        };
+        let d = contract_doc(&m);
+        let mut keys: Vec<String> = d
+            .as_object()
+            .expect("契约必须是 JSON 对象")
+            .keys()
+            .map(|k| k.to_string())
+            .collect();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec!["catalog", "measurements", "probe", "schema", "writtenAt", "writtenBy"]
+                .iter().map(|s| s.to_string()).collect::<Vec<String>>(),
+            "契约键集合变了（多出来的那个大概率是选择字段回潮）: {:?}",
+            keys
+        );
+        assert_eq!(d["schema"], serde_json::json!(CONTRACT_SCHEMA));
+        assert_eq!(d["probe"]["timeoutMs"], serde_json::json!(PROBE_TIMEOUT.as_millis() as u64));
+        let ms = d["measurements"].as_array().expect("measurements 须为数组");
+        assert_eq!(ms[0]["latencyMs"], serde_json::json!(42));
+        assert_eq!(ms[0]["ok"], serde_json::json!(true));
+        assert!(ms[0]["error"].is_null(), "没有拒因写 null，不写空串（面板据此区分失败与没失败）");
+    }
+
+    /// 落盘往返：缺 checkedAt 的一条必须被丢 —— 没有时间就无法判新鲜，留着等于让过期结论冒充证据。
+    #[test]
+    fn measurement_round_trip_drops_undated_entries() {
+        let m = Measurement {
+            origin: "https://a.example".to_string(),
+            ok: false,
+            latency_ms: None,
+            error: Some("HTTP 404".to_string()),
+            checked_at: 7,
+        };
+        let back = measurement_from(&m.json()).expect("往返必须成功");
+        assert_eq!(back.origin, m.origin);
+        assert_eq!(back.checked_at, 7);
+        assert!(!back.ok);
+        assert!(back.latency_ms.is_none());
+        assert_eq!(back.error.as_deref(), Some("HTTP 404"));
+        assert!(measurement_from(&serde_json::json!({"origin": "https://a.example", "ok": true})).is_none());
+        assert!(measurement_from(&serde_json::json!({"origin": "  ", "ok": true, "checkedAt": 7})).is_none());
     }
 }

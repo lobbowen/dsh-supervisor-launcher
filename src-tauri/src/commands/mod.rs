@@ -595,6 +595,9 @@ pub async fn mirror_status() -> ShellResult<serde_json::Value> {
     })
     .await
     .map_err(|e| ShellError::ipc(e.to_string()))?;
+    // 这一轮是**刚测出来的**逐源结论，必须落盘并重投契约：只在面板上显示的话，内核选源时
+    // 仍按上一轮（可能已过期）的证据走，「面板一个源、下载另一个源」就是这么分叉的。
+    crate::mirror::record_npm_measurements(&npm_probes);
     let fmt = |v: Vec<crate::mirror::Probe>| {
         v.into_iter()
             .map(|p| serde_json::json!({ "source": p.source, "ok": p.ok, "latencyMs": p.latency_ms }))
@@ -606,29 +609,29 @@ pub async fn mirror_status() -> ShellResult<serde_json::Value> {
         "npm": m.npm,
         "shell": m.shell,
         "selectedNode": m.selected_node,
-        "selectedNpm": m.selected_npm,
         "nodeProbes": fmt(node_probes),
         "npmProbes": fmt(npm_probes),
     }))
 }
 
 /// 保存用户自定义镜像（引导页失败时的自助出口）。
-/// 入参为 URL 列表；保存后使缓存失效，并在 npm 类型时立即导出给内核（若已安装）。
+/// 入参为 URL 列表；校验用壳的形态尺（与内核同一把，见 mirror::registry_base），
+/// 保存后使缓存失效，并在 npm 类型时立即导出给内核（若已安装）。
 #[tauri::command]
 pub fn mirror_set(kind: String, urls: Vec<String>) -> ShellResult<serde_json::Value> {
     let mut m = crate::mirror::load();
-    let list: Vec<String> = urls
-        .into_iter()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
+    let mut list: Vec<String> = Vec::new();
+    for raw in &urls {
+        if raw.trim().is_empty() {
+            continue;
+        }
+        let base = crate::mirror::registry_base(raw)?;
+        if !list.iter().any(|x| x == &base) {
+            list.push(base);
+        }
+    }
     if list.is_empty() {
         return Err("镜像列表不能为空".into());
-    }
-    for u in &list {
-        if !(u.starts_with("http://") || u.starts_with("https://")) {
-            return Err(format!("镜像地址必须以 http(s):// 开头：{}", u).into());
-        }
     }
     match kind.as_str() {
         "node" => m.node = list.clone(),
@@ -636,13 +639,13 @@ pub fn mirror_set(kind: String, urls: Vec<String>) -> ShellResult<serde_json::Va
         "shell" => m.shell = list.clone(),
         _ => return Err(format!("未知镜像类型: {}（支持 node / npm / shell）", kind).into()),
     }
-    m.checked_at = None; // 使缓存失效，下次重新测速
     if kind == "npm" {
-        m.selected_npm = None; // 用户改了候选集，旧的选择结果失效
+        // 逐源结论与目录同源：候选集换了，上一轮探测说的是另一批地址，留着会让内核按旧证据选源。
+        m.npm_measurements.clear();
     }
     crate::mirror::save(&m)?;
     if kind == "npm" {
-        // 导出**完整契约**（schema/catalog/selected/probe），而非仅 origins。
+        // 导出**完整契约**（schema/catalog/probe/measurements），而非仅地址列表。
         let _ = crate::mirror::export_to_kernel(&m);
     }
     crate::update::log(&format!("镜像配置已更新 {}: {}", kind, list.join(", ")));
