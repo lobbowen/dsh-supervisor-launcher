@@ -2,6 +2,29 @@
 
 本文件记录桌面壳（`dsh-supervisor-gui`，公开仓 `lobbowen/dsh-supervisor-launcher`）的重要变更。
 
+## [未发布]
+
+### 镜像契约文档同步（P0-D，与内核 `refactor/p0d-gates-docs` 同批）
+
+1.2.9 把镜像源的证据与选择拆成两份文件，代码收口了、文档没有：`docs/` 里仍以 schema 2 的形状描述
+`registry.json`，仍以「壳写 `selected`、内核优先采用」描述所有权。读文档的人据此写出的下一版壳会
+把选择字段投回契约，而那份文件已不允许有第二个写者。本批把规范面改成与代码一致：
+
+- `DESIGN-BOUNDARY.md` §4.1 重写为**两份文件各一份形状**（证据 schema 3 + 选择 schema 1），写清键的
+  来源（`pathTemplate` 是 `core.rs::package_name` 按本机平台事实拼出的具体包名、`timeoutMs` 由
+  `PROBE_TIMEOUT` 派生）与内核采用 `measurements` 的三条同时成立条件；§4.2 投放时机改为
+  「启动无条件 + 每轮测速后 + 选定 Node 源后」，并写明内核侧候选顺序
+  （`policies.effectiveOrigins`：选择文档 origins → 契约 catalog → 最小兜底）。
+- `DESIGN-COMPLETE.md`：契约清单与「逐项核实」表按现状重列（3 个投放点、schema 3、新增
+  `registry-choice.json` 一行）；§18.1/§18.2 改为现行形状；§27.2 的 `selected` 表述改为
+  「已随 schema 3 废除，内核按三条条件采用证据」；§29 顶部加**提案原貌**横幅（`M3-a` 写的
+  `selected`、`_selectedFromContract()` 都已不存在，别再照它找代码）；§34.1 的 AFTER 图重画成
+  证据/选择两条线。
+- `DESIGN-SHELL-ARCHITECTURE.md` §3.2：`CONTRACT_SCHEMA=3`、补内核选择文档的只读关系，不变量 C1 改成
+  三份文件各一个写者，C4 的契约内容补 `measurements`。
+- `DEVELOPMENT-TRACK.md` §2：两仓文件契约清单补 `registry-choice.json` 与 `update-journal.json`。
+- 1.2.9 条目末尾的「未在本批处理」两项里，文档同步一项由本批收口；`probe_all` 的逐跳复验（S4）仍开放。
+
 ## [1.2.9]（2026-09-24）
 
 ### 镜像契约 schema3 与两文件所有权拆分（P0-C，跨仓与内核同批；**内核 0.1.6-BETA.10 已先发**）

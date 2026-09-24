@@ -188,7 +188,8 @@ latform/*::node_artifact` |
 
 ```
 契约层（与内核的唯一耦合面）—— 每个契约一个模块，落点均在 <状态根>/{{supervisor,shell}}
-  ├── mirror.rs           写 <状态根>/supervisor/registry.json（CONTRACT_SCHEMA=2；壳唯一写入方）
+  ├── mirror.rs           写 <状态根>/supervisor/registry.json（CONTRACT_SCHEMA=3；壳唯一写入方，只交证据不交选择）
+  │                       内核自持的选择文档 registry-choice.json 由 core.rs::kernel_choice **只读**
   ├── runtime_contract.rs 写 <状态根>/supervisor/runtime.json（Node/npm/PATH，schema 2）
   ├── core_contract.rs    写 <状态根>/supervisor/core.json（内核位置契约，schema 1）
   └── update.rs           写 <状态根>/shell/identity.json（壳身份 + phase 心跳）
@@ -196,10 +197,10 @@ latform/*::node_artifact` |
 
 | 不变量 | 内容 |
 |---|---|
-| **C1** | 每个契约文件**只有一个写入方**（壳写 `registry.json`；内核写 `update-journal.json`）|
+| **C1** | 每个契约文件**只有一个写入方**（`registry.json` 壳写内核读；`registry-choice.json` 内核写壳只读；`update-journal.json` 内核写）—— 镜像源的**证据**与**选择**因此不可能互相覆盖 |
 | **C2** | 契约带 `schema` 版本；不匹配时**明确拒绝**并记录，不静默降级 |
 | **C3** | 写入必须**原子**（`tmp + rename`），读取必须容忍缺失 |
-| **C4** | 壳启动时**必须导出完整契约**（含 `catalog` + `probe`）—— 由 `mirror::export_on_boot` 在 setup 早期无条件执行，线上版本探测失败只记日志，不得让契约不落地 |
+| **C4** | 壳启动时**必须导出完整契约**（含 `catalog` + `probe` + `measurements`）—— 由 `mirror::export_on_boot` 在 setup 早期无条件执行，线上版本探测失败只记日志，不得让契约不落地 |
 
 ### 3.2b 运行期启动契约（Runtime Launch Contract，2026-09-15）
 

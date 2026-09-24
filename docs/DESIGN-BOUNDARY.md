@@ -97,8 +97,8 @@
 | 目录（catalog）| **壳是唯一真源**（它有超集：Node 10 源 + npm 6 源 + 壳 2 源）|
 | 探测方法与排序 | **规格随产物投放**，内核按其执行 → 两侧给出**同一答案** |
 | 内核的硬编码副本 | 降级为**最小兜底**（契约缺失时用），不再是一等来源 |
-| 投放时机 | **壳启动时 + 选择变化时 + 小版本升级后**（修掉「只在手动改时导出」的缺口）|
-| 契约文件 | 扩展现有 `<状态根>/supervisor/registry.json`（内核已在读，不新建文件；路径记法见 §四 开头）|
+| 投放时机 | **壳启动时无条件导出**（`main.rs:228` → `mirror.rs::export_on_boot`）+ **每轮 npm 逐源测速后重投**（`mirror.rs::record_npm_measurements`）+ **Node 源选定后重投**（`node.rs:151`）。探测失败也要写 —— 契约是内核的增强，不是壳启动的前提 |
+| 契约文件 | **拆成两份，按写者分**：`<状态根>/supervisor/registry.json` = **壳写内核读的证据**（目录 + 探测规格 + 逐源实测，schema 3）；`<状态根>/supervisor/registry-choice.json` = **内核唯一写者的选择**（`mode`/`manualOrigin`/用户候选 `origins`）。壳从不写选择，内核从不写目录（路径记法见 §四 开头）|
 
 **为什么不是「内核调壳」**：内核在无壳时也要选源（自升级、装 DSH/插件）—— R2。
 
@@ -167,39 +167,65 @@
 > `<状态根>/shell/`（壳读写）；`~/.dsh/{supervisor,shell}` 仅是启动期一次性前向迁移的**源**，
 > 不再是任何读写路径。
 
-### 4.1 契约文件：`<状态根>/supervisor/registry.json`
+### 4.1 契约文件：`registry.json`（证据）与 `registry-choice.json`（选择）
 
-由**壳**写，**内核**读。扩展现有格式（加 `schema` / `catalog` / `probe`），保持向后兼容：
+同一份文件不允许有两个写者。schema 2 时代「证据」与「选择」挤在 `registry.json` 里，留下了两处互相
+让步：内核读回原文只为覆盖 `mode/manualOrigin/origins` 三个键；壳见到 `mode=manual` 就得冻结自己写的
+契约。schema 3 按写者拆开后，两处让步一起删除 —— **壳只投证据，选择归内核**。
+
+`<状态根>/supervisor/registry.json` —— **壳写、内核只读**（`mirror.rs::contract_doc`，键集合由壳单测
+`contract_doc_is_evidence_only` 逐键**等值**判定，多出一个 `mode`/`selected` 就红在这里）：
 
 ```jsonc
 {
-  "schema": 2,                      // 新增：契约版本（内核校验，不匹配则用兜底并记录）
-  "writtenBy": "shell@1.0.9",       // 新增：谁写的、什么版本（便于排障）
-  "writtenAt": 1789147076,          // 新增
-  "mode": "auto",                   // 既有：auto | manual
-  "manualOrigin": "https://registry.npmmirror.com",   // 既有
-  "catalog": [ "…" ],               // 新增：全集（此前只有被选中的 origins）
-  "selected": {                     // 新增：本次选择结果（含依据）
-    "origin": "https://registry.npmmirror.com",
-    "latencyMs": 57,
-    "checkedAt": 1789147070
-  },
-  "probe": {                        // 新增：探测规格 —— 让内核与壳给出同一答案
+  "schema": 3,                      // 内核 SUPPORTED_SCHEMA 校验：高于它的值整份不采用（contract-schema-newer）
+  "writtenBy": "shell@1.2.9",       // 谁写的、什么版本（排障用，不参与选源）
+  "writtenAt": 1789147076,          // 同上
+  "catalog": [ "…" ],               // 镜像目录全集（壳持有的那份超集）
+  "probe": {                        // 探测规格 —— 内核照它执行即可与壳得到同一答案
     "kind": "package-metadata",
-    "pathTemplate": "@dsh-sup%2Fdsh-core-{platform}",
-    "timeoutMs": 6000
-  }
+    "pathTemplate": "@dsh-sup/dsh-core-win-x64",   // 本机平台事实拼出的具体包名（core.rs::package_name）
+    "timeoutMs": 20000              // 由壳 PROBE_TIMEOUT（20s）派生：两侧超时不同会让「介于两者之间」的源一侧可达、一侧不可达
+  },
+  "measurements": [                 // 逐源实测：这是**证据**不是结论，内核按条件采用
+    { "origin": "https://…", "ok": true, "latencyMs": 57, "error": null, "checkedAt": 1789147070 }
+  ]
 }
 ```
 
-### 4.2 生命周期（补齐：契约需携带 catalog + probe 规格）
+内核侧展开探测目标的是 `policies.js::resolveProbe`：`kind='package-metadata'` 且模板里有 `{platform}`
+占位时按平台标签替换，模板已是具体包名时原样使用 —— 两条路得到同一个 URL；宿主不可产平台标签时**必须**
+退化为 `/-/ping`，否则字面量 `undefined` 会被拼进路径而恒 404。
+
+内核采用 `measurements` 的条件是三条同时成立（`src/platform/distribution/policies.js::shellProbeResults`）：
+新鲜（`SHELL_PROBE_MAX_AGE_SEC` = 30 分钟内）、**覆盖本轮全部候选**、每源过形态闸；否则整批回退内核自测。
+「只有全覆盖时『信壳测过』才等于『自己不用再测』」—— 缺一个源就下结论，面板的逐源卡会变成半空。
+
+`<状态根>/supervisor/registry-choice.json` —— **内核写（唯一写者，`src/platform/distribution/registry-config.js`，
+`CHOICE_SCHEMA = 1`，落盘 0600）、壳只读**：
+
+```jsonc
+{
+  "schema": 1,
+  "updatedAt": 1789147076,
+  "mode": "auto",                   // auto | manual —— 用户在面板里固定过源没有
+  "manualOrigin": "https://registry.npmmirror.com",
+  "origins": [ "…" ]                // 用户自己维护的候选（优先于契约 catalog）
+}
+```
+
+壳读它只为一件事（`src-tauri/src/core.rs::kernel_choice`）：用户在内核面板固定过源时，壳的内核安装/更新
+必须打在同一个源上；`origins` 参与候选优先序，`updatedAt` 忽略。
+
+### 4.2 生命周期
 
 ```
-壳启动              → 导出（若契约缺失或 schema 过期）
-用户改镜像设置       → 导出（既有行为）
-壳小版本升级后       → 导出（含 schema 迁移）
-内核读取             → 优先契约；缺失/损坏/schema 不匹配 → 用最小兜底并写事件
-内核复测（契约过期） → 按契约的 probe 规格执行 → 与壳同法
+壳启动（main.rs:228）      → 无条件导出（探测失败也要写：内核完全拿不到源比拿到旧结果更糟）
+每轮 npm 逐源测速后        → 落盘并重投（record_npm_measurements：只放内存快照的话重启就丢）
+Node 源选定后（node.rs:151）→ 重投目录（Node 发行源与 npm 逐源实测无关，不碰 measurements）
+用户在面板改选择            → 内核写 registry-choice.json，壳不感知也不需要感知（契约里从没写过选择）
+内核读取                   → 选择文档 origins → 契约 catalog → 最小兜底（policies.effectiveOrigins 的顺序）
+内核复测                   → 契约证据不满足三条采用条件时，按契约 probe 规格自测 → 与壳同法
 ```
 
 ### 4.3 其它契约

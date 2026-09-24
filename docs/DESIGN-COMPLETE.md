@@ -141,7 +141,8 @@ ManagedRegistry.heartbeat(5000)                objects.js:289-324
 |---|---|---|---|
 | `<状态根>/supervisor/config.json` | 文件 | 内核写 / **壳读** | `apiPort`、`closeAction`(hide\|exit)、`apiAccessKey`、`shellWatchdog`…（**壳读内核配置的唯一入口**：`env.rs::config_json()`，一律真 JSON 解析，禁字符串扫描）|
 | `<状态根>/supervisor/runtime.json` | 文件 | **壳写** / 内核读 | schema 2 工具链契约：node（path/binDir/version）+ npm（path/**args**/**version**）+ 旧键 `nodePath`/`nodeVersion`/`minNode`。唯一写入方 `runtime_contract::write`（`record_runtime_meta` 已删除，见 §30.2 现状）|
-| `<状态根>/supervisor/registry.json` | 文件 | **壳写** / 内核读 | 镜像源契约 schema 2：`{mode,origins,manualOrigin,catalog,selected,probe}`（壳 `mirror.rs::export_to_kernel*` 写；内核 `platform/distribution/registry.js` 消费、`platform/contract/registry.js` 校验）|
+| `<状态根>/supervisor/registry.json` | 文件 | **壳写** / 内核只读 | 镜像源**证据**契约 schema 3：`{schema,writtenBy,writtenAt,catalog,probe,measurements}`（壳 `mirror.rs::contract_doc` 造形、`export_to_kernel` 落盘；内核 `platform/contract/registry.js` 校验、`platform/distribution/{registry,policies}.js` 消费）|
+| `<状态根>/supervisor/registry-choice.json` | 文件 | **内核写（唯一写者）** / 壳只读 | 镜像源**选择** schema 1：`{schema,updatedAt,mode,manualOrigin,origins}`（内核 `platform/distribution/registry-config.js` 写；壳 `core.rs::kernel_choice` 只读 `mode==='manual'` 的 `manualOrigin` 与 `origins`，用来把内核安装/更新打在同一个源上）|
 | `<状态根>/shell/identity.json` | 文件 | **壳写** / 内核读 | `{version,platform,arch,installKind,selfUpdateCapable,phase,pid,startedAt,lastSeenAt,exe}`（`update.rs::init_identity` 写；内核 `domains/shell/journal.js` 读）|
 | `<状态根>/shell/update-journal.json` | 文件 | 内核写 / 内核读（面板与 CLI 经 `/shell/status`）| 壳更新账本 `{from,to,confirmed}`；**不含隐式回退/拉黑/冷却字段**（紧急回退走发布通道契约的 `rollback` dist-tag，不经此账本）（`domains/shell/journal.js`）|
 | 守卫服务定义 | 文件 | **壳写** / 服务管理器读 | systemd unit / LaunchAgent plist / schtasks（`platform/{linux,macos,windows}.rs` 的 `ServiceControl` 实现）|
@@ -155,11 +156,17 @@ ManagedRegistry.heartbeat(5000)                objects.js:289-324
 |---|---|---|---|
 | `config.json` | 内核 | （`supervisor.js:735-750`）| |
 | `runtime.json` | 壳 | 直接 `fs::write`（`node.rs:387`）| |
-| `registry.json` | **壳写，2 个调用点**（`node.rs:178` 于 `latest_lts()` 内 / `main.rs:1079` 于手动改镜像）—— 但**只写 `origins`**，不写 `catalog`/`probe` | （`mirror.rs:213` tmp+rename）| |
+| `registry.json` | **壳写，3 个投放点**（`mirror.rs::export_on_boot` 由 `main.rs:228` 在 setup 无条件调 / 每轮逐源测速后 `record_npm_measurements` 重投 / `node.rs:151` 选定 Node 源后重投）—— 内容是**证据全集**（catalog + probe + measurements），不含任何选择键 | （`mirror.rs::export_to_kernel` tmp+rename）| ✓ 3 |
+| `registry-choice.json` | **内核唯一**（`platform/distribution/registry-config.js`）| 内核侧原子写 + 0600 | 1 |
 | `identity.json` | 壳 | （`update.rs:write_json` tmp+rename）| |
 | `update-journal.json` | 内核 | （`domains/shell/index.js:34-40`）| |
 
 → **契约面的三个结构缺口**：① `registry.json` **内容不完整**（只有 `origins`，无 `catalog` 与 `probe` 规格 → 两侧仍会选到不同的源；且 `latest_lts()` 失败时不导出）；② 全部无 schema 版本；③ `runtime.json` 非原子写。
+
+> **缺口 ①② 的现状**：已由 schema 3 收口 —— 契约携带 catalog/probe/measurements 全集、启动即无条件导出
+> （探测失败也写），并把**选择**（`mode`/`manualOrigin`/`origins`）整块搬到内核自持的
+> `registry-choice.json`。上一行的本表快照与 §27/§29/§34 里描述 schema 2 形状的段落都是**当时的提案**，
+> 现行形状以 `DESIGN-BOUNDARY.md` §4.1 与本表为准。缺口 ③ 不在本议题内。
 
 ---
 
@@ -450,40 +457,47 @@ pub enum ShellError {
 
 ```
 一契约一模块（当前落在 src-tauri/src/ 顶层，尚未收进 domain/contract/ 子层）
-  ├── mirror.rs           写 <状态根>/supervisor/registry.json（CONTRACT_SCHEMA=2；**壳是唯一写入方**）
+  ├── mirror.rs           写 <状态根>/supervisor/registry.json（CONTRACT_SCHEMA=3；**壳是唯一写入方，且只交证据**）
+  │                       内核自持的 registry-choice.json 由 core.rs::kernel_choice 只读
   ├── runtime_contract.rs 写 <状态根>/supervisor/runtime.json（schema 2，原子写 tmp+rename）
   ├── core_contract.rs    写 <状态根>/supervisor/core.json（schema 1，内核位置契约）
   └── update.rs           写 <状态根>/shell/identity.json（init_identity + phase 心跳）
 schema 常量就在各自模块内（无独立 schema.rs）；跨仓握手的 schema 常量另有门禁锁定。
 ```
 
-### 18.1 `registry.json` 升级（消费者内核已就位）
+### 18.1 `registry.json` 现行形状（schema 3：只有证据，没有选择）
 
 ```jsonc
 {
-  "schema": 2,                          // 新增：契约版本
-  "writtenBy": "shell@1.0.9",           // 新增：谁写的
+  "schema": 3,                            // 内核 SUPPORTED_SCHEMA=3 校验，高于它的值整份不采用
+  "writtenBy": "shell@1.2.9",             // CARGO_PKG_VERSION
   "writtenAt": 1789147076,
-  "mode": "auto",                       // 既有
-  "manualOrigin": "https://registry.npmmirror.com",
-  "catalog": [ "…" ],                   // 新增：全集（此前只有被选中的）
-  "selected": { "origin": "…", "latencyMs": 57, "checkedAt": 1789147070 },
-  "probe": {                            // 新增：探测规格 → 两侧同一答案（修 O2）
+  "catalog": [ "…" ],                     // 镜像目录全集
+  "probe": {                              // 探测规格 → 两侧同一答案（修 O2）
     "kind": "package-metadata",
-    "pathTemplate": "@dsh-sup%2Fdsh-core-{platform}",
-    "timeoutMs": 6000
-  }
+    "pathTemplate": "@dsh-sup/dsh-core-win-x64",   // core.rs::package_name 按本机平台事实拼出
+    "timeoutMs": 20000                    // 由 PROBE_TIMEOUT 派生
+  },
+  "measurements": [                       // 逐源实测（证据）：内核按三条采用条件才信
+    { "origin": "https://…", "ok": true, "latencyMs": 57, "error": null, "checkedAt": 1789147070 }
+  ]
 }
 ```
 
-### 18.2 投放时机（补齐内容 + 补齐时机）
+键集合由 `mirror.rs` 的单测 `contract_doc_is_evidence_only` 逐键**等值**钉住：回潮一个 `mode` /
+`manualOrigin` / `selected` 就红在这里。选择面（`mode` / `manualOrigin` / 用户候选 `origins`）住在内核
+自持的 `registry-choice.json`（`CHOICE_SCHEMA = 1`，内核唯一写者），完整形状与采用条件见
+`DESIGN-BOUNDARY.md` §4.1。
+
+### 18.2 投放时机
 
 ```
-壳启动              → 导出（契约缺失或 schema 过期时）
-用户改镜像设置       → 导出（既有）
-壳版本升级后         → 导出（含 schema 迁移）
-内核读取             → 优先契约；缺失/损坏/schema 不匹配 → 最小兜底 + 写事件
-内核复测（过期）     → **按契约的 probe 规格**执行 → 与壳同法
+壳启动（main.rs:228 → export_on_boot） → 无条件导出；探测失败也要写，失败只记日志不阻断引导
+每轮 npm 逐源测速后（record_npm_measurements）→ 落盘并重投（只放内存快照的话重启即丢）
+选定 Node 源后（node.rs:151）        → 重投目录（不碰 measurements：Node 发行源与 npm 实测无关）
+用户在面板改选择                      → 内核写 registry-choice.json；契约里从没写过选择，所以目录不会停更
+内核读取                             → 选择文档 origins → 契约 catalog → 最小兜底（policies.effectiveOrigins）
+内核复测                             → 证据不满足三条采用条件时按契约 probe 规格自测 → 与壳同法
 ```
 
 ### 18.3 契约不变量
@@ -711,8 +725,11 @@ pub fn export_to_kernel(m: &Mirrors, selected: Option<&Probe>) -> Result<(), Str
 - 最小兜底 = `platform/service/config.js` 的 `registries`（2 条）与 `platform/distribution/policies.js` 的 `FALLBACK_REGISTRIES`，**契约缺失/损坏时才用**：
   `https://registry.npmjs.org`（能上网）+ `https://registry.npmmirror.com`（中国网络）—— 不变量 C2；
 - 契约优先：`platform/contract/registry.js` 读 + 校验 `<状态根>/supervisor/registry.json`，
-  `platform/distribution/registry.js` 按 `契约 catalog/selected → 旧字段 → 构造参数 → 最小兜底` 逐级回退，
-  并按契约的 `probe` 规格探测（与壳同法，不变量 C4）。
+  `platform/distribution/policies.js::effectiveOrigins` 按 `内核选择文档 origins → 契约 catalog → 构造参数
+  /最小兜底` 逐级取第一个非空（目录排在用户之前会让面板里的候选编辑在壳下次重写契约时静默失效），
+  并按契约的 `probe` 规格探测（与壳同法，不变量 C4）。**`selected` 键已随 schema 3 废除**：壳交的是逐源
+  `measurements`（证据），内核是否采用由 `policies.js::shellProbeResults` 的三条同时成立的条件决定
+  （新鲜 / 覆盖本轮全部候选 / 逐源过形态闸），不满足就整批自测。
 
 ### 27.3 验收断言
 
@@ -784,6 +801,12 @@ check("A10 内核按契约 spec 探测", kernelProbeUrl(spec) === shellProbeUrl(
 ---
 
 ## 29. M3　镜像选择结果：避免两侧各测一遍
+
+> **本节是提案原貌，M3-a/M3-b 的落地形态已被推翻。** 「壳写 `selected`、内核优先采用」让同一份文件有了
+> 两个写者、并让壳的选源结果冻结了自己的目录。schema 3 改成：**壳投逐源实测 `measurements`（证据），
+> 选择归内核自持的 `registry-choice.json`**；内核是否采用那份证据由 `policies.js::shellProbeResults`
+> 的三条条件决定（新鲜 / 覆盖本轮全部候选 / 逐源过形态闸），不满足就整批自测。现行形状见
+> `DESIGN-BOUNDARY.md` §4.1。下面的 `selected` 与 `_selectedFromContract()` 都已不存在，别再照它找代码。
 
 ### 29.1 迁移动作
 
@@ -988,13 +1011,17 @@ BEFORE（三份副本 + 两种探测法 + 各自缓存）
   内核 config   ──┘     真实包          → 选 npmmirror   57ms   ← 不一致
   契约 registry.json 虽在 latest_lts()/手动改镜像时写，但**只含 origins**
 
-AFTER（壳拥有 + 内核消费 + 同一方法）
-  壳 mirror.rs（唯一所有者）
-      └─ 启动/改动/升级 → 导出 registry.json{schema:2, catalog, selected, probe}
+AFTER（证据与选择各归其位 —— schema 3 的收口形态）
+  壳 mirror.rs（registry.json 唯一所有者，只交证据）
+      └─ 启动无条件 / 每轮测速后 / 选定 Node 源后 → registry.json{schema:3, catalog, probe, measurements}
+  内核 registry-config.js（registry-choice.json 唯一写者，只握选择）
+      └─ mode / manualOrigin / origins（用户在面板维护的候选）
   内核 dist
-      ├─ 契约有 → 用 catalog + selected（不重复测速）
-      ├─ 契约过期 → 用 probe 规格复测（与壳同法 → 同答案）
+      ├─ 候选顺序 = 选择文档 origins → 契约 catalog → 最小兜底（policies.effectiveOrigins）
+      ├─ 壳证据满足三条采用条件 → 直接用 measurements（不重复测速）
+      ├─ 不满足（过期 / 没覆盖全部候选 / 形态不过闸）→ 按 probe 规格自测 → 与壳同法同答案
       └─ 契约缺失 → 2 条最小兜底 + 写事件
+  壳 core.rs::kernel_choice ← 只读选择文档，把内核安装/更新打在用户固定的同一个源上
 ```
 
 ### 34.2 环境判定（M4）
