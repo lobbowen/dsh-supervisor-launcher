@@ -2,6 +2,25 @@
 
 本文件记录桌面壳（`dsh-supervisor-gui`，公开仓 `lobbowen/dsh-supervisor-launcher`）的重要变更。
 
+## [未发布]
+
+### H10 的 A 基线按候选指向的 commit 筛：同一份内容不能当「升级前那一份」（P1）
+
+主干 run 36221615174 的两条 `install-smoke` 判红（`no assets match the file pattern`）。这不是产品缺陷，
+是判据缺陷：取 A 那一步只排除了「与 `GITHUB_REF_NAME` 同名的 tag」，而分支 run 上这个 `SELF` 恒为空 ——
+与本次构建同一 commit、由并发的 tag run 刚建出的那份 Release 因此被当成 A 下载，而那一刻它的资产往往还没传完。
+
+- `build.yml`：候选改为按**指向的 commit**（`gh api repos/…/commits/<tag>` 取 sha）与 `$GITHUB_SHA` 比对，
+  同号即跳过；解析不到 commit 的候选同样跳过。原来的 `SELF` 并列判据删除 —— tag 构建里「本次那份」
+  本就指向本次 HEAD，按 commit 筛把它一并覆盖了。跳过原因写进判红文案，不再只说「找不到可作 A 的版本」。
+- 为什么不接受「重跑一次就绿」：重跑时那份 Release 的资产已齐，A 与 B 指向同一 commit，
+  「覆盖后字节必须变」在版本未提升时本就不判，这条升级路径只剩形状 —— 假绿比判红贵。
+- `installer_smoke_coverage_test.rs` 新增 I-i：判据必须在**剥掉注释**的 job 块里真的做了 HEAD 比对、
+  真的解析了候选的 commit、且比对写在给 `A_TAG` 赋值**之前**（写在之后 = 空转）；`gh release list`
+  在该 job 内只许出现一处（两处各选各的 A，每条判据只看得见自己那份）。反向夹具覆盖旧 `SELF` 形态、
+  「比对在赋值之后」、重复推导三种，并以新形态做正向对照。
+- `docs/RELEASE-STANDARD.md` 的 H10 A/B 语义同步改写（规范与产线同口径，由 I-i 一并钉住）。
+
 ## [1.2.10]（2026-09-26）
 
 ### 观测报告投放（P7）：壳把「本机实况」交给内核的环境表单
