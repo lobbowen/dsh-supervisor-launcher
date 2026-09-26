@@ -231,6 +231,42 @@ event "install_error":    { "kind": ..., "error": "文字" }
 （同一程序 + 同一前置参数，只换尾参）。这正是 T-10 的教训：`.cmd` 垫片经 `cmd /C` 包装后
 「探针可用、消费者拉不起来」，缺陷只在其中一条代码路径上复现。
 
+---
+
+### 2.6 观测报告投放（P7，`shell_report.rs`；壳写、内核读）
+
+**这份文件只回答一个问题**：「壳最后一次看到了什么、什么时候看到的」。落点
+`<状态根>/supervisor/shell-report.json`（schema 1），与 `runtime.json`（P0 启动契约）同目录但**分权** ——
+那份参与 spawn、字段错一个字符就装不上内核；这份只给内核的环境表单与排障读，永不参与 spawn。
+
+**为什么走文件而不是上报端点**：壳与内核恒同机，本机实况的采集者就是写入者。走 HTTP 要新造带体动词、
+新开写端点、再加投递重试 —— 而那条重试会把「没送达」伪装成「已上报」。文件让「没送达」保持可见：
+内核读不到就如实标 `never-written`，不猜、不补、不重试。
+
+**载荷形态**（键名即跨仓契约，内核 `src/platform/contract/shell-report.js` 只按这些键投影）：
+
+| 键 | 内容 | 采集所有者 |
+|---|---|---|
+| `schema` / `writtenBy` / `at` | 握手版本 / `dsh-supervisor-gui@<壳版本>` / 投放时刻（**毫秒**，写成秒内核会算出近乎为零的假新鲜） | 本模块 |
+| `node` | `path` `binDir` `version` `min` `ok` | `nodeprobe::Outcome` + `node::meets_minimum` |
+| `npm` | `path` `args`（与 program **成对**）`version` `ok` | `domain::probes` 的 `NpmFact` |
+| `prefix` | `dir` `writable` `why` | `prefix` 那条记录的投影（不是第二次执行） |
+| `registry` | `best` `latencyMs` `probes[]` | `mirror::cached()`（预热缓存，零网络 I/O） |
+| `records` | 逐条探测结论，形态出自 `Record::json` | `domain::probes`（T-14） |
+
+**不变量 T-18（报告只做投影，不新造采集）**：本模块不起子进程、不执行 npm、不发网络请求；每个维度的
+结论都能追溯到既有所有者（`nodeprobe` / `domain::probes` / `mirror`）。理由与 T-14 同源：第三条采集路径
+一旦出现，「面板用的探针」「契约用的探针」「报告用的探针」就会各自给出不同答案，而这类不一致正是
+「装内核的 npm 与探针的 npm 不是同一个」的复发形态。三态一律原样透传（`null` = 壳也判不出），
+不得折成 `false`。
+
+**投放频控与失败面**：距上次投放动作不足 `DEPENDENT_TTL`（10 秒）不再投 —— 过了这个窗口 npm / prefix
+才是重新真实执行得到的结论，刷新投放时刻才名副其实；全仓**有且只有一个投放点**
+（`commands::node_status`，与启动契约同一轮探测的两个出口）。写不出去只记 `shell.log`（形态同
+`mirror::export_on_boot`）：报告是增强，绝不阻断引导，也不排队重试。
+
+判据：G-14（契约形态 + 投影纪律 + 唯一投放点，带旧形态反向夹具）。
+
 ## 3. 前端契约（引导页，冻结）
 
 ### 3.1 检测与安装顺序（并行同权，`20-env.js`）
@@ -377,6 +413,7 @@ NS.versionLabel(v)                   // 版本号形态归一（唯一实现）�
 | G-11 | 真实归档实测（T-12）：`build.yml` 必须按**全路径** `--exact` 执行 `official_artifact_installs_usable_npm`，并断言「恰好 1 passed」；测试本身须带 `#[ignore]`（短名零命中也会绿，那一步就成了空转） |
 | G-12 | 进度语义单一所有者（T-13）：`src/` 内不得有第二处发射 `install_*`；`kind` 字面量不得以裸串出现在 `InstallKind::as_str` 之外；「正在下载」「正在安装内核」不得在 `install.rs` 之外拼装；`.progress =` 在非所有者处必须显式 `Some(..)/None`；`RunState.progress` 必须是 `Option<f32>`。前置断言要求所有者**真的**发射三条事件并持有两句措辞（否则「不得有第二处」= 空转） |
 | G-13 | 环境探测记录单一所有者（T-14/T-15）：`pub enum Probe`、记录 → JSON 的字段形态（同时含 `"probe":` 与 `"note":`）、`probe_npm_usable(` 的调用，三者只允许出现在 `src/domain/probes.rs`（`probe_npm_usable` 另允许其定义处 `runtime_contract.rs`）；全仓不得有 `struct TraceEntry`；记录形态里的 `ok` 不得是裸 `bool`（与 `pub ms:` 同现即红）；前端 `.probes` 只在 `10-ui.js` 解析，且不得出现 `env_trace=`。前置断言要求所有者**真的**登记四个维度（`Probe::Node/Npm/Registry/Prefix`）、持有两种渲染（`Record::json` 与 `render`）并带缓存上界（`DEPENDENT_TTL`）与本地固定盘门槛（`is_local_fixed_dir`） |
+| G-14 | 观测报告投放侧（T-18）：`src/shell_report.rs` 必须持 schema=1 握手、文件名、七个契约键、`"at"` 与原子写（`json.tmp` + `std::fs::rename`）；不得出现 `"note":`（记录形态在 `Record::json`）、不得把三态折成 bool（`unwrap_or(false)` 等）、不得自行采集（`std::process::Command` / `probe_npm_usable(` / `ureq::`）；`shell_report::publish(` 在 `src/` **按出现次数恰好一处**（不按文件计 —— 同一文件里两处调用同样会把一轮探测投两份）且必须就在 `commands/mod.rs`，`main.rs` 必须登记该模块。前置断言要求报告**真的**引用 `nodeprobe::Outcome`、`domain::probes`、`mirror::cached()` 与 `.json()`（否则「不得自行采集」= 空转）；旧形态反向夹具必须逐条被抓到 |
 
 判据位置：`src-tauri/tests/env_toolchain_standard_test.rs`（G-7/G-8/G-13 的判据抽成纯函数，并各自带
 **旧形态反向夹具** —— 认不出旧形态的判据等于空转）。契约字段的行为面在

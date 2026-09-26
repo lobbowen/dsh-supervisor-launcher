@@ -4,6 +4,23 @@
 
 ## [未发布]
 
+### 观测报告投放（P7）：壳把「本机实况」交给内核的环境表单
+
+内核新增了一维「桌面壳所见」，读 `<状态根>/supervisor/shell-report.json`，而这份文件此前**没有写入者**：
+装了壳的机器上这一维也永远显示「壳还没报过」。排障最需要的恰好是「装内核时真正用的那套 Node/npm」，
+那只有壳知道（它的 npm 探针真实执行过，见 T-1b/T-10），内核自己解析到的可能是另一套。
+
+- 新增 `src-tauri/src/shell_report.rs`：**只做投影与投放** —— Node 结论取 `nodeprobe::Outcome`、
+  npm/prefix 与逐条记录取 `domain::probes`（形态仍出自 `Record::json`）、镜像源取 `mirror::cached()`。
+  schema 1 与内核 `src/platform/contract/shell-report.js` 的 `SUPPORTED_SCHEMA` 握手；`tmp + rename`
+  原子写（形态同 `runtime_contract::write`）；三态原样透传，`null` 不折成 `false`；写失败只记
+  `shell.log`，不阻断引导、不排队重试。
+- 投放点全仓唯一：`commands::node_status` 内、与启动契约同一轮探测的两个出口；频控下限取
+  `DEPENDENT_TTL`（10 秒）—— 过了窗口 npm/prefix 才是重新真实执行得到的结论，刷新投放时刻才名副其实。
+- 门禁 G-14（`env_toolchain_standard_test.rs`，带旧形态反向夹具）与不变量 T-18、规范 §2.6 同批落地。
+- 跨仓对侧：内核接收口与环境表单的 `shell` 维已合入内核主干（`platform/contract/shell-report.js`），
+  尚未随发布通道投放；两侧 schema 不匹配时内核整份按「读不出」处理，不会猜字段。
+
 ### 镜像契约文档同步（P0-D，与内核 `refactor/p0d-gates-docs` 同批）
 
 1.2.9 把镜像源的证据与选择拆成两份文件，代码收口了、文档没有：`docs/` 里仍以 schema 2 的形状描述
