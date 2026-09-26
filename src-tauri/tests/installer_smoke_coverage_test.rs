@@ -19,6 +19,7 @@
 //!   I-f  判据形态：装完必须读**结论**（自报版本 + 包管理器版本 + 落盘 exe + 覆盖后字节变化）
 //!   I-g  启动链夹具单源（不得再在 workflow 里内联第二份伪内核）
 //!   I-h  反向：以上判据能识别旧形态（门禁非空转）
+//!   I-i  取 A 的基线按候选指向的 commit 筛（与本次 HEAD 同一份内容的不配当「升级前那一份」）
 
 use std::fs;
 use std::path::PathBuf;
@@ -248,4 +249,94 @@ fn i_h_reverse_judgements_are_not_vacuous() {
     let commented = "  # 会执行 sudo dpkg -i 安装\n";
     assert!(!strip_comments(commented).contains("sudo dpkg -i"), "I-h FAIL 注释未被剥掉");
     eprintln!("I-h PASS 反向判据有效");
+}
+
+/// 取 A 那一步的形态检查，返回违规清单（空 = 合规）。纯函数：反向夹具要靠它证明判据认得旧形态。
+/// 输入必须是**剥掉注释**的 job 块 —— 写在 YAML 注释里的承诺不算执行证据（见 strip_comments）。
+fn a_baseline_problems(job: &str) -> Vec<String> {
+    let mut v = Vec::new();
+    if job.is_empty() {
+        v.push("没有 install-smoke job，A 基线无从谈起".to_string());
+        return v;
+    }
+    // 计数单位 = 「自己推导一遍 A 候选」的处数：第二处一旦存在，两处会在不同 run 里选出不同的 A，
+    // 而每条判据只看得见自己那份（同一文件里两处同样各算一次，不按文件计）。
+    let picks = job.matches("gh release list").count();
+    if picks != 1 {
+        v.push(format!("A 的候选必须只在一处推导（gh release list 实为 {} 处）", picks));
+    }
+    if !job.contains("gh release download") {
+        v.push("没有从 Release 下载 A 的动作，候选筛得再对也拿不到安装包".to_string());
+    }
+    match job.find("GITHUB_SHA") {
+        None => v.push(
+            "没把候选与本次 HEAD 比对：同一 commit 的 Release 会被当成「升级前那一份」，\
+             而它刚建出时资产常还没传完"
+                .to_string(),
+        ),
+        Some(cmp) => {
+            if !job.contains("commits/") {
+                v.push("没解析候选 Release 指向的 commit，比对只能停在 ref 名上".to_string());
+            }
+            match job.find("A_TAG=\"$t\"") {
+                None => v.push("没有给 A 赋值的语句，判据无的放矢".to_string()),
+                Some(pick) if pick < cmp => {
+                    v.push("首条候选未经比对就被选为 A（比对写在赋值之后 = 空转）".to_string())
+                }
+                Some(_) => {}
+            }
+        }
+    }
+    v
+}
+
+#[test]
+fn i_i_a_baseline_must_differ_from_this_head() {
+    let y = strip_comments(&workflow());
+    let job = job_block(&y, "install-smoke");
+    assert!(
+        a_baseline_problems(&job).is_empty(),
+        "I-i FAIL 取 A 的判据形态不合格: {:?}",
+        a_baseline_problems(&job)
+    );
+    // 规范必须与产线同口径：只改产线不改规范，下次有人照规范重写就把修复抹掉。
+    assert!(
+        read("docs/RELEASE-STANDARD.md").contains("A 与本次 HEAD 是同一 commit"),
+        "I-i FAIL 规范里没写「A 与本次 HEAD 是同一 commit 要跳过」这条口径"
+    );
+    eprintln!("I-i PASS A 基线按候选指向的 commit 筛");
+}
+
+#[test]
+fn i_reverse_catches_old_a_baseline_forms() {
+    // 旧形态（2026-09-26 判红的那版）：只排除与 GITHUB_REF_NAME 同名的 tag，首条候选即选为 A。
+    // 分支 run 上 SELF 恒为空，于是与本次同一 commit 的新 Release 被当成 A。
+    let old = "  install-smoke:\n    steps:\n      - run: |\n          SELF=\"\"\n          [[ \"${GITHUB_REF}\" == refs/tags/v* ]] && SELF=\"${GITHUB_REF_NAME}\"\n          for t in $(gh release list --repo r --json tagName); do\n            [ \"$t\" = \"$SELF\" ] && continue\n            A_TAG=\"$t\"\n            break\n          done\n          gh release download \"$A_TAG\" --pattern '*.deb'\n";
+    let hits = a_baseline_problems(old);
+    assert!(
+        hits.iter().any(|s| s.contains("HEAD")),
+        "I-i 判据对「不比对 HEAD」的旧形态无反应（空转）: {:?}",
+        hits
+    );
+    // 比对写了，但写在赋值之后：首条已被选走，判据永远不会改变结果。
+    let too_late = "      - run: |\n          for t in $(gh release list --repo r); do A_TAG=\"$t\"; break; done\n          [ \"$(gh api repos/r/commits/$A_TAG --jq .sha)\" = \"$GITHUB_SHA\" ] && exit 1\n          gh release download \"$A_TAG\"\n";
+    assert!(
+        a_baseline_problems(too_late)
+            .iter()
+            .any(|s| s.contains("未经比对就被选为 A")),
+        "I-i 判据认不出「比对在赋值之后」的空转形态: {:?}",
+        a_baseline_problems(too_late)
+    );
+    // 第二处推导：两条腿各选各的 A，任何一条判据都只看得见自己那份。
+    let twice = "      - run: |\n          for t in $(gh release list --repo r); do [ \"$(gh api repos/r/commits/$t --jq .sha)\" = \"$GITHUB_SHA\" ] || { A_TAG=\"$t\"; break; }; done\n          gh release download \"$A_TAG\"\n      - run: gh release list --repo r\n";
+    assert!(
+        a_baseline_problems(twice)
+            .iter()
+            .any(|s| s.contains("实为 2 处")),
+        "I-i 计数判据认不出重复推导: {:?}",
+        a_baseline_problems(twice)
+    );
+    // 正向对照：新形态必须零违规（否则上面三条反向只是恰好都撞在同一条上）。
+    let good = "      - run: |\n          for t in $(gh release list --repo r); do\n            sha=$(gh api \"repos/r/commits/$t\" --jq .sha)\n            [ \"$sha\" = \"$GITHUB_SHA\" ] && continue\n            A_TAG=\"$t\"; break\n          done\n          gh release download \"$A_TAG\"\n";
+    assert!(a_baseline_problems(good).is_empty(), "I-i 正向夹具被判红: {:?}", a_baseline_problems(good));
 }

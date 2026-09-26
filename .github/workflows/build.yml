@@ -402,7 +402,7 @@ jobs:
   # 为什么必须独立成 job：上面所有冒烟跑的都是 ./target/debug 下的构建产物，
   #   它证明不了「用户 sudo apt install / 拖 .dmg / 静默装 .exe 之后能不能起来」。
   #   真机报障「进面板 127.0.0.1 拒绝连接」正是装机形态的问题，构建产物形态看不见。
-  # A/B 两个包：A = 上一个已发布版本（GitHub Release 上取），B = 本次构建产物；
+  # A/B 两个包：A = 上一个已发布版本（GitHub Release 上取，且内容必须与本次 HEAD 不同一份），B = 本次构建产物；
   #   先装 A 再覆盖装 B 就是用户的升级路径。判据细节在 ci/install-smoke*.sh|ps1 里。
   install-smoke:
     needs: [version, build]
@@ -435,17 +435,21 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/pkgs/a"
-          # tag 构建时 Release 已由 build job 建好，A 必须是**它之前**的那个版本，
-          # 否则 A 与 B 同源，升级路径就没被走过。
-          SELF=""
-          [[ "${GITHUB_REF}" == refs/tags/v* ]] && SELF="${GITHUB_REF_NAME}"
+          # A 必须是**与本次 HEAD 不同的一份内容**。同一 commit 建出的 Release 当 A，等于自己覆盖自己：
+          #   「覆盖后字节必须变」在版本未提升时本就不判（见 ci/install-smoke.sh），那条升级路径就
+          #   只剩形状；更要命的是它刚建出的那一刻资产往往还没传完，拿它当基线只会撞下载失败。
+          #   所以按候选指向的 commit 比对，而不是按 ref 名 —— tag 构建里「本次那份」也一并被排除，
+          #   无需再单独维护 SELF 这条并列判据。
+          SKIPPED=""
           A_TAG=""
           for t in $(gh release list --repo "$GITHUB_REPOSITORY" --limit 30 --json tagName -q '.[].tagName'); do
-            [ "$t" = "$SELF" ] && continue
+            sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/$t" --jq .sha 2>/dev/null || true)
+            if [ -z "$sha" ]; then SKIPPED="$SKIPPED ${t}(解析不到 commit)"; continue; fi
+            if [ "$sha" = "$GITHUB_SHA" ]; then SKIPPED="$SKIPPED ${t}(与本次同一 commit)"; continue; fi
             A_TAG="$t"
             break
           done
-          [ -n "$A_TAG" ] || { echo "::error::找不到可作 A 的已发布版本"; exit 1; }
+          [ -n "$A_TAG" ] || { echo "::error::找不到内容与本次（${GITHUB_SHA}）不同的已发布版本可作 A；跳过的候选:${SKIPPED:- 无}"; exit 1; }
           gh release download "$A_TAG" --repo "$GITHUB_REPOSITORY" --clobber \
             --pattern "${{ matrix.pkg_glob }}" --dir "$RUNNER_TEMP/pkgs/a"
           A_FILE=$(find "$RUNNER_TEMP/pkgs/a" -type f | head -1)
