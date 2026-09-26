@@ -2,7 +2,7 @@
 
 本文件记录桌面壳（`dsh-supervisor-gui`，公开仓 `lobbowen/dsh-supervisor-launcher`）的重要变更。
 
-## [未发布]
+## [1.2.10]（2026-09-26）
 
 ### 观测报告投放（P7）：壳把「本机实况」交给内核的环境表单
 
