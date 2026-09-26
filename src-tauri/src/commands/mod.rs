@@ -79,6 +79,9 @@ pub async fn node_status(app: tauri::AppHandle) -> serde_json::Value {
             crate::runtime_contract::write(&rt);
         }
     }
+    // 观测报告投放（P7）：与启动契约同一轮探测的两个出口 —— 那份给内核拿去 spawn，这份给内核的环境表单读。
+    //   频控与失败面都住在 shell_report 里（写不出去只记日志、不重试），命令层不再判断据。
+    crate::shell_report::publish(&out, &deps);
     o["probing"] = serde_json::json!(!out.finished);
     // 明确失败原因（到硬上限 / worker 异常）。前端据此立即给出可操作结论，
     // 而非等自己的预算耗尽后只报一句「超时」。

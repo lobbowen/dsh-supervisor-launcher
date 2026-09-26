@@ -817,3 +817,160 @@ fn g13_env_probe_records_have_single_owner() {
         );
     }
 }
+
+// ── G-14：观测报告（P7）投放侧 ──
+//
+// 缺陷面：内核的环境表单多了一维「桌面壳所见」，读的是 `<状态根>/supervisor/shell-report.json`。
+//   这一份由壳投，投错形态（改键名、丢 schema、把三态折成 bool）就等于对内核**整份不存在**，
+//   而面板只会说「壳还没报过」——排查方向被指到一台没装壳的机器上。
+// 更细的一根线：报告必须**投影**既有探针结论。壳里再跑一次 npm/再起一次子进程，就成了
+//   「面板用的探针」与「契约用的探针」之外的第三条路径（T-14/T-10 已经为这条栽过两次）。
+//
+// 锁定不变量（T-18）：
+//   形态：schema=1 握手、文件名、七个契约键、原子写（tmp + rename）
+//   纪律：不拼记录字段（形态在 Record::json）、不折叠三态、不自行采集
+//   接线：全仓有且只有一个投放点，且它就在 node_status 的同一轮探测出口
+// 失效模式：第二处 publish() 让同一轮探测投出两份（时刻与频控双双失控）；自拼字段让内核读成 null。
+fn g14_violations(files: &[(String, String)]) -> Vec<String> {
+    let mut v = Vec::new();
+    let code = |suffix: &str| -> String {
+        files
+            .iter()
+            .find(|(p, _)| p.ends_with(suffix))
+            .map(|(_, t)| code_only(t))
+            .unwrap_or_default()
+    };
+    let owner = code("src/shell_report.rs");
+    for needle in [
+        "pub const SCHEMA: u32 = 1",
+        "\"shell-report.json\"",
+        "\"writtenBy\"",
+        "\"node\"",
+        "\"npm\"",
+        "\"prefix\"",
+        "\"registry\"",
+        "\"records\"",
+        "\"at\"",
+        "with_extension(\"json.tmp\")",
+        "std::fs::rename(",
+    ] {
+        if !owner.contains(needle) {
+            v.push(format!("观测报告契约形态缺失 {}（内核按整份读不出处理）", needle));
+        }
+    }
+    if owner.contains("\"note\":") {
+        v.push("在 shell_report.rs 里拼探测记录字段（形态的唯一来源是 Record::json，拼一份就是第二份契约）".to_string());
+    }
+    for collapse in ["unwrap_or(false)", "unwrap_or(true)", "unwrap_or_default()"] {
+        if owner.contains(collapse) {
+            v.push(format!("三态被折叠成 bool（{}）：壳判不出必须原样投 null", collapse));
+        }
+    }
+    for own in ["std::process::Command", "probe_npm_usable(", "ureq::"] {
+        if owner.contains(own) {
+            v.push(format!("观测报告自行采集（{}）：采集的唯一所有者是 nodeprobe / domain::probes / mirror", own));
+        }
+    }
+    // 按**调用次数**计数，不按文件计数：同一文件里两处 publish() 同样会把同一轮探测投两份
+    //   （时刻与频控双双失控），按文件数判它永远等于 1 —— 那是一条认不出失败形态的判据。
+    let mut posts: Vec<String> = Vec::new();
+    for (p, text) in files {
+        if p.ends_with("src/shell_report.rs") {
+            continue;
+        }
+        for _ in 0..code_only(text).split("shell_report::publish(").count() - 1 {
+            posts.push(if p.ends_with("src/commands/mod.rs") { "commands".to_string() } else { p.clone() });
+        }
+    }
+    if posts.len() != 1 {
+        v.push(format!("观测报告应有且只有一个投放点（多处投放=同一轮探测投两份，频控与时刻双双失控），实为 {:?}", posts));
+    } else if posts[0] != "commands" {
+        v.push(format!("投放点必须就在 node_status 的探测出口（commands/mod.rs），实为 {}", posts[0]));
+    }
+    if !code("src/main.rs").contains("mod shell_report;") {
+        v.push("main.rs 未登记 shell_report 模块（文件进不了产线，是死代码）".to_string());
+    }
+    v
+}
+
+/// G-14：观测报告的形态、投影纪律与接线。
+#[test]
+fn g14_shell_report_probes_nothing_and_posts_once() {
+    let files: Vec<(String, String)> = walk("src")
+        .into_iter()
+        .map(|(p, text)| (p.display().to_string().replace('\\', "/"), text))
+        .collect();
+    let hits = g14_violations(&files);
+    assert!(hits.is_empty(), "G-14 失败：\n{}", hits.join("\n"));
+
+    // 前置：投影必须**真的**接在三个采集所有者上 —— 否则「不得自行采集」会退化成「一处都没有」。
+    let owner = files
+        .iter()
+        .find(|(p, _)| p.ends_with("src/shell_report.rs"))
+        .map(|(_, t)| t.clone())
+        .expect("G-14 前置失败：src/shell_report.rs 不存在");
+    for reuse in [
+        "crate::nodeprobe::Outcome",
+        "crate::domain::probes",
+        "crate::mirror::cached()",
+        ".json()",
+    ] {
+        assert!(
+            owner.contains(reuse),
+            "G-14 前置失败：shell_report.rs 未复用采集所有者 {}（判据将无的放矢）",
+            reuse
+        );
+    }
+}
+
+/// 反向夹具：旧形态必须被同一判据逐条认出，否则 G-14 只是装饰。
+#[test]
+fn g14_reverse_old_form_is_caught() {
+    let old = r#"
+fn report(npm_ok: Option<bool>) -> serde_json::Value {
+    let ok = npm_ok.unwrap_or(false);
+    std::process::Command::new("npm").spawn();
+    serde_json::json!({ "probe": "prefix", "note": "x", "value": ok })
+}
+"#;
+    let files = vec![
+        ("src/shell_report.rs".to_string(), old.to_string()),
+        (
+            "src/commands/mod.rs".to_string(),
+            "crate::shell_report::publish(&a, &b);\ncrate::shell_report::publish(&c, &d);\n".to_string(),
+        ),
+        ("src/main.rs".to_string(), "mod node;\n".to_string()),
+    ];
+    let hits = g14_violations(&files);
+    for want in [
+        "契约形态缺失",
+        "拼探测记录字段",
+        "三态被折叠",
+        "自行采集",
+        "只有一个投放点",
+        "未登记 shell_report 模块",
+    ] {
+        assert!(
+            hits.iter().any(|s| s.contains(want)),
+            "G-14 判据对旧形态的 {} 无反应（空转）：{:?}",
+            want,
+            hits
+        );
+    }
+
+    // 另一失效形态：次数对但位置错 —— 投放点挪到安装命令里（同一轮探测之外，时刻与载荷双双对不上）。
+    let misplaced = vec![
+        ("src/shell_report.rs".to_string(), String::new()),
+        (
+            "src/domain/install.rs".to_string(),
+            "crate::shell_report::publish(&a, &b);\n".to_string(),
+        ),
+        ("src/main.rs".to_string(), "mod shell_report;\n".to_string()),
+    ];
+    let mh = g14_violations(&misplaced);
+    assert!(
+        mh.iter().any(|s| s.contains("投放点必须就在")),
+        "G-14 判据认不出「唯一但位置错」的投放点（空转）：{:?}",
+        mh
+    );
+}

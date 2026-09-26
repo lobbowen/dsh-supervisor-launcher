@@ -23,6 +23,8 @@ mod node;
 mod runtime_contract;
 // 内核位置契约：内核**位置**的单一事实源（core.json）；安装成功后壳写，locate 先读。
 mod core_contract;
+// 环境观测报告（P7）：壳所见 Node/npm/镜像源/前缀的投放侧，内核读它做环境表单。
+mod shell_report;
 // 平台适配层：**全仓唯一的平台分支所在地**（门禁 G1）。
 // 服务定义与启停在同一对象（platform::service::ServiceControl），加平台不需要改两处不同层。
 /// 业务层（平台无关）：从 main.rs 拆出的可独立测试的模块。
